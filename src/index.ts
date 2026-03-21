@@ -1,4 +1,5 @@
 export { estimateTokens, createSessionId } from './core/tokens.js';
+export { estimateTokens as estimateTokensLocal } from './core/tokens.js';
 export { assessContext } from './core/monitor.js';
 export { compactTurns, commitCompaction, promoteToKnowledge } from './core/orchestrator.js';
 

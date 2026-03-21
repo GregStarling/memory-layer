@@ -1,5 +1,5 @@
 {
-  "name": "@nanoclaw/memory",
+  "name": "memory-layer",
   "version": "1.0.0",
   "description": "Backend-agnostic memory package with scoped conversation history, compaction policy, orchestration workflows, and a SQLite adapter.",
   "type": "module",

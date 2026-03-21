@@ -28,6 +28,7 @@ export function serializeStringArray(values: string[]): string {
   return JSON.stringify(values);
 }
 
+/** Identity — exists so all row types pass through a mapper consistently. */
 export function rowToTurn(row: Turn): Turn {
   return row;
 }
@@ -40,10 +41,12 @@ export function rowToWorkingMemory(row: WorkingMemoryRow): WorkingMemory {
   };
 }
 
+/** Identity — exists so all row types pass through a mapper consistently. */
 export function rowToKnowledgeMemory(row: KnowledgeMemory): KnowledgeMemory {
   return row;
 }
 
+/** Identity — exists so all row types pass through a mapper consistently. */
 export function rowToContextMonitor(row: ContextMonitor): ContextMonitor {
   return row;
 }

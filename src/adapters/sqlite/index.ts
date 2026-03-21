@@ -3,6 +3,7 @@ import path from 'path';
 
 import Database from 'better-sqlite3';
 
+import { scopeValues } from '../../contracts/identity.js';
 import type { StorageAdapter } from '../../contracts/storage.js';
 import type {
   CompactionLog,
@@ -70,16 +71,9 @@ export function createSQLiteAdapter(dbPath: string | ':memory:'): StorageAdapter
   }
 
   function getContextMonitor(scope: Parameters<StorageAdapter['getContextMonitor']>[0]): ContextMonitor | null {
-    const normalized = validateContextMonitorUpsert({
-      ...scope,
-      compaction_state: 'idle',
-      active_turn_count: 0,
-      active_token_estimate: 0,
-      compaction_score: 0,
-    });
     const row = db
       .prepare(`SELECT * FROM context_monitor WHERE ${SCOPE_WHERE}`)
-      .get(...Object.values(normalized)) as ContextMonitor | undefined;
+      .get(...scopeValues(scope)) as ContextMonitor | undefined;
     return row ? rowToContextMonitor(row) : null;
   }
 
@@ -120,20 +114,13 @@ export function createSQLiteAdapter(dbPath: string | ':memory:'): StorageAdapter
     getTurnById,
 
     getActiveTurns(scope): Turn[] {
-      const normalized = validateContextMonitorUpsert({
-        ...scope,
-        compaction_state: 'idle',
-        active_turn_count: 0,
-        active_token_estimate: 0,
-        compaction_score: 0,
-      });
       const rows = db
         .prepare(
           `SELECT * FROM turns
            WHERE ${SCOPE_WHERE} AND archived_at IS NULL
            ORDER BY id ASC`,
         )
-        .all(...Object.values(normalized)) as Turn[];
+        .all(...scopeValues(scope)) as Turn[];
       return rows.map(rowToTurn);
     },
 
@@ -197,13 +184,6 @@ export function createSQLiteAdapter(dbPath: string | ':memory:'): StorageAdapter
     },
 
     getActiveWorkingMemory(scope): WorkingMemory[] {
-      const normalized = validateContextMonitorUpsert({
-        ...scope,
-        compaction_state: 'idle',
-        active_turn_count: 0,
-        active_token_estimate: 0,
-        compaction_score: 0,
-      });
       const now = nowSeconds();
       const rows = db
         .prepare(
@@ -212,18 +192,11 @@ export function createSQLiteAdapter(dbPath: string | ':memory:'): StorageAdapter
              AND (expires_at IS NULL OR expires_at > ?)
            ORDER BY id DESC`,
         )
-        .all(...Object.values(normalized), now) as WorkingMemoryRow[];
+        .all(...scopeValues(scope), now) as WorkingMemoryRow[];
       return rows.map(rowToWorkingMemory);
     },
 
     getLatestWorkingMemory(scope): WorkingMemory | null {
-      const normalized = validateContextMonitorUpsert({
-        ...scope,
-        compaction_state: 'idle',
-        active_turn_count: 0,
-        active_token_estimate: 0,
-        compaction_score: 0,
-      });
       const now = nowSeconds();
       const row = db
         .prepare(
@@ -233,7 +206,7 @@ export function createSQLiteAdapter(dbPath: string | ':memory:'): StorageAdapter
            ORDER BY id DESC
            LIMIT 1`,
         )
-        .get(...Object.values(normalized), now) as WorkingMemoryRow | undefined;
+        .get(...scopeValues(scope), now) as WorkingMemoryRow | undefined;
       return row ? rowToWorkingMemory(row) : null;
     },
 
@@ -276,20 +249,13 @@ export function createSQLiteAdapter(dbPath: string | ':memory:'): StorageAdapter
     getKnowledgeMemoryById,
 
     getActiveKnowledgeMemory(scope): KnowledgeMemory[] {
-      const normalized = validateContextMonitorUpsert({
-        ...scope,
-        compaction_state: 'idle',
-        active_turn_count: 0,
-        active_token_estimate: 0,
-        compaction_score: 0,
-      });
       const rows = db
         .prepare(
           `SELECT * FROM knowledge_memory
            WHERE ${SCOPE_WHERE} AND superseded_by_id IS NULL
            ORDER BY last_accessed_at DESC`,
         )
-        .all(...Object.values(normalized)) as KnowledgeMemory[];
+        .all(...scopeValues(scope)) as KnowledgeMemory[];
       return rows.map(rowToKnowledgeMemory);
     },
 
@@ -375,13 +341,6 @@ export function createSQLiteAdapter(dbPath: string | ':memory:'): StorageAdapter
     getCompactionLogById,
 
     getRecentCompactionLogs(scope, limit = 10): CompactionLog[] {
-      const normalized = validateContextMonitorUpsert({
-        ...scope,
-        compaction_state: 'idle',
-        active_turn_count: 0,
-        active_token_estimate: 0,
-        compaction_score: 0,
-      });
       const rows = db
         .prepare(
           `SELECT * FROM compaction_log
@@ -389,7 +348,7 @@ export function createSQLiteAdapter(dbPath: string | ':memory:'): StorageAdapter
            ORDER BY id DESC
            LIMIT ?`,
         )
-        .all(...Object.values(normalized), limit) as CompactionLogRow[];
+        .all(...scopeValues(scope), limit) as CompactionLogRow[];
       return rows.map(rowToCompactionLog);
     },
 

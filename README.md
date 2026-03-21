@@ -1,4 +1,4 @@
-# @nanoclaw/memory
+# memory-layer
 
 Standalone memory package for AI systems that need scoped conversation history, compaction policy, and long-term memory. The public surface is backend-agnostic; SQLite is the first adapter, not the product itself.
 
@@ -38,7 +38,7 @@ import {
   compactTurns,
   createSessionId,
   createSQLiteAdapter,
-} from '@nanoclaw/memory';
+} from 'memory-layer';
 
 const adapter = createSQLiteAdapter('/path/to/memory.db');
 
