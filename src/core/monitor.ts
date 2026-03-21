@@ -1,21 +1,8 @@
 import type { MemoryScope, NormalizedMemoryScope } from '../contracts/identity.js';
 import { normalizeScope } from '../contracts/identity.js';
+import type { MonitorPolicy } from '../contracts/policy.js';
+import { DEFAULT_MONITOR_POLICY } from '../contracts/policy.js';
 import type { Turn, WorkingMemory } from '../contracts/types.js';
-
-const SOFT_TURN = 15;
-const HARD_TURN = 30;
-const SOFT_TOKEN = 3000;
-const HARD_TOKEN = 6000;
-const SOFT_SCORE = 4;
-const HARD_SCORE = 6;
-const POST_COMPACTION_SOFT = 12;
-const POST_COMPACTION_HARD = 8;
-const RECENT_WINDOW = 10;
-const TOOL_LOOK_BACK = 5;
-const HEAVY_SINGLE_TOKEN_SOFT = 600;
-const HEAVY_SINGLE_TOKEN_HARD = 1200;
-const HEAVY_CUMULATIVE_TOKENS = 2400;
-const INTRA_SESSION_GAP_SECONDS = 1800;
 
 export type CompactionAction = 'none' | 'soft' | 'hard';
 
@@ -120,8 +107,15 @@ const SUBJECT_CHANGE_PATTERNS = [
   /\bsomething (else|different)\b/i,
 ];
 
-function detectExplicitSubjectChange(turns: Turn[]): TopicDriftSignal {
-  const recent = turns.slice(-RECENT_WINDOW);
+function resolvePolicy(policy?: MonitorPolicy): Required<MonitorPolicy> {
+  return {
+    ...DEFAULT_MONITOR_POLICY,
+    ...policy,
+  };
+}
+
+function detectExplicitSubjectChange(turns: Turn[], recentWindow: number): TopicDriftSignal {
+  const recent = turns.slice(-recentWindow);
   for (const turn of recent) {
     if (turn.role !== 'user') continue;
     for (const pattern of SUBJECT_CHANGE_PATTERNS) {
@@ -146,6 +140,7 @@ function detectExplicitSubjectChange(turns: Turn[]): TopicDriftSignal {
 function detectEntityDiscontinuity(
   turns: Turn[],
   latestWorkingMemory?: WorkingMemory | null,
+  recentWindow = DEFAULT_MONITOR_POLICY.recentWindow,
 ): TopicDriftSignal {
   if (!latestWorkingMemory || latestWorkingMemory.key_entities.length === 0) {
     return {
@@ -157,7 +152,7 @@ function detectEntityDiscontinuity(
   }
 
   const recentContent = turns
-    .slice(-RECENT_WINDOW)
+    .slice(-recentWindow)
     .map((turn) => turn.content.toLowerCase())
     .join(' ');
 
@@ -183,8 +178,8 @@ const TASK_RESET_PATTERNS = [
   /\bnever\s?mind\b/i,
 ];
 
-function detectUnpromptedTaskReset(turns: Turn[]): TopicDriftSignal {
-  const recent = turns.slice(-RECENT_WINDOW);
+function detectUnpromptedTaskReset(turns: Turn[], recentWindow: number): TopicDriftSignal {
+  const recent = turns.slice(-recentWindow);
   for (const turn of recent) {
     if (turn.role !== 'user') continue;
     for (const pattern of TASK_RESET_PATTERNS) {
@@ -206,7 +201,10 @@ function detectUnpromptedTaskReset(turns: Turn[]): TopicDriftSignal {
   };
 }
 
-function detectLongIntraSessionGap(turns: Turn[]): TopicDriftSignal {
+function detectLongIntraSessionGap(
+  turns: Turn[],
+  intraSessionGapSeconds: number,
+): TopicDriftSignal {
   if (turns.length < 2) {
     return {
       type: 'long_intra_session_gap',
@@ -218,7 +216,7 @@ function detectLongIntraSessionGap(turns: Turn[]): TopicDriftSignal {
 
   for (let i = turns.length - 1; i > 0; i -= 1) {
     const gap = turns[i].created_at - turns[i - 1].created_at;
-    if (gap >= INTRA_SESSION_GAP_SECONDS) {
+    if (gap >= intraSessionGapSeconds) {
       return {
         type: 'long_intra_session_gap',
         detected: true,
@@ -321,19 +319,25 @@ function detectExplicitClose(turns: Turn[]): TaskCompletionSignal {
   };
 }
 
-function detectToolOutputSignals(turns: Turn[]): HeavyToolOutputSignal[] {
+function detectToolOutputSignals(
+  turns: Turn[],
+  toolLookBack: number,
+  heavySingleTokenSoft: number,
+  heavySingleTokenHard: number,
+  heavyCumulativeTokens: number,
+): HeavyToolOutputSignal[] {
   const signals: HeavyToolOutputSignal[] = [];
-  const window = turns.slice(-TOOL_LOOK_BACK);
+  const window = turns.slice(-toolLookBack);
 
   for (const turn of window) {
-    if (turn.token_estimate >= HEAVY_SINGLE_TOKEN_HARD) {
+    if (turn.token_estimate >= heavySingleTokenHard) {
       signals.push({
         type: 'single_turn_hard_spike',
         detected: true,
         turn_id: turn.id,
         token_count: turn.token_estimate,
       });
-    } else if (turn.token_estimate >= HEAVY_SINGLE_TOKEN_SOFT) {
+    } else if (turn.token_estimate >= heavySingleTokenSoft) {
       signals.push({
         type: 'single_turn_spike',
         detected: true,
@@ -344,7 +348,7 @@ function detectToolOutputSignals(turns: Turn[]): HeavyToolOutputSignal[] {
   }
 
   const cumulativeTokens = window.reduce((acc, turn) => acc + turn.token_estimate, 0);
-  if (cumulativeTokens >= HEAVY_CUMULATIVE_TOKENS) {
+  if (cumulativeTokens >= heavyCumulativeTokens) {
     signals.push({
       type: 'cumulative_surge',
       detected: true,
@@ -362,22 +366,23 @@ function computeScore(
   topicDriftDetected: boolean,
   taskCompletionDetected: boolean,
   turns: Turn[],
+  policy: Required<MonitorPolicy>,
 ): ScoreBreakdown {
-  const turnScore = activeTurnCount >= HARD_TURN ? 4 : 2;
-  const tokenScore = activeTokenEstimate >= HARD_TOKEN ? 4 : 2;
+  const turnScore = activeTurnCount >= policy.hardTurnThreshold ? 4 : 2;
+  const tokenScore = activeTokenEstimate >= policy.hardTokenThreshold ? 4 : 2;
   const driftScore = topicDriftDetected ? 2 : 0;
   const completionScore = taskCompletionDetected ? 1 : 0;
 
-  const window = turns.slice(-TOOL_LOOK_BACK);
+  const window = turns.slice(-policy.toolLookBack);
   const maxTurnTokens = window.reduce((max, turn) => Math.max(max, turn.token_estimate), 0);
   const sumFiveTokens = window.reduce((acc, turn) => acc + turn.token_estimate, 0);
 
   let toolScore = 0;
-  if (maxTurnTokens >= HEAVY_SINGLE_TOKEN_HARD) {
+  if (maxTurnTokens >= policy.heavySingleTokenHard) {
     toolScore = 3;
   } else if (
-    maxTurnTokens >= HEAVY_SINGLE_TOKEN_SOFT ||
-    sumFiveTokens >= HEAVY_CUMULATIVE_TOKENS
+    maxTurnTokens >= policy.heavySingleTokenSoft ||
+    sumFiveTokens >= policy.heavyCumulativeTokens
   ) {
     toolScore = 2;
   }
@@ -407,6 +412,7 @@ function buildRecommendation(
   score: ScoreBreakdown,
   belowFloor: boolean,
   floorReason: string | null,
+  policy: Required<MonitorPolicy>,
 ): CompactionRecommendation {
   if (belowFloor) {
     return {
@@ -417,20 +423,20 @@ function buildRecommendation(
       reason: `No compaction: ${floorReason}`,
     };
   }
-  if (score.total >= HARD_SCORE) {
+  if (score.total >= policy.hardScoreThreshold) {
     return {
       action: 'hard',
       score: score.total,
-      post_compaction_target_turns: POST_COMPACTION_HARD,
+      post_compaction_target_turns: policy.hardRetainTurns,
       defer_to_idle: false,
       reason: buildReason('Hard trigger', score),
     };
   }
-  if (score.total >= SOFT_SCORE) {
+  if (score.total >= policy.softScoreThreshold) {
     return {
       action: 'soft',
       score: score.total,
-      post_compaction_target_turns: POST_COMPACTION_SOFT,
+      post_compaction_target_turns: policy.softRetainTurns,
       defer_to_idle: true,
       reason: buildReason('Soft trigger', score),
     };
@@ -444,23 +450,29 @@ function buildRecommendation(
   };
 }
 
-export function assessContext(input: MonitorInput): ContextHealthReport {
+export function assessContext(
+  input: MonitorInput,
+  policyOverrides?: MonitorPolicy,
+): ContextHealthReport {
+  const policy = resolvePolicy(policyOverrides);
   const scope = normalizeScope(input.scope);
   const now = input.now ?? Math.floor(Date.now() / 1000);
   const turns = input.active_turns;
   const activeTurnCount = turns.length;
-  const recentTurns = turns.slice(-RECENT_WINDOW);
+  const recentTurns = turns.slice(-policy.recentWindow);
   const activeTokenEstimate = turns.reduce((acc, turn) => acc + turn.token_estimate, 0);
   const recentTokenEstimate = recentTurns.reduce((acc, turn) => acc + turn.token_estimate, 0);
   const maxSingleTurnTokens = turns.reduce((max, turn) => Math.max(max, turn.token_estimate), 0);
   const avgTokensPerTurn = activeTurnCount > 0 ? Math.round(activeTokenEstimate / activeTurnCount) : 0;
-  const heavyTurns = turns.filter((turn) => turn.token_estimate >= HEAVY_SINGLE_TOKEN_SOFT);
+  const heavyTurns = turns.filter(
+    (turn) => turn.token_estimate >= policy.heavySingleTokenSoft,
+  );
 
   const driftSignals: TopicDriftSignal[] = [
-    detectExplicitSubjectChange(turns),
-    detectEntityDiscontinuity(turns, input.latest_working_memory),
-    detectUnpromptedTaskReset(turns),
-    detectLongIntraSessionGap(turns),
+    detectExplicitSubjectChange(turns, policy.recentWindow),
+    detectEntityDiscontinuity(turns, input.latest_working_memory, policy.recentWindow),
+    detectUnpromptedTaskReset(turns, policy.recentWindow),
+    detectLongIntraSessionGap(turns, policy.intraSessionGapSeconds),
   ];
   const topicDriftSignalCount = driftSignals.filter((signal) => signal.detected).length;
   const topicDriftDetected = topicDriftSignalCount >= 2;
@@ -472,17 +484,23 @@ export function assessContext(input: MonitorInput): ContextHealthReport {
   ];
   const taskCompletionDetected = completionSignals.some((signal) => signal.detected);
 
-  const toolSignals = detectToolOutputSignals(turns);
+  const toolSignals = detectToolOutputSignals(
+    turns,
+    policy.toolLookBack,
+    policy.heavySingleTokenSoft,
+    policy.heavySingleTokenHard,
+    policy.heavyCumulativeTokens,
+  );
   const toolOutputDetected = toolSignals.length > 0;
 
   let belowFloor = false;
   let floorReason: string | null = null;
-  if (activeTurnCount < SOFT_TURN) {
+  if (activeTurnCount < policy.floorTurns) {
     belowFloor = true;
-    floorReason = `Turn count (${activeTurnCount}) < floor (${SOFT_TURN})`;
-  } else if (activeTokenEstimate < SOFT_TOKEN) {
+    floorReason = `Turn count (${activeTurnCount}) < floor (${policy.floorTurns})`;
+  } else if (activeTokenEstimate < policy.floorTokens) {
     belowFloor = true;
-    floorReason = `Token estimate (${activeTokenEstimate}) < floor (${SOFT_TOKEN})`;
+    floorReason = `Token estimate (${activeTokenEstimate}) < floor (${policy.floorTokens})`;
   }
 
   const scoreBreakdown = computeScore(
@@ -491,8 +509,14 @@ export function assessContext(input: MonitorInput): ContextHealthReport {
     topicDriftDetected,
     taskCompletionDetected,
     turns,
+    policy,
   );
-  const recommendation = buildRecommendation(scoreBreakdown, belowFloor, floorReason);
+  const recommendation = buildRecommendation(
+    scoreBreakdown,
+    belowFloor,
+    floorReason,
+    policy,
+  );
 
   return {
     scope,

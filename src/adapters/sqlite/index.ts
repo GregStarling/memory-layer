@@ -3,6 +3,7 @@ import path from 'path';
 
 import Database from 'better-sqlite3';
 
+import type { EmbeddingAdapter } from '../../contracts/embedding.js';
 import { scopeValues } from '../../contracts/identity.js';
 import type { StorageAdapter } from '../../contracts/storage.js';
 import type {
@@ -13,10 +14,13 @@ import type {
   NewKnowledgeMemory,
   NewTurn,
   NewWorkingMemory,
+  SearchOptions,
+  SearchResult,
   Turn,
   WorkingMemory,
 } from '../../contracts/types.js';
 import { estimateTokens } from '../../core/tokens.js';
+import { emitMemoryEvent, type TelemetryOptions } from '../../core/telemetry.js';
 import {
   assertArchiveInput,
   nowSeconds,
@@ -36,11 +40,45 @@ import {
   type CompactionLogRow,
   type WorkingMemoryRow,
 } from './mappers.js';
+import { createSQLiteEmbeddingAdapter } from './embeddings.js';
 import { createSQLiteSchema } from './schema.js';
 
 const SCOPE_WHERE = 'tenant_id = ? AND system_id = ? AND workspace_id = ? AND scope_id = ?';
 
-export function createSQLiteAdapter(dbPath: string | ':memory:'): StorageAdapter {
+type RankedTurnRow = Turn & { raw_rank: number | null };
+type RankedKnowledgeRow = KnowledgeMemory & { raw_rank: number | null };
+
+function normalizeRank(rawRank: number | null): number {
+  const safe = Number.isFinite(rawRank) ? Math.max(0, Number(rawRank)) : 0;
+  return 1 / (1 + safe);
+}
+
+function resolveSearchOptions(options?: SearchOptions): Required<SearchOptions> {
+  return {
+    limit: options?.limit ?? 10,
+    activeOnly: options?.activeOnly ?? true,
+  };
+}
+
+export function createSQLiteAdapter(
+  dbPath: string | ':memory:',
+  telemetry?: TelemetryOptions,
+): StorageAdapter {
+  const db = openSQLiteDatabase(dbPath);
+  return createAdapterFromDatabase(db, telemetry);
+}
+
+export function createSQLiteAdapterWithEmbeddings(
+  dbPath: string | ':memory:',
+  telemetry?: TelemetryOptions,
+): StorageAdapter & { embeddings: EmbeddingAdapter } {
+  const db = openSQLiteDatabase(dbPath);
+  const adapter = createAdapterFromDatabase(db, telemetry);
+  const embeddings = createSQLiteEmbeddingAdapter(db, telemetry?.logger);
+  return Object.assign(adapter, { embeddings });
+}
+
+function openSQLiteDatabase(dbPath: string | ':memory:'): Database.Database {
   if (dbPath !== ':memory:') {
     const dir = path.dirname(dbPath);
     if (!fs.existsSync(dir)) {
@@ -50,6 +88,13 @@ export function createSQLiteAdapter(dbPath: string | ':memory:'): StorageAdapter
 
   const db = new Database(dbPath);
   createSQLiteSchema(db);
+  return db;
+}
+
+function createAdapterFromDatabase(
+  db: Database.Database,
+  telemetry?: TelemetryOptions,
+): StorageAdapter {
 
   function getTurnById(id: number): Turn | null {
     const row = db.prepare('SELECT * FROM turns WHERE id = ?').get(id) as Turn | undefined;
@@ -122,6 +167,43 @@ export function createSQLiteAdapter(dbPath: string | ':memory:'): StorageAdapter
         )
         .all(...scopeValues(scope)) as Turn[];
       return rows.map(rowToTurn);
+    },
+
+    searchTurns(scope, query, options): SearchResult<Turn>[] {
+      const startedAt = Date.now();
+      const resolved = resolveSearchOptions(options);
+      try {
+        const rows = db
+          .prepare(
+            `SELECT turns.*, bm25(turns_fts) AS raw_rank
+             FROM turns_fts
+             JOIN turns ON turns_fts.rowid = turns.id
+             WHERE turns_fts MATCH ?
+               AND ${SCOPE_WHERE}
+               AND (? = 0 OR turns.archived_at IS NULL)
+             ORDER BY bm25(turns_fts)
+             LIMIT ?`,
+          )
+          .all(query, ...scopeValues(scope), resolved.activeOnly ? 1 : 0, resolved.limit) as RankedTurnRow[];
+        const results = rows.map((row) => ({
+          item: rowToTurn(row),
+          rank: normalizeRank(row.raw_rank),
+        }));
+        emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
+          entity: 'turns',
+          query,
+          resultCount: results.length,
+        });
+        return results;
+      } catch {
+        emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
+          entity: 'turns',
+          query,
+          resultCount: 0,
+          invalidQuery: true,
+        });
+        return [];
+      }
     },
 
     archiveTurn(id: number, archivedAt: number, compactionLogId: number): void {
@@ -257,6 +339,43 @@ export function createSQLiteAdapter(dbPath: string | ':memory:'): StorageAdapter
         )
         .all(...scopeValues(scope)) as KnowledgeMemory[];
       return rows.map(rowToKnowledgeMemory);
+    },
+
+    searchKnowledge(scope, query, options): SearchResult<KnowledgeMemory>[] {
+      const startedAt = Date.now();
+      const resolved = resolveSearchOptions(options);
+      try {
+        const rows = db
+          .prepare(
+            `SELECT knowledge_memory.*, bm25(knowledge_memory_fts) AS raw_rank
+             FROM knowledge_memory_fts
+             JOIN knowledge_memory ON knowledge_memory_fts.rowid = knowledge_memory.id
+             WHERE knowledge_memory_fts MATCH ?
+               AND ${SCOPE_WHERE}
+               AND (? = 0 OR knowledge_memory.superseded_by_id IS NULL)
+             ORDER BY bm25(knowledge_memory_fts)
+             LIMIT ?`,
+          )
+          .all(query, ...scopeValues(scope), resolved.activeOnly ? 1 : 0, resolved.limit) as RankedKnowledgeRow[];
+        const results = rows.map((row) => ({
+          item: rowToKnowledgeMemory(row),
+          rank: normalizeRank(row.raw_rank),
+        }));
+        emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
+          entity: 'knowledge',
+          query,
+          resultCount: results.length,
+        });
+        return results;
+      } catch {
+        emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
+          entity: 'knowledge',
+          query,
+          resultCount: 0,
+          invalidQuery: true,
+        });
+        return [];
+      }
     },
 
     touchKnowledgeMemory(id: number): void {

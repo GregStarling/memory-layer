@@ -1,71 +1,147 @@
 # memory-layer
 
-Standalone memory package for AI systems that need scoped conversation history, compaction policy, and long-term memory. The public surface is backend-agnostic; SQLite is the first adapter, not the product itself.
+`memory-layer` is a standalone memory package for AI assistants, agents, IDE copilots, and multi-system workflows. It gives a host system durable scoped memory, retrieval, compaction, knowledge growth, observability, and a recommended high-level facade while keeping low-level contracts public.
 
-## Architecture
+SQLite is the first adapter, not the whole design.
 
-- **Public API**: package entrypoint with contracts, core workflows, and adapters
-- **Domain Core**: token estimation, compaction policy, and workflow orchestration
-- **Storage Contracts**: backend-neutral adapter interface
-- **SQLite Adapter**: first persistence backend, implemented with `better-sqlite3`
+## What It Provides
 
-### Memory Model
+- Scoped turns, working memory, and long-term knowledge
+- Lexical retrieval plus optional semantic search
+- Prompt-ready context assembly with ranking and token budgeting
+- Compaction and summarization workflows
+- Automated knowledge extraction and deduplication
+- Policy controls for monitor, extraction, and context behavior
+- Observability hooks and structured events
+- A `createMemoryManager()` quick-start path for low-friction adoption
 
-- **Turns**: raw scoped conversation history
-- **Working Memory**: summaries created by compaction, with optional expiry
-- **Knowledge Memory**: promoted long-term facts with supersession and access tracking
-- **Context Monitor**: compaction health snapshots for a scope
-- **Compaction Log**: audit trail of each compaction event
+## Installation
 
-## Identity Model
+```bash
+npm install memory-layer
+```
 
-All data is scoped by a normalized `MemoryScope`:
+Optional AI SDKs:
+
+```bash
+npm install @anthropic-ai/sdk
+# or
+npm install openai
+```
+
+## 5-Minute Quick Start
+
+```typescript
+import {
+  createMemoryManager,
+  createSQLiteAdapterWithEmbeddings,
+  createRegexExtractor,
+  createSessionId,
+} from 'memory-layer';
+
+const adapter = createSQLiteAdapterWithEmbeddings('./data/memory.db');
+
+const scope = {
+  tenant_id: 'acme',
+  system_id: 'ai-ide',
+  workspace_id: 'repo-memory',
+  scope_id: 'thread-123',
+};
+
+const manager = createMemoryManager({
+  adapter,
+  scope,
+  sessionId: createSessionId(scope),
+  summarizer: async (turns) => ({
+    summary: `Summarized ${turns.length} turns`,
+    key_entities: ['memory-layer'],
+    topic_tags: ['coding'],
+  }),
+  extractor: createRegexExtractor(),
+});
+
+await manager.processTurn('user', 'I prefer SQLite for local-first tools.');
+await manager.processTurn('assistant', 'Understood. I will keep the memory local.');
+
+const context = manager.getContext('SQLite local-first');
+console.log(context.relevantKnowledge);
+```
+
+## Core Concepts
+
+### MemoryScope
+
+Every record is scoped by:
 
 ```typescript
 interface MemoryScope {
   tenant_id: string;
   system_id: string;
-  workspace_id?: string; // normalized to 'default'
+  workspace_id?: string; // defaults to 'default'
   scope_id: string;
 }
 ```
 
-## Usage
+Suggested mapping:
+
+- `tenant_id`: organization or product boundary
+- `system_id`: calling app, agent, or assistant
+- `workspace_id`: optional shared memory pool inside that system
+- `scope_id`: thread, room, task, or conversation id
+
+### Memory Types
+
+- `Turn`: raw conversation history
+- `WorkingMemory`: compacted summaries for active context
+- `KnowledgeMemory`: durable facts with access tracking and supersession
+- `ContextMonitor`: compaction-health snapshot for a scope
+- `CompactionLog`: audit trail for each compaction
+
+## Recommended API
+
+Use `createMemoryManager()` when you want a near-drop-in integration:
+
+- `processTurn(role, content, actor?)`
+- `getContext(relevanceQuery?)`
+- `search(query, options?)`
+- `forceCompact()`
+- `learnFact(fact, factType, confidence?)`
+- `close()`
+
+## Low-Level API
+
+Use the lower-level surface when you want more control:
 
 ```typescript
 import {
   assessContext,
+  buildMemoryContext,
   compactTurns,
-  createSessionId,
   createSQLiteAdapter,
+  createSessionId,
 } from 'memory-layer';
 
-const adapter = createSQLiteAdapter('/path/to/memory.db');
-
-const scope = {
-  tenant_id: 'acme',
-  system_id: 'assistant',
-  scope_id: 'thread-123',
-};
-
+const adapter = createSQLiteAdapter('./memory.db');
+const scope = { tenant_id: 'acme', system_id: 'agent', scope_id: 'run-42' };
 const sessionId = createSessionId(scope);
 
 adapter.insertTurn({
   ...scope,
   session_id: sessionId,
-  actor: 'user-42',
+  actor: 'user-1',
   role: 'user',
   content: 'Build me a memory system.',
 });
 
 const turns = adapter.getActiveTurns(scope);
-const latestWorkingMemory = adapter.getLatestWorkingMemory(scope);
-const report = assessContext({
-  scope,
-  session_id: sessionId,
-  active_turns: turns,
-  latest_working_memory: latestWorkingMemory,
-});
+const report = assessContext(
+  {
+    scope,
+    session_id: sessionId,
+    active_turns: turns,
+    latest_working_memory: adapter.getLatestWorkingMemory(scope),
+  },
+);
 
 if (report.recommendation.action !== 'none') {
   await compactTurns(
@@ -82,43 +158,107 @@ if (report.recommendation.action !== 'none') {
     report.recommendation.post_compaction_target_turns,
   );
 }
+
+const promptReady = buildMemoryContext(adapter, scope, {
+  relevanceQuery: 'memory architecture',
+  tokenBudget: 3000,
+});
 ```
 
-## Compaction Semantics
+## Retrieval
 
-The package owns the safe persistence order for compaction:
+Lexical retrieval is exposed directly on the adapter:
+
+```typescript
+const turns = adapter.searchTurns(scope, 'postgres');
+const facts = adapter.searchKnowledge(scope, 'local-first sqlite');
+```
+
+`buildMemoryContext()` combines:
+
+- active turns
+- latest working memory
+- recent summaries
+- ranked knowledge memory
+
+When you pass an embedding adapter and query vector, semantic similarity is blended with lexical, recency, and importance signals.
+
+## Knowledge Growth
+
+The package supports both manual and automated durable-memory growth:
+
+- `promoteToKnowledge()` for explicit promotion from a working-memory record
+- `extractKnowledge()` for post-compaction extraction
+- `createRegexExtractor()` for zero-dependency extraction
+- optional Claude/OpenAI extractor helpers for LLM-powered extraction
+
+Compaction write order is atomic:
 
 ```text
 insertWorkingMemory -> insertCompactionLog -> archiveTurn x N
 ```
 
-`compactTurns()` performs summarization outside the transaction, then persists the commit atomically through the adapter transaction boundary.
+## Built-In AI Helpers
 
-## Scoring
+Prompt helpers:
 
-The compaction monitor keeps the existing multi-signal policy:
+- `SUMMARIZATION_SYSTEM_PROMPT`
+- `EXTRACTION_SYSTEM_PROMPT`
+- `formatTurnsForSummarization()`
+- `parseSummarizerResponse()`
+- `parseExtractionResponse()`
 
-- Turn count: soft at `>= 15`, hard at `>= 30`
-- Token estimate: soft at `>= 3000`, hard at `>= 6000`
-- Topic drift: `+2` when at least 2 drift signals fire
-- Task completion: `+1` when any completion signal fires
-- Heavy output: `+3` for a hard spike, `+2` for a soft spike or cumulative surge
+Optional summarizers/extractors:
 
-Recommendations:
+- `createClaudeSummarizer()`
+- `createOpenAISummarizer()`
+- `createClaudeExtractor()`
+- `createOpenAIExtractor()`
 
-- `soft`: score `>= 4`, retain 12 turns, defer to idle
-- `hard`: score `>= 6`, retain 8 turns, compact immediately
-- `none`: below threshold or below floor
+These use dynamic imports, so the package works without those SDKs installed.
 
-Floor rule:
+## Observability
 
-- no compaction if active turns `< 15`
-- no compaction if active token estimate `< 3000`
+Most workflows accept:
 
-## Testing
+- `logger`
+- `onEvent`
+
+Structured events are emitted for:
+
+- search
+- compaction
+- promotion
+- extraction
+- context assembly
+- manager workflow actions
+
+## Native SQLite Notes
+
+- The SQLite adapter uses `better-sqlite3`
+- WAL mode and foreign keys are enabled automatically
+- On some systems you may need normal native build prerequisites for `better-sqlite3`
+- `createSQLiteAdapter(':memory:')` is useful for tests and ephemeral runs
+
+## Examples
+
+- `examples/chat-assistant.ts`
+- `examples/autonomous-agent.ts`
+
+## Validation And Release Checks
 
 ```bash
-npm install
-npm test
 npm run lint
+npm test
+npm run build
+npm run pack:check
+```
+
+## Benchmarks And Evals
+
+```bash
+npm run benchmark:search
+npm run benchmark:semantic
+npm run benchmark:compaction
+npm run eval:retrieval
 ```

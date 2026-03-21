@@ -9,16 +9,50 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./summarizers/claude": {
+      "import": "./dist/summarizers/claude.js",
+      "types": "./dist/summarizers/claude.d.ts"
+    },
+    "./summarizers/openai": {
+      "import": "./dist/summarizers/openai.js",
+      "types": "./dist/summarizers/openai.d.ts"
+    },
+    "./summarizers/prompts": {
+      "import": "./dist/summarizers/prompts.js",
+      "types": "./dist/summarizers/prompts.d.ts"
+    },
+    "./summarizers/extractor": {
+      "import": "./dist/summarizers/extractor.js",
+      "types": "./dist/summarizers/extractor.d.ts"
     }
   },
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "benchmark:search": "npm run build && node benchmarks/search-benchmark.mjs",
+    "benchmark:semantic": "npm run build && node benchmarks/semantic-benchmark.mjs",
+    "benchmark:compaction": "npm run build && node benchmarks/compaction-benchmark.mjs",
+    "eval:retrieval": "npm run build && node evals/retrieval-quality.mjs",
+    "pack:check": "npm pack --dry-run",
+    "prepublishOnly": "npm run lint && npm test && npm run build && npm run pack:check"
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0"
+  },
+  "peerDependencies": {
+    "@anthropic-ai/sdk": "*",
+    "openai": "*"
+  },
+  "peerDependenciesMeta": {
+    "@anthropic-ai/sdk": {
+      "optional": true
+    },
+    "openai": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.8",
@@ -28,7 +62,21 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "!dist/__tests__",
+    "!dist/__tests__/**",
+    "README.md",
+    "LICENSE"
   ],
-  "license": "UNLICENSED"
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "ai",
+    "memory",
+    "sqlite",
+    "retrieval",
+    "rag",
+    "agent"
+  ]
 }

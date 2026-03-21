@@ -165,3 +165,13 @@ export interface NewCompactionLog extends MemoryScope {
   error?: string | null;
   created_at?: number;
 }
+
+export interface SearchOptions {
+  limit?: number;
+  activeOnly?: boolean;
+}
+
+export interface SearchResult<T> {
+  item: T;
+  rank: number;
+}

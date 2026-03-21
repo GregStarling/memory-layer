@@ -1,5 +1,8 @@
 import type { MemoryScope } from '../contracts/identity.js';
 import { normalizeScope } from '../contracts/identity.js';
+import type { EventHook, Logger } from '../contracts/observability.js';
+import type { ExtractionPolicy } from '../contracts/policy.js';
+import { DEFAULT_EXTRACTION_POLICY } from '../contracts/policy.js';
 import type { StorageAdapter } from '../contracts/storage.js';
 import type {
   CompactionTrigger,
@@ -13,11 +16,20 @@ import {
   assertCompactionTrigger,
   assertFactConfidence,
   assertFactType,
+  assertFactSource,
+  assertFactType as assertExtractedFactType,
   assertNonEmpty,
   assertStringArray,
   assertMaxEntries,
   nowSeconds,
 } from './validation.js';
+import {
+  getContradictionKey,
+  normalizeFactText,
+  type ExtractedFact,
+  type Extractor,
+} from './extractor.js';
+import { emitMemoryEvent } from './telemetry.js';
 
 export interface CompactionResult {
   workingMemory: WorkingMemory;
@@ -32,6 +44,20 @@ export interface SummarizerOutput {
 }
 
 export type Summarizer = (turns: Turn[]) => Promise<SummarizerOutput>;
+
+interface WorkflowTelemetry {
+  logger?: Logger;
+  onEvent?: EventHook;
+}
+
+function resolveExtractionPolicy(
+  policy?: ExtractionPolicy,
+): Required<ExtractionPolicy> {
+  return {
+    ...DEFAULT_EXTRACTION_POLICY,
+    ...policy,
+  };
+}
 
 function sortTurnsAscending(turns: Turn[]): Turn[] {
   return [...turns].sort((a, b) => a.id - b.id);
@@ -70,6 +96,8 @@ export function commitCompaction(
     trigger: CompactionTrigger;
     durationMs: number;
     modelCallMade: boolean;
+    logger?: Logger;
+    onEvent?: EventHook;
   },
 ): CompactionResult {
   const normalizedScope = normalizeScope(input.scope);
@@ -126,11 +154,22 @@ export function commitCompaction(
       adapter.archiveTurn(turn.id, archivedAt, compactionLog.id);
     }
 
-    return {
+    const result = {
       workingMemory,
       compactionLog,
       archivedTurnIds: turnsToArchive.map((turn) => turn.id),
     };
+
+    emitMemoryEvent('compaction', normalizedScope, input, input.durationMs, {
+      trigger: input.trigger,
+      archivedTurnCount: turnsToArchive.length,
+      activeTurnCountBefore: input.activeTurnCountBefore,
+      activeTurnCountAfter: input.activeTurnCountAfter,
+      workingMemoryId: workingMemory.id,
+      compactionLogId: compactionLog.id,
+    });
+
+    return result;
   });
 }
 
@@ -142,6 +181,7 @@ export async function compactTurns(
   summarize: Summarizer,
   trigger: CompactionTrigger,
   retainedTurnCount: number,
+  telemetry?: WorkflowTelemetry,
 ): Promise<CompactionResult> {
   assertCompactionTrigger(trigger, 'trigger');
   if (!Number.isInteger(retainedTurnCount) || retainedTurnCount < 0) {
@@ -173,6 +213,7 @@ export async function compactTurns(
     trigger,
     durationMs,
     modelCallMade: true,
+    ...telemetry,
   });
 }
 
@@ -184,6 +225,8 @@ export function promoteToKnowledge(
     fact: string;
     factType: FactType;
     confidence: FactConfidence;
+    logger?: Logger;
+    onEvent?: EventHook;
   },
 ): KnowledgeMemory {
   assertNonEmpty(input.fact, 'fact');
@@ -216,6 +259,106 @@ export function promoteToKnowledge(
       source_working_memory_id: workingMemoryId,
     });
     adapter.markWorkingMemoryPromoted(workingMemoryId, knowledgeMemory.id);
+    emitMemoryEvent('promotion', normalizedScope, input, 0, {
+      workingMemoryId,
+      knowledgeMemoryId: knowledgeMemory.id,
+      factType: input.factType,
+    });
     return knowledgeMemory;
   });
+}
+
+export async function extractKnowledge(
+  adapter: StorageAdapter,
+  workingMemoryId: number,
+  scope: MemoryScope,
+  extractor: Extractor,
+  options?: {
+    logger?: Logger;
+    onEvent?: EventHook;
+    policy?: ExtractionPolicy;
+  },
+): Promise<KnowledgeMemory[]> {
+  const startedAt = Date.now();
+  const normalizedScope = normalizeScope(scope);
+  const policy = resolveExtractionPolicy(options?.policy);
+  const workingMemory = adapter.getWorkingMemoryById(workingMemoryId);
+  if (!workingMemory) {
+    throw new Error(`Memory validation: working memory ${workingMemoryId} was not found`);
+  }
+  if (
+    workingMemory.tenant_id !== normalizedScope.tenant_id ||
+    workingMemory.system_id !== normalizedScope.system_id ||
+    workingMemory.workspace_id !== normalizedScope.workspace_id ||
+    workingMemory.scope_id !== normalizedScope.scope_id
+  ) {
+    throw new Error(
+      `Memory validation: working memory ${workingMemoryId} does not belong to the requested scope`,
+    );
+  }
+
+  const extracted = (await extractor(
+    workingMemory.summary,
+    workingMemory.key_entities,
+    workingMemory.topic_tags,
+  )).slice(0, policy.maxFactsPerExtraction);
+
+  const activeKnowledge = adapter.getActiveKnowledgeMemory(normalizedScope);
+  const duplicateLookup = new Map(
+    activeKnowledge.map((fact) => [normalizeFactText(fact.fact), fact]),
+  );
+  const contradictionLookup = new Map<string, KnowledgeMemory>();
+  for (const fact of activeKnowledge) {
+    const key = getContradictionKey(fact.fact_type, fact.fact);
+    if (key) contradictionLookup.set(key, fact);
+  }
+
+  const created: KnowledgeMemory[] = [];
+
+  for (const fact of extracted) {
+    assertNonEmpty(fact.fact, 'fact');
+    assertExtractedFactType(fact.factType);
+    assertFactConfidence(fact.confidence);
+
+    const normalizedFact = normalizeFactText(fact.fact);
+    const duplicate = duplicateLookup.get(normalizedFact);
+    if (policy.deduplicateFacts && duplicate) {
+      if (policy.touchDuplicates) {
+        adapter.touchKnowledgeMemory(duplicate.id);
+      }
+      continue;
+    }
+
+    const contradictionKey = getContradictionKey(fact.factType, fact.fact);
+    const contradiction = contradictionKey
+      ? contradictionLookup.get(contradictionKey)
+      : null;
+
+    const createdFact = adapter.transaction(() => {
+      const knowledge = adapter.insertKnowledgeMemory({
+        ...normalizedScope,
+        fact: fact.fact,
+        fact_type: fact.factType,
+        source: 'promoted_from_working',
+        confidence: fact.confidence,
+        source_working_memory_id: workingMemoryId,
+      });
+      if (contradiction && contradiction.id !== knowledge.id) {
+        adapter.supersedeKnowledgeMemory(contradiction.id, knowledge.id);
+      }
+      return knowledge;
+    });
+
+    duplicateLookup.set(normalizedFact, createdFact);
+    if (contradictionKey) contradictionLookup.set(contradictionKey, createdFact);
+    created.push(createdFact);
+  }
+
+  emitMemoryEvent('extraction', normalizedScope, options, Date.now() - startedAt, {
+    workingMemoryId,
+    extractedCount: extracted.length,
+    createdCount: created.length,
+  });
+
+  return created;
 }

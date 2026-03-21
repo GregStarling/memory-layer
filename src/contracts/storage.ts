@@ -8,6 +8,8 @@ import type {
   NewKnowledgeMemory,
   NewTurn,
   NewWorkingMemory,
+  SearchOptions,
+  SearchResult,
   Turn,
   WorkingMemory,
 } from './types.js';
@@ -16,6 +18,7 @@ export interface StorageAdapter {
   insertTurn(input: NewTurn): Turn;
   getTurnById(id: number): Turn | null;
   getActiveTurns(scope: MemoryScope): Turn[];
+  searchTurns(scope: MemoryScope, query: string, options?: SearchOptions): SearchResult<Turn>[];
   archiveTurn(id: number, archivedAt: number, compactionLogId: number): void;
   getArchivedTurnRange(sessionId: string, startId: number, endId: number): Turn[];
 
@@ -30,6 +33,11 @@ export interface StorageAdapter {
   insertKnowledgeMemory(input: NewKnowledgeMemory): KnowledgeMemory;
   getKnowledgeMemoryById(id: number): KnowledgeMemory | null;
   getActiveKnowledgeMemory(scope: MemoryScope): KnowledgeMemory[];
+  searchKnowledge(
+    scope: MemoryScope,
+    query: string,
+    options?: SearchOptions,
+  ): SearchResult<KnowledgeMemory>[];
   touchKnowledgeMemory(id: number): void;
   supersedeKnowledgeMemory(oldId: number, newId: number): void;
 
