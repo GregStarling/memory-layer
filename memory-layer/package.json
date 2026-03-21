@@ -1,7 +1,7 @@
 {
   "name": "@nanoclaw/memory",
   "version": "1.0.0",
-  "description": "Backend-agnostic memory package with scoped conversation history, compaction policy, orchestration workflows, and a SQLite adapter.",
+  "description": "Standalone memory layer: turns, working memory, knowledge memory, compaction scoring, and context monitoring. SQLite-backed with FTS5.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

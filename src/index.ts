@@ -1,43 +1,11 @@
-// ---------------------------------------------------------------------------
-// @nanoclaw/memory - Public API (v1)
-// ---------------------------------------------------------------------------
-// Call initMemoryDatabase(dbPath) once at application startup.
-// Call _initTestMemoryDatabase() for in-memory test instances.
-// ---------------------------------------------------------------------------
+export { estimateTokens, createSessionId } from './core/tokens.js';
+export { assessContext } from './core/monitor.js';
+export { compactTurns, commitCompaction, promoteToKnowledge } from './core/orchestrator.js';
 
-export {
-  initMemoryDatabase,
-  _initTestMemoryDatabase,
-  closeMemoryDatabase,
-  getMemoryDbPath,
-  estimateTokens,
-  createSessionId,
-  insertTurn,
-  getTurnById,
-  getActiveTurns,
-  archiveTurn,
-  getArchivedTurnRange,
-  insertWorkingMemory,
-  getWorkingMemoryById,
-  getWorkingMemoryBySession,
-  getActiveWorkingMemory,
-  getLatestWorkingMemory,
-  expireWorkingMemory,
-  markWorkingMemoryPromoted,
-  insertKnowledgeMemory,
-  getKnowledgeMemoryById,
-  getActiveKnowledgeMemory,
-  touchKnowledgeMemory,
-  supersedeKnowledgeMemory,
-  upsertContextMonitor,
-  getContextMonitor,
-  insertCompactionLog,
-  getCompactionLogById,
-  getRecentCompactionLogs,
-} from './db.js';
+export { createSQLiteAdapter } from './adapters/sqlite/index.js';
 
-export { assessContext, estimateTokensLocal } from './monitor.js';
-
+export type { MemoryScope, NormalizedMemoryScope } from './contracts/identity.js';
+export type { StorageAdapter } from './contracts/storage.js';
 export type {
   TurnRole,
   CompactionTrigger,
@@ -55,8 +23,7 @@ export type {
   ContextMonitorUpsert,
   CompactionLog,
   NewCompactionLog,
-} from './types.js';
-
+} from './contracts/types.js';
 export type {
   CompactionAction,
   DriftSignalType,
@@ -69,4 +36,5 @@ export type {
   CompactionRecommendation,
   MonitorInput,
   ContextHealthReport,
-} from './monitor.js';
+} from './core/monitor.js';
+export type { CompactionResult, Summarizer, SummarizerOutput } from './core/orchestrator.js';

@@ -1,96 +1,124 @@
 # @nanoclaw/memory
 
-Standalone memory layer extracted from NanoClaw. SQLite-backed conversation memory with three tiers (turns, working memory, knowledge memory), automatic compaction scoring, and context health monitoring.
+Standalone memory package for AI systems that need scoped conversation history, compaction policy, and long-term memory. The public surface is backend-agnostic; SQLite is the first adapter, not the product itself.
 
 ## Architecture
 
-**Turns** - Raw conversation log. Append-only until archived by compaction.
+- **Public API**: package entrypoint with contracts, core workflows, and adapters
+- **Domain Core**: token estimation, compaction policy, and workflow orchestration
+- **Storage Contracts**: backend-neutral adapter interface
+- **SQLite Adapter**: first persistence backend, implemented with `better-sqlite3`
 
-**Working Memory** - Session-scoped summaries produced by compaction. Contains key_entities and topic_tags extracted from the turn range. Expires after 24h by default. Can be promoted to knowledge memory.
+### Memory Model
 
-**Knowledge Memory** - Long-term facts. Supersedable (old fact points to replacement). Access-counted for relevance decay.
+- **Turns**: raw scoped conversation history
+- **Working Memory**: summaries created by compaction, with optional expiry
+- **Knowledge Memory**: promoted long-term facts with supersession and access tracking
+- **Context Monitor**: compaction health snapshots for a scope
+- **Compaction Log**: audit trail of each compaction event
 
-**Context Monitor** - One row per (channel, group_jid). Tracks compaction state, scores, and timing.
+## Identity Model
 
-**Compaction Log** - Audit trail of every compaction event.
+All data is scoped by a normalized `MemoryScope`:
+
+```typescript
+interface MemoryScope {
+  tenant_id: string;
+  system_id: string;
+  workspace_id?: string; // normalized to 'default'
+  scope_id: string;
+}
+```
 
 ## Usage
 
 ```typescript
 import {
-  initMemoryDatabase,
-  insertTurn,
-  getActiveTurns,
   assessContext,
-  getLatestWorkingMemory,
+  compactTurns,
+  createSessionId,
+  createSQLiteAdapter,
 } from '@nanoclaw/memory';
 
-// Initialize once at startup
-initMemoryDatabase('/path/to/store/memory.db');
+const adapter = createSQLiteAdapter('/path/to/memory.db');
 
-// Insert turns as conversation happens
-const turn = insertTurn({
-  session_id: 'tg_-100111_2026-03-21_a1b2c3',
-  channel: 'telegram',
-  group_jid: '-100111',
-  sender: 'Greg',
+const scope = {
+  tenant_id: 'acme',
+  system_id: 'assistant',
+  scope_id: 'thread-123',
+};
+
+const sessionId = createSessionId(scope);
+
+adapter.insertTurn({
+  ...scope,
+  session_id: sessionId,
+  actor: 'user-42',
   role: 'user',
   content: 'Build me a memory system.',
 });
 
-// Assess context health to decide if compaction is needed
-const turns = getActiveTurns('telegram', '-100111');
-const latestWm = getLatestWorkingMemory('telegram', '-100111');
+const turns = adapter.getActiveTurns(scope);
+const latestWorkingMemory = adapter.getLatestWorkingMemory(scope);
 const report = assessContext({
-  channel: 'telegram',
-  group_jid: '-100111',
-  session_id: turn.session_id,
+  scope,
+  session_id: sessionId,
   active_turns: turns,
-  latest_working_memory: latestWm,
+  latest_working_memory: latestWorkingMemory,
 });
 
-if (report.recommendation.action === 'hard') {
-  // Immediate compaction needed
-} else if (report.recommendation.action === 'soft') {
-  // Defer to next idle window (60s gap)
+if (report.recommendation.action !== 'none') {
+  await compactTurns(
+    adapter,
+    scope,
+    sessionId,
+    turns,
+    async (turnsToSummarize) => ({
+      summary: `Summarized ${turnsToSummarize.length} turns`,
+      key_entities: ['memory'],
+      topic_tags: ['architecture'],
+    }),
+    report.recommendation.action,
+    report.recommendation.post_compaction_target_turns,
+  );
 }
 ```
 
-## Compaction Scoring
+## Compaction Semantics
 
-The monitor uses a multi-signal scoring system:
+The package owns the safe persistence order for compaction:
 
-| Signal | Soft (+2) | Hard (+4) |
-|--------|-----------|-----------|
-| Turn count | >= 15 | >= 30 |
-| Token estimate | >= 3000 | >= 6000 |
+```text
+insertWorkingMemory -> insertCompactionLog -> archiveTurn x N
+```
 
-Plus:
-- Topic drift (>= 2 of 4 signals): +2
-- Task completion (any signal): +1
-- Tool output (single turn >= 1200): +3, (>= 600 or cumulative >= 2400): +2
+`compactTurns()` performs summarization outside the transaction, then persists the commit atomically through the adapter transaction boundary.
 
-**Soft trigger**: score >= 4, defer to idle window, target 12 retained turns
-**Hard trigger**: score >= 6, immediate, target 8 retained turns
-**Floor**: No compaction if turns < 15 OR tokens < 3000
+## Scoring
 
-## Differences from NanoClaw-embedded version
+The compaction monitor keeps the existing multi-signal policy:
 
-- `initMemoryDatabase(dbPath)` replaces the hard `STORE_DIR` import
-- `closeMemoryDatabase()` added for graceful shutdown
-- `getMemoryDbPath()` returns the initialized path (or null for in-memory)
-- No dependency on `../config.js`
+- Turn count: soft at `>= 15`, hard at `>= 30`
+- Token estimate: soft at `>= 3000`, hard at `>= 6000`
+- Topic drift: `+2` when at least 2 drift signals fire
+- Task completion: `+1` when any completion signal fires
+- Heavy output: `+3` for a hard spike, `+2` for a soft spike or cumulative surge
 
-## Write Order (Orchestrator Precondition)
+Recommendations:
 
-When compacting: `insertWorkingMemory` -> `insertCompactionLog` -> `archiveTurn` x N.
-This is the only order that satisfies FK constraints.
+- `soft`: score `>= 4`, retain 12 turns, defer to idle
+- `hard`: score `>= 6`, retain 8 turns, compact immediately
+- `none`: below threshold or below floor
+
+Floor rule:
+
+- no compaction if active turns `< 15`
+- no compaction if active token estimate `< 3000`
 
 ## Testing
 
 ```bash
 npm install
 npm test
+npm run lint
 ```
-
-36 storage tests + 30 monitor tests.
