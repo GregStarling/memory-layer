@@ -1,61 +1,74 @@
-# memory-layer
+<p align="center">
+  <h1 align="center">memory-layer</h1>
+  <p align="center">
+    Persistent memory for AI systems.<br/>
+    Drop it into any agent, IDE, or autonomous loop.<br/>
+    Two lines to remember. Zero lines to forget.
+  </p>
+</p>
 
-Drop-in memory for AI systems. Give any agent, IDE, or autonomous runtime persistent memory with compaction, knowledge growth, hybrid retrieval, and prompt assembly.
+<p align="center">
+  <a href="#quick-start">Quick Start</a> &nbsp;&bull;&nbsp;
+  <a href="#how-it-works">How It Works</a> &nbsp;&bull;&nbsp;
+  <a href="#integration-patterns">Integrations</a> &nbsp;&bull;&nbsp;
+  <a href="#python">Python</a> &nbsp;&bull;&nbsp;
+  <a href="#api-reference">API</a> &nbsp;&bull;&nbsp;
+  <a href="#configuration">Config</a> &nbsp;&bull;&nbsp;
+  <a href="docs/DEPLOYMENT.md">Deploy</a>
+</p>
 
-SQLite is the first adapter, not the architecture.
+---
 
-```
-User Input ──> Turn Storage ──> Compaction ──> Working Memory
-                                    |
-                              Extraction ──> Knowledge Memory
-                                    |
-                              Retrieval ──> Prompt-Ready Context
-```
+## The Problem
 
-## Install
+AI systems have no memory. Every session starts cold. Context vanishes. Learned preferences disappear. Mistakes repeat.
 
-```bash
-npm install memory-layer
-```
+If you're building an autonomous agent, a coding assistant, or a dark-factory loop, the model forgets everything the moment the conversation ends. Bolting on memory means building compaction, extraction, trust scoring, retrieval, multi-tenant scoping, and lifecycle management from scratch.
 
-Optional add-ons:
-
-```bash
-npm install better-sqlite3        # durable local SQLite storage
-npm install pg                    # hosted Postgres deployments
-npm install @anthropic-ai/sdk   # Claude summarizer + extractor
-# or
-npm install openai              # OpenAI summarizer + extractor
-```
-
-Without a provider SDK, `memory-layer` uses a pure-JS in-memory default path with an extractive summarizer, regex-based extractor, and a local lexical-plus embedding fallback. No API keys or native build tooling are required for the zero-config path, but this local mode should still be treated as an honest fallback contract rather than the gold-standard semantic path.
-
-Local quality tiers:
-
-- Fallback local: regex extraction plus lexical retrieval only.
-- Strong local: heuristic extraction plus local semantic embeddings, still fully offline.
-- Provider-backed: external summarization/extraction and strongest semantic path.
-
-If you pass `onEvent`, `createMemory()` emits a `capability` event at startup so you can see which tier the current runtime actually resolved to.
-
-## Quick Start
-
-### Local Bootstrap (zero-config)
+**memory-layer** is that entire stack as a drop-in package.
 
 ```typescript
 import { createMemory } from 'memory-layer';
 
 const memory = createMemory();
-await memory.processExchange(
-  'Remember that this project must stay local-first.',
-  'Stored. I will keep local-first constraints in memory.',
-);
-const context = await memory.getContext('local-first');
 ```
 
-This path is intentionally low-friction and now defaults to a pure-JS, ephemeral in-memory store plus the safer `balanced_memory` posture for local adoption. In local/no-provider mode, semantic retrieval is a lightweight lexical-plus fallback built from local hashed features. It is good enough for zero-config adoption, but it is not the highest-fidelity retrieval path.
+That's a working memory system. No API keys. No infrastructure. No configuration.
 
-### Persistent SQLite
+---
+
+## Quick Start
+
+### Install
+
+```bash
+npm install memory-layer
+```
+
+### Zero-Config (in-memory, fully offline)
+
+```typescript
+import { createMemory } from 'memory-layer';
+
+const memory = createMemory();
+
+await memory.processExchange(
+  'Always use TypeScript strict mode in this project.',
+  'Got it — TypeScript strict mode is now a stored constraint.',
+);
+
+// Later, in a new session or turn:
+const ctx = await memory.getContext('typescript config');
+// ctx.relevantKnowledge → [{ fact: "Use TypeScript strict mode", knowledge_class: "constraint", ... }]
+```
+
+No API keys required. Uses a pure-JS extractive summarizer, heuristic fact extractor, and local embedding fallback. Good enough to start. Upgrades automatically when provider credentials appear.
+
+### Persistent (SQLite)
+
+```bash
+npm install better-sqlite3
+```
 
 ```typescript
 const memory = createMemory({
@@ -65,279 +78,142 @@ const memory = createMemory({
 });
 ```
 
-Use this when you want durable local memory. It requires the optional `better-sqlite3` package.
+Memory survives restarts. Same API. One line changed.
 
-### Recommended Gold Path (provider-backed)
+### Provider-Backed (strongest quality)
 
-If provider credentials are available, prefer the provider-backed path for the strongest extraction and retrieval quality:
+```bash
+npm install openai  # or @anthropic-ai/sdk
+```
 
 ```typescript
-import { createMemory, createMemoryRuntime } from 'memory-layer';
-
-const manager = createMemory({
+const memory = createMemory({
   adapter: 'sqlite',
   path: './data/memory.db',
-  preset: 'ai_ide',
+  preset: 'autonomous_agent',
   qualityMode: 'high_fidelity_memory',
   summarizer: 'openai',
   extractor: 'openai',
 });
-
-const runtime = createMemoryRuntime(manager);
-const prepared = await runtime.beforeModelCall('Refactor the search layer.');
 ```
 
-When `OPENAI_API_KEY` or `VOYAGE_API_KEY` is present, `createMemory()` will automatically upgrade its embedding path for stronger semantic retrieval.
+When `OPENAI_API_KEY` or `VOYAGE_API_KEY` is present, `createMemory()` auto-upgrades to provider-backed embeddings. You don't have to change anything — the quality tier shifts silently.
 
-For hosted or high-volume deployments, pair provider-backed extraction/embeddings with Postgres + `pgvector` so semantic retrieval can use ANN indexing instead of SQLite's in-process scan path.
+---
 
-### Claude-backed
+## How It Works
 
-```typescript
-import { createClaudeMemoryManager, createMemoryRuntime } from 'memory-layer';
-
-const manager = createClaudeMemoryManager({
-  dbPath: './data/memory.db',
-  scope: {
-    tenant_id: 'acme',
-    system_id: 'ai-ide',
-    workspace_id: 'repo-memory',
-    scope_id: 'task-123',
-  },
-  preset: 'ai_ide',
-});
-
-const runtime = createMemoryRuntime(manager);
-const prepared = await runtime.beforeModelCall('Refactor the search layer.');
-// Send prepared.prompt or prepared.messages to your model
-await runtime.afterModelCall({
-  userInput: 'Refactor the search layer.',
-  assistantOutput: 'I will preserve hybrid retrieval behavior.',
-});
-manager.close();
+```
+User Input ──> Turn Storage ──> Compaction ──> Working Memory
+                                    │
+                              Extraction ──> Knowledge Memory
+                                    │
+                              Retrieval ──> Prompt-Ready Context
 ```
 
-### OpenAI-backed
+### Three-Tier Memory
 
-```typescript
-import { createOpenAIMemoryManager } from 'memory-layer';
+Memory flows through three tiers, each optimized for a different time horizon:
 
-const manager = createOpenAIMemoryManager({
-  dbPath: './data/memory.db',
-  scope: { tenant_id: 'acme', system_id: 'chat-agent', scope_id: 'conv-42' },
-  preset: 'chat_agent',
-});
+| Tier | What It Stores | How Long It Lives |
+|------|---------------|-------------------|
+| **Short-term** (Turns) | Raw conversation exchanges | Until compacted |
+| **Medium-term** (Working Memory) | Summaries with entities and topic tags | Days to weeks (TTL) |
+| **Long-term** (Knowledge) | Extracted facts with trust scores and evidence | Weeks to years (lifecycle) |
+
+### Knowledge Trust Lifecycle
+
+Extracted facts aren't blindly trusted. Every fact has a state:
+
+```
+candidate ──> provisional ──> trusted
+                  │               │
+                  └── disputed    └── superseded ──> retired
 ```
 
-## Architecture
+Promotion requires evidence. A fact needs grounding in source turns, explicit user statements, tool verification, or repeated corroboration before it reaches `trusted`. Contradictions are detected and facts are marked `disputed` — not silently overwritten.
 
-### Memory Model
+Every decision is audited. You can inspect why any fact was promoted, demoted, or retired.
 
-Memory flows through three tiers, mimicking biological memory:
+### Hybrid Retrieval
 
-| Tier | Record Type | Purpose | Lifecycle |
-|------|-------------|---------|-----------|
-| Short-term | **Turn** | Raw conversation history | Active until compacted, then archived |
-| Medium-term | **WorkingMemory** | Compacted summaries with entities and tags | Active until expired (TTL) or promoted |
-| Long-term | **KnowledgeMemory** | Durable learned facts | Active until retired (staleness) or superseded |
+When you call `getContext()`, the engine scores every candidate fact across multiple dimensions:
 
-Supporting records:
-- **WorkItem**: Objectives, unresolved work, constraints
-- **ContextMonitor**: Persisted compaction health state
-- **CompactionLog**: Compaction audit trail
-- **KnowledgeMemoryAudit**: Extraction decision trail
+- **Lexical** — full-text search relevance
+- **Semantic** — vector similarity (when embeddings are available)
+- **Recency** — when the fact was last accessed
+- **Trust** — knowledge state and confidence score
+- **Class importance** — identity facts rank higher than episodic ones
+- **Evidence density** — better-grounded facts rank higher
+- **Scope relation** — local facts rank higher than cross-scope ones
+- **Diversity** — penalizes clustering of same-type results
 
-### Data Flow
+The result is a `MemoryContext` object ready to inject into any model call.
 
-1. **Ingest**: `processTurn()` / `processExchange()` stores raw turns
-2. **Monitor**: Context health is assessed against `MonitorPolicy` thresholds
-3. **Compact**: When thresholds are met, turns are summarized into `WorkingMemory`
-4. **Extract**: Facts are mined from summaries, normalized, deduplicated, and stored as `KnowledgeMemory`
-5. **Embed**: Optionally, knowledge facts get vector embeddings for semantic search
-6. **Retrieve**: `getContext()` assembles prompt-ready context using hybrid scoring
-7. **Maintain**: Stale summaries expire, unused knowledge retires, completed work items clean up
-
-### Scoping
-
-Every record belongs to a scope. This enables multi-tenant isolation and cross-scope retrieval:
-
-```typescript
-interface MemoryScope {
-  tenant_id: string;    // Product or organization boundary
-  system_id: string;    // Caller identity (e.g., "ai-ide", "chat-agent")
-  workspace_id?: string; // Optional shared memory boundary
-  scope_id: string;     // Conversation, task, run, or thread ID
-}
-```
-
-Cross-scope retrieval levels: `scope` (exact) | `workspace` | `system` | `tenant`
-
-## Surface Contract
-
-`memory-layer` exposes one memory model across several surfaces. They are intended to agree on core behavior, with a small number of intentional differences:
-
-| Surface | Best For | Contract |
-|------|------|------|
-| Node package | In-process Node runtimes | Full engine surface, fastest path, best fit for AI IDEs and embedded agents |
-| HTTP API | Polyglot and hosted deployments | Mirrors the core manager operations over REST and is documented in `openapi.yaml` |
-| MCP server | Tool ecosystems that already speak MCP | Exposes memory operations as MCP tools; same memory semantics, MCP-native transport |
-| CLI | Inspection, local ops, and quick admin tasks | Thin operational layer over the same storage and hosted APIs |
-| Python client | Python workers and hosted consumers | Mirrors the HTTP contract; it is intentionally an HTTP client, not a second engine implementation |
-
-Important intentional differences:
-
-- The Node package is the source of truth for engine behavior.
-- The HTTP surface is the canonical network contract and the only one described by `openapi.yaml`.
-- MCP and CLI are operational wrappers around the same engine and hosted contract, not separate memory models.
-- The Python client follows the HTTP surface exactly and should be evaluated against HTTP parity, not separate feature invention.
-- SQLite is the low-friction path. Postgres + `pgvector` is the strongest hosted scaling path.
-
-## API Reference
-
-### MemoryManager
-
-The core interface returned by `createMemory()`, `createMemoryManager()`, and provider factories.
-
-```typescript
-interface MemoryManager {
-  // Data entry
-  processTurn(role, content, actor?): Promise<Turn>
-  processExchange(userContent, assistantContent, actors?): Promise<{
-    userTurn: Turn;
-    assistantTurn: Turn;
-    compactionResult: CompactionResult | null;
-  }>
-
-  // Retrieval
-  getContext(relevanceQuery?): Promise<MemoryContext>
-  getSessionBootstrap(relevanceQuery?): Promise<SessionBootstrap>
-  search(query, options?): Promise<{
-    turns: SearchResult<Turn>[];
-    knowledge: SearchResult<KnowledgeMemory>[];
-  }>
-  searchCrossScope(query, level, options?): Promise<{
-    knowledge: SearchResult<KnowledgeMemory>[];
-  }>
-  recall(timeRange): Promise<{
-    turns: Turn[];
-    workingMemory: WorkingMemory[];
-    knowledge: KnowledgeMemory[];
-    workItems: WorkItem[];
-  }>
-
-  // Knowledge management
-  learnFact(fact, factType, confidence?): Promise<KnowledgeMemory>
-  trackWorkItem(title, kind?, status?, detail?): Promise<WorkItem>
-  forceCompact(): Promise<CompactionResult | null>
-  runMaintenance(policy?): Promise<MaintenanceReport>
-
-  close(): Promise<void>
-}
-```
-
-### MemoryRuntime
-
-Higher-level hooks for model call integration, returned by `createMemoryRuntime(manager)`.
-
-```typescript
-interface MemoryRuntime {
-  startSession(relevanceQuery?): Promise<{ bootstrap, bootstrapPrompt }>
-  resumeSession(relevanceQuery?): Promise<{ bootstrap, bootstrapPrompt }>
-  beforeModelCall(input): Promise<{
-    bootstrap, context, bootstrapPrompt, prompt, messages
-  }>
-  afterModelCall({ userInput, assistantOutput, actors?, workItems? }): Promise<{
-    exchange, trackedWorkItems
-  }>
-  wrapModelCall(modelFn, input, actors?): Promise<{
-    result, runtime, exchange, trackedWorkItems
-  }>
-}
-```
-
-### createMemory() Options
-
-The quick factory with sensible defaults:
-
-```typescript
-createMemory({
-  adapter?: 'sqlite' | 'memory' | StorageAdapter,  // default: 'sqlite' at ':memory:'
-  path?: string,                                     // SQLite file path
-  scope?: string | MemoryScope,                      // default: 'default'
-  preset?: 'ai_ide' | 'chat_agent' | 'autonomous_agent',
-  qualityMode?: 'fast_adoption' | 'balanced_memory' | 'high_fidelity_memory',
-  summarizer?: 'extractive' | 'claude' | 'openai' | Summarizer,
-  extractor?: 'regex' | 'claude' | 'openai' | Extractor | false,
-  policies?: {
-    monitor?: Partial<MonitorPolicy>,
-    extraction?: Partial<ExtractionPolicy>,
-    context?: Partial<ContextPolicy>,
-    maintenance?: Partial<MaintenancePolicy>,
-  },
-  autoCompact?: boolean,     // default: true
-  autoExtract?: boolean,     // default: true if extractor present
-  logger?: Logger,
-  onEvent?: EventHook,
-})
-```
-
-## Presets
-
-Use a preset first and override only when needed:
-
-| Preset | Use Case | Compaction | Retrieval | TTL |
-|--------|----------|------------|-----------|-----|
-| `ai_ide` | Coding assistants | Moderate (20/40 turns) | Workspace-shared | 14 days |
-| `chat_agent` | Conversational agents | Default (15/30 turns) | Scope-local | 7 days |
-| `autonomous_agent` | Dark factory / autonomous | Aggressive (10/20 turns) | Workspace-wide | 3 days |
-
-## Memory Quality Gate
-
-The memory-quality suite is a hard release gate.
-
-```bash
-npm run eval:memory-quality:enforce
-npm run eval:memory-quality:delta
-```
-
-Quick-start quality modes:
-
-| Mode | Goal | Default posture |
-|------|------|-----------------|
-| `fast_adoption` | Lowest-friction startup | More willing to trust weakly grounded memories |
-| `balanced_memory` | Recommended default | Safer trust and maintenance behavior |
-| `high_fidelity_memory` | Strictest memory quality | Strongest trust, lifecycle, and prompt safety |
+---
 
 ## Integration Patterns
 
-### Pattern 1: Direct Manager
+### Before/After Hooks (recommended)
 
 ```typescript
-const manager = createMemory({ scope: 'my-agent' });
-await manager.processExchange(userInput, assistantOutput);
-const context = await manager.getContext(userInput);
-manager.close();
-```
+import { createMemory, createMemoryRuntime } from 'memory-layer';
 
-### Pattern 2: Runtime Hooks
-
-```typescript
+const manager = createMemory({ adapter: 'sqlite', path: './memory.db' });
 const runtime = createMemoryRuntime(manager);
-const { prompt } = await runtime.beforeModelCall(userInput);
-const result = await callModel(prompt);
+
+// Before the model call — get context
+const { prompt, messages } = await runtime.beforeModelCall(userInput);
+
+// Call your model with enriched context
+const result = await model.generate(prompt);
+
+// After the model call — store the exchange, trigger compaction + extraction
 await runtime.afterModelCall({ userInput, assistantOutput: result });
 ```
 
-### Pattern 3: wrapModelCall (End-to-End)
+### Single-Line Wrapper
 
 ```typescript
 const { result } = await runtime.wrapModelCall(
-  (prepared) => callModel(prepared.prompt),
+  (prepared) => model.generate(prepared.prompt),
   userInput,
 );
 ```
 
-### Pattern 4: Middleware
+`wrapModelCall` handles the full cycle: context assembly, model call, turn storage, compaction, extraction, and work item tracking.
+
+### Claude Agent SDK
+
+```typescript
+import { wrapClaudeAgentModel } from 'memory-layer';
+
+const run = wrapClaudeAgentModel(runtime, ({ system, messages, tools }) =>
+  client.messages.create({ model: 'claude-sonnet-4-20250514', system, messages, tools }),
+);
+
+const { result } = await run(userInput);
+```
+
+### OpenAI / Vercel AI / LangChain
+
+```typescript
+// OpenAI function tools
+import { createOpenAIMemoryTools } from 'memory-layer';
+const tools = createOpenAIMemoryTools(runtime);
+
+// Vercel AI SDK
+import { wrapVercelAIModel } from 'memory-layer';
+const run = wrapVercelAIModel(runtime, ({ system, messages }) =>
+  generateText({ system, messages }),
+);
+
+// LangChain memory bridge
+import { createLangChainMemoryBridge } from 'memory-layer';
+const langchainMemory = createLangChainMemoryBridge(manager);
+```
+
+### Middleware (message-list passthrough)
 
 ```typescript
 import { wrapWithMemory } from 'memory-layer';
@@ -347,62 +223,306 @@ const handler = wrapWithMemory(
   manager,
   { injectContext: true, contextPosition: 'system' },
 );
-const response = await handler([{ role: 'user', content: userInput }]);
 ```
 
-### Pattern 5: MCP Tool Adapter
+### MCP Server
 
 ```typescript
-import { createMemoryMcpAdapter, createMemoryRuntime } from 'memory-layer';
+import { createMemoryMcpAdapter } from 'memory-layer';
 
-const runtime = createMemoryRuntime(manager);
 const mcp = createMemoryMcpAdapter(runtime);
-// mcp.tools = tool definitions, mcp.callTool(name, args) = dispatcher
+// mcp.tools — tool definitions
+// mcp.callTool(name, args) — dispatcher
 ```
 
-### Pattern 6: Claude / OpenAI Tool Schemas
+Or run as a standalone MCP server:
+
+```bash
+npx memory-layer serve --transport mcp --db ./memory.db
+```
+
+### HTTP Service
+
+For polyglot deployments, run memory-layer as a standalone HTTP service:
+
+```bash
+npx memory-layer serve --transport http --db ./memory.db --port 3100
+```
+
+Full REST API documented in [`openapi.yaml`](openapi.yaml). Supports multi-tenant routing via scope headers, event streaming via SSE, and API key authentication.
+
+---
+
+## Python
+
+```bash
+pip install memory-layer-client
+```
+
+The Python client mirrors the HTTP API surface. It's an HTTP client, not a second engine — run the Node service and point Python at it.
+
+```python
+from memory_layer_client import MemoryClient, MemoryRuntimeClient, MemoryScope
+
+client = MemoryClient(
+    "http://localhost:3100",
+    default_scope=MemoryScope(
+        tenant_id="acme",
+        system_id="research-agent",
+        scope_id="session-1",
+    ),
+)
+
+runtime = MemoryRuntimeClient(client)
+
+# Full before/after cycle with your model
+result = runtime.run_turn(
+    "What constraints apply to this project?",
+    lambda prepared: call_model(prepared.context),
+)
+
+# Direct operations
+client.learn_fact("Deployment target is AWS us-east-1", "constraint")
+results = client.search("deployment")
+context = client.get_context("deployment constraints")
+```
+
+Async support included:
+
+```python
+from memory_layer_client import AsyncMemoryClient, AsyncMemoryRuntimeClient
+
+async with AsyncMemoryClient("http://localhost:3100") as client:
+    runtime = AsyncMemoryRuntimeClient(client)
+    result = await runtime.run_turn(user_input, model_call)
+```
+
+---
+
+## Presets
+
+Start with a preset. Override only when you need to.
+
+| Preset | Designed For | Compaction | Cross-Scope | Knowledge TTL |
+|--------|-------------|------------|-------------|---------------|
+| `ai_ide` | Coding assistants, refactoring tools | Moderate (18/30 turns) | Workspace-shared | 14 days |
+| `chat_agent` | Conversational agents, support bots | Balanced (14/24 turns) | Scope-local | 7 days |
+| `autonomous_agent` | Dark factories, autonomous loops | Aggressive (10/18 turns) | Workspace-shared | 3 days |
 
 ```typescript
-import { createClaudeMemoryTools, createOpenAIMemoryTools } from 'memory-layer';
-
-const claudeTools = createClaudeMemoryTools(runtime);
-const openaiTools = createOpenAIMemoryTools(runtime);
+const memory = createMemory({ preset: 'autonomous_agent' });
 ```
 
-### Pattern 7: Claude-Style Agent Wrapper
+### Quality Modes
+
+Orthogonal to presets. Controls how aggressively the system trusts and retains knowledge.
+
+| Mode | Trust Threshold | Retention | Best For |
+|------|----------------|-----------|----------|
+| `fast_adoption` | 0.55 | 60-day core | Prototyping, low-stakes agents |
+| `balanced_memory` | 0.70 | 365-day core | Production default |
+| `high_fidelity_memory` | 0.82 | 730-day core | Safety-critical, long-running systems |
 
 ```typescript
-import { wrapClaudeAgentModel } from 'memory-layer';
-
-const runClaudeTurn = wrapClaudeAgentModel(runtime, ({ system, messages, tools }) =>
-  client.messages.create({ model: 'claude-sonnet-4.5', system, messages, tools })
-);
-const result = await runClaudeTurn(userInput);
+const memory = createMemory({
+  preset: 'autonomous_agent',
+  qualityMode: 'high_fidelity_memory',
+});
 ```
 
-### Pattern 8: Vercel AI Wrapper
+---
+
+## Quality Tiers
+
+`createMemory()` auto-detects your environment and resolves to the best available tier:
+
+| Tier | Extraction | Retrieval | Requires |
+|------|-----------|-----------|----------|
+| **Offline default** | Regex + heuristic | Lexical + local embeddings | Nothing |
+| **Local semantic** | Composite heuristic | Lexical + local TF-IDF embeddings | Nothing |
+| **Provider-backed** | Claude/OpenAI LLM | Lexical + provider embeddings | API key |
+
+Pass `onEvent` to see which tier resolved at startup:
 
 ```typescript
-import { wrapVercelAIModel } from 'memory-layer';
-
-const runWithMemory = wrapVercelAIModel(runtime, ({ system, messages }) =>
-  generateText({ system, messages })
-);
-const result = await runWithMemory(userInput);
+const memory = createMemory({
+  onEvent: (event) => {
+    if (event.type === 'capability') {
+      console.log(event.meta);
+      // { qualityMode: 'balanced_memory', extractorTier: 'local_heuristic',
+      //   embeddingTier: 'local_semantic', providerBacked: false }
+    }
+  },
+});
 ```
 
-### Pattern 9: LangChain Bridge
+The local path is an honest fallback — functional, not aspirational. Provider-backed is the gold standard for extraction and retrieval quality.
+
+---
+
+## Scoping & Multi-Tenancy
+
+Every record belongs to a scope. Scopes enable isolation and selective sharing across agents, workspaces, and tenants.
 
 ```typescript
-import { createLangChainMemoryBridge } from 'memory-layer';
-
-const memory = createLangChainMemoryBridge(manager);
-await memory.saveContext({ input: userInput }, { output: assistantOutput });
+const memory = createMemory({
+  scope: {
+    tenant_id: 'acme-corp',         // Organization boundary
+    system_id: 'code-assistant',    // Which agent
+    workspace_id: 'backend-repo',   // Shared project context
+    scope_id: 'task-refactor-auth', // This specific task
+  },
+  crossScopeLevel: 'workspace',    // Can read workspace-wide knowledge
+});
 ```
 
-## Policy Configuration
+### Cross-Scope Retrieval
 
-### MonitorPolicy (Compaction Triggers)
+```typescript
+// Search across the workspace
+const results = await memory.searchCrossScope('rate limiting', 'workspace');
+
+// Poll for knowledge changes from other agents
+const changes = await memory.pollForChanges(lastSyncTimestamp);
+```
+
+Retrieval levels: `scope` (exact match) → `workspace` → `system` → `tenant`
+
+---
+
+## API Reference
+
+### MemoryManager
+
+Returned by `createMemory()`, `createMemoryManager()`, and provider factories.
+
+```typescript
+interface MemoryManager {
+  // --- Store ---
+  processTurn(role, content, actor?): Promise<Turn>
+  processExchange(userContent, assistantContent, actors?): Promise<{
+    userTurn: Turn; assistantTurn: Turn; compactionResult: CompactionResult | null;
+  }>
+
+  // --- Retrieve ---
+  getContext(relevanceQuery?): Promise<MemoryContext>
+  getContextAt(asOf, relevanceQuery?): Promise<MemoryContext>
+  getSessionBootstrap(relevanceQuery?): Promise<SessionBootstrap>
+  search(query, options?): Promise<{ turns, knowledge }>
+  searchCrossScope(query, level, options?): Promise<{ knowledge }>
+  recall(timeRange): Promise<{ turns, workingMemory, knowledge, workItems }>
+  pollForChanges(since, options?): Promise<KnowledgeMemory[]>
+
+  // --- Knowledge ---
+  learnFact(fact, factType, confidence?): Promise<KnowledgeMemory>
+  trackWorkItem(title, kind?, status?, detail?): Promise<WorkItem>
+  inspectKnowledge(id): Promise<{ knowledge, evidence, audits }>
+  listKnowledge(options?): Promise<PaginatedResult<KnowledgeMemory>>
+
+  // --- System ---
+  forceCompact(): Promise<CompactionResult | null>
+  runMaintenance(policy?): Promise<MaintenanceReport>
+  runReverification(options?): Promise<{ reverifiedIds, demotedIds }>
+  close(): Promise<void>
+}
+```
+
+### MemoryRuntime
+
+Returned by `createMemoryRuntime(manager)`. Higher-level hooks for model call integration.
+
+```typescript
+interface MemoryRuntime {
+  startSession(relevanceQuery?): Promise<{ bootstrap, bootstrapPrompt }>
+  resumeSession(relevanceQuery?): Promise<{ bootstrap, bootstrapPrompt }>
+  beforeModelCall(input): Promise<{
+    bootstrap, context, bootstrapPrompt, prompt, messages
+  }>
+  afterModelCall(input): Promise<{ exchange, trackedWorkItems }>
+  wrapModelCall(modelFn, input, actors?): Promise<{
+    result, runtime, exchange, trackedWorkItems
+  }>
+}
+```
+
+### MemoryContext
+
+The structured object returned by `getContext()`. Ready for prompt injection.
+
+```typescript
+interface MemoryContext {
+  mode: 'chat' | 'coding' | 'autonomous_agent' | 'review';
+  activeTurns: Turn[];
+  workingMemory: WorkingMemory | null;
+  trustedCoreMemory: KnowledgeMemory[];      // High-confidence, durable facts
+  taskRelevantKnowledge: KnowledgeMemory[];   // Matched to current query
+  provisionalKnowledge: KnowledgeMemory[];    // Not yet fully trusted
+  disputedKnowledge: KnowledgeMemory[];       // Contradicted facts
+  relevantKnowledge: KnowledgeMemory[];       // All selected facts
+  recentSummaries: WorkingMemory[];
+  currentObjective: string | null;
+  activeObjectives: WorkItem[];
+  unresolvedWork: string[];
+  knowledgeSelectionReasons: KnowledgeSelectionReason[];
+  tokenEstimate: number;
+}
+```
+
+---
+
+## Configuration
+
+### createMemory() Options
+
+```typescript
+createMemory({
+  // Storage
+  adapter?: 'sqlite' | 'memory' | StorageAdapter,
+  path?: string,
+
+  // Identity
+  scope?: string | MemoryScope,
+  sessionId?: string,
+
+  // Behavior
+  preset?: 'ai_ide' | 'chat_agent' | 'autonomous_agent',
+  qualityMode?: 'fast_adoption' | 'balanced_memory' | 'high_fidelity_memory',
+
+  // Components (auto-resolved if omitted)
+  summarizer?: 'extractive' | 'claude' | 'openai' | Summarizer,
+  extractor?: 'regex' | 'heuristic' | 'claude' | 'openai' | Extractor | false,
+  embeddingGenerator?: 'local' | EmbeddingGenerator | false,
+
+  // Fine-tuning (partial overrides merge with preset/quality defaults)
+  policies?: {
+    monitor?: Partial<MonitorPolicy>,
+    extraction?: Partial<ExtractionPolicy>,
+    context?: Partial<ContextPolicy>,
+    maintenance?: Partial<MaintenancePolicy>,
+  },
+
+  // Automation
+  autoCompact?: boolean,        // default: true
+  autoExtract?: boolean,        // default: true (when extractor present)
+  crossScopeLevel?: ScopeLevel,
+
+  // Observability
+  logger?: Logger,
+  onEvent?: EventHook,
+  redactText?: (input: { kind: string; text: string }) => string,
+
+  // Resilience
+  failurePolicy?: {
+    summarizer?: 'throw' | 'retry_once' | 'log_and_continue',
+    extractor?: 'throw' | 'retry_once' | 'log_and_continue' | 'disable_auto_extract',
+  },
+})
+```
+
+### Policy Reference
+
+<details>
+<summary><strong>MonitorPolicy</strong> — when compaction triggers</summary>
 
 | Field | Default | Description |
 |-------|---------|-------------|
@@ -412,65 +532,61 @@ await memory.saveContext({ input: userInput }, { output: assistantOutput });
 | `hardTokenThreshold` | 6000 | Token estimate that forces compaction |
 | `softRetainTurns` | 12 | Turns to keep after soft compaction |
 | `hardRetainTurns` | 8 | Turns to keep after hard compaction |
-| `intraSessionGapSeconds` | 1800 | Idle gap (30 min) that triggers session_gap compaction |
+| `intraSessionGapSeconds` | 1800 | Idle gap that triggers session_gap compaction |
 
-### ExtractionPolicy (Knowledge Growth)
+</details>
+
+<details>
+<summary><strong>ExtractionPolicy</strong> — how facts are extracted and promoted</summary>
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `autoExtractAfterCompaction` | true | Run extraction after each compaction |
-| `maxFactsPerExtraction` | 10 | Max facts to extract per compaction |
+| `maxFactsPerExtraction` | 10 | Max facts per compaction cycle |
 | `deduplicateFacts` | true | Deduplicate against existing knowledge |
-| `touchDuplicates` | true | Update access time on duplicate detection |
-| `minConfidenceForPromotion` | 'medium' | Minimum confidence for storage |
-| `conflictStrategy` | 'supersede' | How to handle conflicting facts |
+| `minConfidenceForPromotion` | `'medium'` | Minimum confidence for storage |
+| `trustPromotionThreshold` | 0.7 | Score required for `trusted` state |
+| `contradictionDisputeThreshold` | 0.35 | Score that marks facts `disputed` |
+| `requireGroundingForTrusted` | true | Require evidence in source turns |
+| `conflictStrategy` | `'supersede'` | How to handle conflicting facts |
 
-### ContextPolicy (Retrieval)
+</details>
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `mode` | 'chat' | Scoring profile: chat, coding, autonomous_agent, review |
-| `maxKnowledgeItems` | 20 | Max knowledge facts in context |
-| `maxRecentSummaries` | 3 | Max recent summaries in context |
-| `tokenBudget` | unlimited | Token cap for assembled context |
-| `lexicalWeight` | 1.0 | Weight for FTS score |
-| `semanticWeight` | 1.0 | Weight for embedding similarity |
-| `recencyWeight` | 1.0 | Weight for access recency |
-| `importanceWeight` | 0.25 | Weight for access frequency |
-| `diversityPenalty` | 0.2 | Penalty for same-type clustering |
-
-### MaintenancePolicy (Cleanup)
+<details>
+<summary><strong>ContextPolicy</strong> — how knowledge is selected for prompts</summary>
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `workingMemoryTtlSeconds` | 30 days | TTL for working memory summaries |
-| `completedWorkItemTtlSeconds` | 14 days | TTL for completed work items |
+| `mode` | `'chat'` | Scoring profile: `chat`, `coding`, `autonomous_agent`, `review` |
+| `maxKnowledgeItems` | 20 | Max facts in assembled context |
+| `maxRecentSummaries` | 3 | Max summaries in context |
+| `tokenBudget` | unlimited | Token cap for context |
+| `lexicalWeight` | 1.0 | Full-text search weight |
+| `semanticWeight` | 1.0 | Embedding similarity weight |
+| `recencyWeight` | 1.0 | Access recency weight |
+| `trustWeight` | 1.3 | Knowledge confidence weight |
+| `importanceWeight` | 0.25 | Access frequency weight |
+| `diversityPenalty` | 0.2 | Same-type clustering penalty |
+
+</details>
+
+<details>
+<summary><strong>MaintenancePolicy</strong> — data lifecycle and cleanup</summary>
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `workingMemoryTtlSeconds` | 30 days | Summary expiry |
+| `completedWorkItemTtlSeconds` | 14 days | Completed work item cleanup |
 | `knowledgeStaleAfterSeconds` | 60 days | Knowledge staleness threshold |
-| `minKnowledgeAccessCount` | 1 | Min accesses to avoid retirement |
+| `minKnowledgeAccessCount` | 1 | Minimum accesses to avoid retirement |
 | `maxActiveKnowledgeItems` | 500 | Hard cap on active knowledge |
+| `reverificationCadenceDays` | 30 | Days between reverification checks |
+| `trustedCoreRetentionDays` | 365 | Retention for identity/preference/constraint |
+| `provisionalRetentionDays` | 7 | Retention for provisional facts |
 
-## Embeddings
+</details>
 
-Enable semantic search by providing an embedding generator:
-
-```typescript
-import { createMemory } from 'memory-layer';
-import { createSQLiteAdapterWithEmbeddings } from 'memory-layer';
-
-const { adapter, embeddingAdapter } = createSQLiteAdapterWithEmbeddings('./memory.db');
-
-const manager = createMemoryManager({
-  adapter,
-  embeddingAdapter,
-  embeddingGenerator: async (texts) => {
-    // Call your embedding API (OpenAI, Voyage, etc.)
-    return texts.map(text => new Float32Array(/* vector */));
-  },
-  // ... other config
-});
-```
-
-The `EmbeddingGenerator` type is `(texts: string[]) => Promise<Float32Array[]>`.
+---
 
 ## Observability
 
@@ -479,7 +595,9 @@ The `EmbeddingGenerator` type is `(texts: string[]) => Promise<Float32Array[]>`.
 ```typescript
 const memory = createMemory({
   onEvent: (event) => {
-    console.log(`[${event.type}]`, event);
+    // event.type: 'compaction' | 'extraction' | 'promotion' | 'retrieval' |
+    //             'search' | 'maintenance' | 'capability' | 'knowledge_change'
+    console.log(`[${event.type}] scope=${event.scope.scope_id} duration=${event.durationMs}ms`);
   },
 });
 ```
@@ -490,65 +608,107 @@ const memory = createMemory({
 import { createMemoryEventEmitter } from 'memory-layer';
 
 const emitter = createMemoryEventEmitter();
-emitter.on('compaction', (event) => { /* ... */ });
-emitter.on('extraction', (event) => { /* ... */ });
+emitter.on('compaction', (e) => metrics.track('compaction', e.durationMs));
+emitter.on('extraction', (e) => metrics.track('facts_extracted', e.meta.factCount));
 
 const memory = createMemory({ eventEmitter: emitter });
 ```
 
-### Content Redaction
+### PII Redaction
 
 ```typescript
 const memory = createMemory({
-  redactText: ({ kind, text }) => {
-    return text.replace(/\b\d{3}-\d{2}-\d{4}\b/g, '[REDACTED-SSN]');
-  },
+  redactText: ({ kind, text }) =>
+    text.replace(/\b\d{3}-\d{2}-\d{4}\b/g, '[REDACTED-SSN]'),
 });
 ```
 
-## Failure Handling
+---
 
-Configure how summarization and extraction failures are handled:
+## Surfaces
+
+One memory engine, multiple access patterns:
+
+| Surface | Best For | How to Start |
+|---------|---------|-------------|
+| **Node package** | In-process agents, IDEs | `import { createMemory } from 'memory-layer'` |
+| **HTTP API** | Polyglot services, hosted deployments | `npx memory-layer serve --transport http` |
+| **MCP server** | Tool ecosystems that speak MCP | `npx memory-layer serve --transport mcp` |
+| **CLI** | Inspection, admin, debugging | `npx memory-layer inspect` |
+| **Python client** | Python agents consuming the HTTP API | `pip install memory-layer-client` |
+
+The Node package is the source of truth. HTTP mirrors it over REST ([`openapi.yaml`](openapi.yaml)). MCP and CLI are operational wrappers. The Python client follows the HTTP contract.
+
+---
+
+## Storage
+
+| Backend | Best For | Install |
+|---------|---------|---------|
+| **In-memory** | Tests, prototypes, zero-friction | Built-in |
+| **SQLite** | Single-process production, local agents | `npm install better-sqlite3` |
+| **PostgreSQL + pgvector** | Multi-writer, hosted, high-volume | `npm install pg` |
+
+SQLite is the low-friction path. Postgres + pgvector is the strongest scaling path with ANN indexing for semantic retrieval.
+
+---
+
+## Embeddings
 
 ```typescript
-const memory = createMemoryManager({
-  failurePolicy: {
-    summarizer: 'retry_once',      // 'throw' | 'retry_once' | 'log_and_continue'
-    extractor: 'log_and_continue', // + 'disable_auto_extract'
-  },
-  // ...
+// Auto-resolved: local heuristic if no API key, OpenAI/Voyage if key present
+const memory = createMemory(); // just works
+
+// Explicit local (offline, pure-JS)
+const memory = createMemory({ embeddingGenerator: 'local' });
+
+// Explicit provider
+import { createOpenAIEmbeddingGenerator } from 'memory-layer';
+const memory = createMemory({
+  embeddingGenerator: createOpenAIEmbeddingGenerator({ apiKey: process.env.OPENAI_API_KEY }),
+});
+
+// Custom
+const memory = createMemory({
+  embeddingGenerator: async (texts) => texts.map(t => new Float32Array(/* your vectors */)),
 });
 ```
 
-## Evals and CI
+Built-in resilience for provider embeddings: `withRetry()`, `batchedGenerate()`, `createCachedEmbeddingGenerator()`.
+
+---
+
+## Testing & Evals
+
+### Unit Tests
 
 ```bash
-npm run lint               # Type check
-npm test                   # Unit tests
-npm run build              # Compile
-npm run eval:retrieval     # Retrieval quality eval
-npm run eval:scenarios     # Scenario continuity eval
-npm run eval:gate          # Enforced eval gate (for CI)
-npm run benchmark:search   # Search performance
-npm run benchmark:semantic # Semantic search performance
-npm run benchmark:compaction # Compaction performance
-npm run pack:check         # Package verification
+npm test                          # 257 test cases across 30+ files
+npm run test:coverage             # with coverage reporting
 ```
 
-## Export / Import
+### Memory Quality Gate
+
+A 14-metric behavioral eval suite that acts as a hard release gate:
 
 ```bash
-node scripts/export-memory.mjs ./data/memory.db ./backup.json
-node scripts/import-memory.mjs ./data/restored.db ./backup.json
+npm run eval:memory-quality:enforce       # all 14 metrics must pass
+npm run eval:memory-quality:delta:enforce  # must not regress from baseline
 ```
 
-## Service Assets
+Metrics include: constraint retention, preference retention, identity retention, update correctness, false memory rate, contradiction resolution, trusted memory precision/recall, scope isolation, compaction fidelity, and maintenance fidelity.
 
-- OpenAPI: `openapi.yaml`
-- Deployment guide: `docs/DEPLOYMENT.md`
-- Operations guide: `docs/OPERATIONS.md`
-- Integrations guide: `docs/INTEGRATIONS.md`
-- Security guide: `docs/SECURITY.md`
+Current baseline: **100/100** on all 14 metrics.
+
+### Full Release Gate
+
+```bash
+npm run release:check
+```
+
+Runs: lint, test coverage, retrieval eval, scenario eval, memory quality gate, delta regression check, Python client checks, platform quality proof (HTTP + Node CLI + Python CLI), and package validation.
+
+---
 
 ## Docker
 
@@ -557,24 +717,49 @@ docker build -t memory-layer .
 docker run --rm -p 3100:3100 -v "$(pwd)/data:/data" memory-layer
 ```
 
+---
+
 ## Examples
 
-| Example | Pattern | Provider |
-|---------|---------|----------|
-| `examples/zero-config.ts` | Direct manager | Extractive |
-| `examples/chat-assistant.ts` | Runtime hooks | Claude |
-| `examples/ai-ide.ts` | Runtime + work items | OpenAI |
-| `examples/autonomous-agent.ts` | Claude-style wrapper | Generic |
-| `examples/tool-calling-agent.ts` | Tool schemas | Generic |
-| `examples/mcp-server.ts` | MCP adapter | Claude |
-| `examples/hosted-service.ts` | Standalone HTTP service | None |
-| `examples/vercel-ai.ts` | Vercel AI wrapper | Generic |
-| `examples/langchain.ts` | LangChain bridge | Generic |
-| `examples/multi-agent-postgres.ts` | Shared Postgres memory | Postgres |
+| Example | What It Shows |
+|---------|--------------|
+| [`zero-config.ts`](examples/zero-config.ts) | Ephemeral memory, no setup |
+| [`chat-assistant.ts`](examples/chat-assistant.ts) | Claude-backed conversation agent |
+| [`ai-ide.ts`](examples/ai-ide.ts) | OpenAI-backed coding assistant with work items |
+| [`autonomous-agent.ts`](examples/autonomous-agent.ts) | Claude agent wrapper with work item inference |
+| [`dark-factory.ts`](examples/dark-factory.ts) | Autonomous loop with streaming and maintenance |
+| [`tool-calling-agent.ts`](examples/tool-calling-agent.ts) | OpenAI/Claude tool schemas |
+| [`mcp-server.ts`](examples/mcp-server.ts) | MCP tool adapter |
+| [`hosted-service.ts`](examples/hosted-service.ts) | Standalone HTTP service |
+| [`vercel-ai.ts`](examples/vercel-ai.ts) | Vercel AI SDK wrapper |
+| [`langchain.ts`](examples/langchain.ts) | LangChain memory bridge |
+| [`multi-agent-postgres.ts`](examples/multi-agent-postgres.ts) | Shared Postgres memory across agents |
+| [`python-client/agent.py`](examples/python-client/agent.py) | Python agent consuming HTTP API |
 
-## Notes
+---
 
-- Optional provider SDKs are dynamically imported
-- `createSQLiteAdapter(':memory:')` is useful for tests
-- Requires Node 20+
+## Export / Import
+
+```bash
+node scripts/export-memory.mjs ./data/memory.db ./backup.json
+node scripts/import-memory.mjs ./data/restored.db ./backup.json
+```
+
+---
+
+## Further Reading
+
+- [Deployment Guide](docs/DEPLOYMENT.md) — embedded, HTTP, MCP, Docker
+- [Integration Patterns](docs/INTEGRATIONS.md) — AI IDE, hosted service, autonomous agent, framework adapters
+- [Memory Quality Rubric](docs/MEMORY_QUALITY_RUBRIC.md) — the 14-metric eval framework
+- [Release Gate](docs/MEMORY_QUALITY_RELEASE_GATE.md) — how quality gates enforce the baseline
+- [OpenAPI Spec](openapi.yaml) — full HTTP API contract
+- [Security Guide](docs/SECURITY.md)
+
+---
+
+## Requirements
+
+- Node 20+
 - MIT licensed
+- Optional provider SDKs are dynamically imported — no hard dependencies on `@anthropic-ai/sdk`, `openai`, `better-sqlite3`, or `pg`
