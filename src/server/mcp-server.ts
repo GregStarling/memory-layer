@@ -46,6 +46,8 @@ interface McpToolResult {
   isError?: boolean;
 }
 
+class McpValidationError extends Error {}
+
 const TOOLS: McpTool[] = [
   {
     name: 'memory_store_turn',
@@ -185,12 +187,50 @@ function errorResult(message: string): McpToolResult {
   };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function requireString(value: unknown, name: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new McpValidationError(`Missing or invalid field: ${name}`);
+  }
+  return value;
+}
+
+function optionalString(value: unknown, name: string): string | undefined {
+  if (value == null) return undefined;
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new McpValidationError(`Invalid field: ${name}`);
+  }
+  return value;
+}
+
+function requireEnum<T extends string>(value: unknown, allowed: readonly T[], name: string): T {
+  if (typeof value !== 'string' || !allowed.includes(value as T)) {
+    throw new McpValidationError(`Invalid field: ${name}`);
+  }
+  return value as T;
+}
+
+function parseLimit(value: unknown): number | undefined {
+  if (value == null) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    throw new McpValidationError('Invalid field: limit');
+  }
+  return value;
+}
+
 function resolveScopeInput(
   fallbackScope: string | MemoryScope | undefined,
   args: Record<string, unknown>,
 ): string | MemoryScope {
-  if (args.scope && typeof args.scope === 'object') {
-    return args.scope as MemoryScope;
+  if (args.scope) {
+    if (!isRecord(args.scope)) {
+      throw new McpValidationError('Invalid scope override');
+    }
+    normalizeScope(args.scope as unknown as MemoryScope);
+    return args.scope as unknown as MemoryScope;
   }
   return fallbackScope ?? 'default';
 }
@@ -229,13 +269,17 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
             'memory-layer: hosted Postgres mode requires the "pg" package. Install it with: npm install pg',
           );
         });
-        const { createPostgresAdapter } = await import('../adapters/postgres/index.js');
+        const { createPostgresAdapter, createPostgresEmbeddingAdapter } = await import(
+          '../adapters/postgres/index.js'
+        );
         const Pool = pgModule.Pool ?? pgModule.default?.Pool;
         const pool = new Pool({
           connectionString: config.databaseUrl ?? process.env.MEMORY_DATABASE_URL,
         });
+        const asyncAdapter = createPostgresAdapter(pool);
         return {
-          asyncAdapter: createPostgresAdapter(pool),
+          asyncAdapter,
+          embeddingAdapter: createPostgresEmbeddingAdapter(pool),
         };
       })();
     }
@@ -277,16 +321,16 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
       switch (name) {
         case 'memory_store_turn': {
           const turn = await requestManager.processTurn(
-            args.role as 'user' | 'assistant' | 'system',
-            String(args.content),
-            args.actor ? String(args.actor) : undefined,
+            requireEnum(args.role, ['user', 'assistant', 'system'], 'role'),
+            requireString(args.content, 'content'),
+            optionalString(args.actor, 'actor'),
           );
           return jsonResult({ stored: true, turnId: turn.id });
         }
         case 'memory_store_exchange': {
           const exchange = await requestManager.processExchange(
-            String(args.userContent),
-            String(args.assistantContent),
+            requireString(args.userContent, 'userContent'),
+            requireString(args.assistantContent, 'assistantContent'),
           );
           return jsonResult({
             stored: true,
@@ -325,8 +369,8 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
         }
         case 'memory_search': {
           const results = await requestManager.search(
-            String(args.query),
-            args.limit ? { limit: Number(args.limit) } : undefined,
+            requireString(args.query, 'query'),
+            args.limit != null ? { limit: parseLimit(args.limit) } : undefined,
           );
           return jsonResult({
             turns: results.turns.map((r) => ({
@@ -345,9 +389,11 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
         }
         case 'memory_search_cross_scope': {
           const results = await requestManager.searchCrossScope(
-            String(args.query),
-            (args.scopeLevel as ScopeLevel | undefined) ?? 'workspace',
-            args.limit ? { limit: Number(args.limit) } : undefined,
+            requireString(args.query, 'query'),
+            (args.scopeLevel == null
+              ? 'workspace'
+              : requireEnum(args.scopeLevel, ['workspace', 'system', 'tenant'], 'scopeLevel')) as ScopeLevel,
+            args.limit != null ? { limit: parseLimit(args.limit) } : undefined,
           );
           return jsonResult({
             knowledge: results.knowledge.map((r) => ({
@@ -362,18 +408,27 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
         }
         case 'memory_learn_fact': {
           const fact = await requestManager.learnFact(
-            String(args.fact),
-            args.factType as FactType,
-            (args.confidence as FactConfidence) ?? 'high',
+            requireString(args.fact, 'fact'),
+            requireEnum(args.factType, ['preference', 'entity', 'decision', 'constraint', 'reference'], 'factType') as FactType,
+            (args.confidence == null
+              ? 'high'
+              : requireEnum(args.confidence, ['high', 'medium', 'low'], 'confidence')) as FactConfidence,
           );
           return jsonResult({ stored: true, knowledgeId: fact.id });
         }
         case 'memory_track_work': {
           const item = await requestManager.trackWorkItem(
-            String(args.title),
-            (args.kind as 'objective' | 'unresolved_work' | 'constraint') ?? 'objective',
-            (args.status as 'open' | 'in_progress' | 'blocked' | 'done') ?? 'open',
-            args.detail ? String(args.detail) : undefined,
+            requireString(args.title, 'title'),
+            requireEnum(args.kind ?? 'objective', ['objective', 'unresolved_work', 'constraint'], 'kind') as
+              | 'objective'
+              | 'unresolved_work'
+              | 'constraint',
+            requireEnum(args.status ?? 'open', ['open', 'in_progress', 'blocked', 'done'], 'status') as
+              | 'open'
+              | 'in_progress'
+              | 'blocked'
+              | 'done',
+            optionalString(args.detail, 'detail'),
           );
           return jsonResult({ tracked: true, workItemId: item.id });
         }
@@ -479,9 +534,12 @@ export async function startMcpServer(config: McpServerConfig = {}): Promise<void
       }
 
       if (message.method === 'tools/call') {
+        if (!isRecord(message.params)) {
+          throw new McpValidationError('Invalid tools/call params');
+        }
         const result = await handler.callTool(
           message.params.name,
-          message.params.arguments ?? {},
+          isRecord(message.params.arguments) ? message.params.arguments : {},
         );
         process.stdout.write(
           JSON.stringify({
@@ -507,8 +565,16 @@ export async function startMcpServer(config: McpServerConfig = {}): Promise<void
         );
       }
     } catch (error) {
-      // Parse errors
-      process.stderr.write(`MCP parse error: ${error}\n`);
+      process.stdout.write(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: null,
+          error: {
+            code: error instanceof McpValidationError ? -32602 : -32700,
+            message: error instanceof Error ? error.message : String(error),
+          },
+        }) + '\n',
+      );
     }
   });
 

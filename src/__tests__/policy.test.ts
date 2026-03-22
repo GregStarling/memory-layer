@@ -5,7 +5,8 @@ import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 import { buildMemoryContext } from '../core/context.js';
 import { assessContext } from '../core/monitor.js';
 import { MEMORY_MANAGER_PRESETS, resolveMemoryManagerPreset } from '../core/presets.js';
-import { DEFAULT_MONITOR_POLICY } from '../contracts/policy.js';
+import { rankKnowledge } from '../core/retrieval.js';
+import { DEFAULT_CONTEXT_POLICY, DEFAULT_MONITOR_POLICY } from '../contracts/policy.js';
 import type { StorageAdapter } from '../contracts/storage.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import { makeScope, seedTurns } from './test-helpers.js';
@@ -67,6 +68,95 @@ describe('policy defaults and overrides', () => {
       },
     });
     expect(context.tokenEstimate).toBeLessThanOrEqual(500);
+  });
+
+  it('uses importanceWeight when ranking knowledge', () => {
+    const scope = makeScope();
+    const knowledge = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'Important maintenance checklist',
+      fact_type: 'reference',
+      knowledge_class: 'project_fact',
+      source: 'manual',
+      confidence: 'high',
+      trust_score: 0.2,
+    });
+    const neutralPolicy = {
+      ...DEFAULT_CONTEXT_POLICY,
+      lexicalWeight: 0,
+      semanticWeight: 0,
+      recencyWeight: 0,
+      importanceWeight: 0,
+      trustWeight: 0,
+      durabilityWeight: 0,
+      evidenceWeight: 0,
+      objectiveLinkWeight: 0,
+      scopeRelationWeight: 0,
+      contradictionPenalty: 0,
+      provisionalPenalty: 0,
+      localTrustedBonus: 0,
+      lineageWeight: 0,
+      unrelatedLineagePenalty: 0,
+    };
+    const weightedPolicy = {
+      ...neutralPolicy,
+      importanceWeight: 2,
+    };
+
+    const neutral = rankKnowledge({
+      knowledge,
+      lexicalScore: 0,
+      semanticScore: 0,
+      recencyScore: 0,
+      importanceScore: 1,
+      policy: neutralPolicy,
+      scope,
+    });
+    const weighted = rankKnowledge({
+      knowledge,
+      lexicalScore: 0,
+      semanticScore: 0,
+      recencyScore: 0,
+      importanceScore: 1,
+      policy: weightedPolicy,
+      scope,
+    });
+
+    expect(neutral.finalScore).toBe(0);
+    expect(weighted.finalScore).toBeGreaterThan(neutral.finalScore);
+  });
+
+  it('lets policy control the lineage inclusion threshold', async () => {
+    const childScope = makeScope({ workspace_id: 'shared', scope_id: 'project/root/child' });
+    const parentScope = makeScope({ workspace_id: 'shared', scope_id: 'project/root' });
+    adapter.insertKnowledgeMemory({
+      ...parentScope,
+      fact: 'Parent deploy checklist must be reviewed.',
+      fact_type: 'reference',
+      knowledge_state: 'trusted',
+      knowledge_class: 'project_fact',
+      source: 'manual',
+      confidence: 'high',
+      trust_score: 0.9,
+    });
+
+    const included = await buildMemoryContext(asyncAdapter, childScope, {
+      crossScopeLevel: 'workspace',
+      relevanceQuery: 'deploy checklist',
+      policy: { minimumLineageScore: 0.6 },
+    });
+    const excluded = await buildMemoryContext(asyncAdapter, childScope, {
+      crossScopeLevel: 'workspace',
+      relevanceQuery: 'deploy checklist',
+      policy: { minimumLineageScore: 0.7 },
+    });
+
+    expect(included.relevantKnowledge.map((item) => item.fact)).toContain(
+      'Parent deploy checklist must be reviewed.',
+    );
+    expect(excluded.relevantKnowledge.map((item) => item.fact)).not.toContain(
+      'Parent deploy checklist must be reviewed.',
+    );
   });
 
   it('exposes workload presets for drop-in manager setup', () => {

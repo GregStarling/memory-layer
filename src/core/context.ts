@@ -16,6 +16,7 @@ import { emitMemoryEvent } from './telemetry.js';
 import { getLineageScore, rankKnowledge } from './retrieval.js';
 
 export interface ContextAssemblyOptions {
+  sessionId?: string;
   crossScopeLevel?: ScopeLevel;
   mode?: ContextMode;
   maxKnowledgeItems?: number;
@@ -347,14 +348,17 @@ export async function buildMemoryContext(
   const tokenEstimator = options?.tokenEstimator ?? estimateTokens;
   const asOf = options?.asOf;
 
-  let activeTurns = await adapter.getActiveTurns(normalizedScope);
+  let activeTurns = await adapter.getActiveTurns(normalizedScope, options?.sessionId);
   if (asOf != null) {
     activeTurns = activeTurns.filter((turn) => turn.created_at <= asOf);
   }
   const activeObjectives = (await adapter.getActiveWorkItems(normalizedScope)).filter(
     (item) => item.kind === 'objective',
   );
-  const workingMemoryCandidates = await adapter.getActiveWorkingMemory(normalizedScope);
+  const workingMemoryCandidates = await adapter.getActiveWorkingMemory(
+    normalizedScope,
+    options?.sessionId,
+  );
   const workingMemory = [...workingMemoryCandidates]
     .filter((item) => asOf == null || item.created_at <= asOf)
     .sort((a, b) => b.id - a.id)[0] ?? null;
@@ -385,25 +389,30 @@ export async function buildMemoryContext(
             }),
       )
     : new Map<number, number>();
-  const semanticRanks =
-    options?.embeddingAdapter && options.queryVector
-      ? normalizeSemanticRanks(
-          options.crossScopeLevel
-            ? options.embeddingAdapter.findSimilarCrossScope(
-                normalizedScope,
-                options.crossScopeLevel,
-                options.queryVector,
-                {
-                  limit: policy.maxKnowledgeItems * 2,
-                  minSimilarity: 0,
-                },
-              )
-            : options.embeddingAdapter.findSimilar(normalizedScope, options.queryVector, {
-                limit: policy.maxKnowledgeItems * 2,
-                minSimilarity: 0,
-              }),
-        )
-      : new Map<number, number>();
+  let semanticRanks = new Map<number, number>();
+  if (options?.embeddingAdapter && options.queryVector) {
+    try {
+      const semanticResults = options.crossScopeLevel
+        ? await options.embeddingAdapter.findSimilarCrossScope(
+            normalizedScope,
+            options.crossScopeLevel,
+            options.queryVector,
+            {
+              limit: policy.maxKnowledgeItems * 2,
+              minSimilarity: policy.semanticMinSimilarity,
+            },
+          )
+        : await options.embeddingAdapter.findSimilar(normalizedScope, options.queryVector, {
+            limit: policy.maxKnowledgeItems * 2,
+            minSimilarity: policy.semanticMinSimilarity,
+          });
+      semanticRanks = normalizeSemanticRanks(semanticResults);
+    } catch (error) {
+      options.logger?.warn?.('memory.context.semantic_search_failed', {
+        error: String(error),
+      });
+    }
+  }
 
   const scopedKnowledge =
     options?.crossScopeLevel && options.crossScopeLevel !== 'scope'
@@ -412,7 +421,7 @@ export async function buildMemoryContext(
             item.scope_id === normalizedScope.scope_id ||
             (normalizedScope.collaboration_id.length > 0 &&
               item.collaboration_id === normalizedScope.collaboration_id) ||
-            getLineageScore(normalizedScope.scope_id, item.scope_id) >= 0.5,
+            getLineageScore(normalizedScope.scope_id, item.scope_id) >= policy.minimumLineageScore,
         )
       : temporalKnowledge;
   const relevanceTexts = [

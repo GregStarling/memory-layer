@@ -16,9 +16,15 @@ function clamp(value: number, min = 0, max = 1): number {
   return Math.max(min, Math.min(max, value));
 }
 
-function contradictionPenalty(score: number): 'low' | 'medium' | 'high' {
-  if (score >= 0.75) return 'high';
-  if (score >= 0.35) return 'medium';
+function contradictionPenalty(
+  score: number,
+  policy: Pick<
+    Required<ExtractionPolicy>,
+    'contradictionSeverityMediumThreshold' | 'contradictionSeverityHighThreshold'
+  >,
+): 'low' | 'medium' | 'high' {
+  if (score >= policy.contradictionSeverityHighThreshold) return 'high';
+  if (score >= policy.contradictionSeverityMediumThreshold) return 'medium';
   return 'low';
 }
 
@@ -45,8 +51,9 @@ export function assessCandidateTrust(input: {
   const contradicting = evidence.filter((item) => item.support_polarity === 'contradicts');
   const assistantSupport = supporting.filter((item) => item.source_type === 'assistant_turn').length;
   const toolSupport = supporting.filter((item) =>
-    ['tool_output', 'execution_result', 'human_feedback'].includes(item.source_type),
+    ['tool_output', 'execution_result'].includes(item.source_type),
   ).length;
+  const humanFeedbackSupport = supporting.filter((item) => item.source_type === 'human_feedback').length;
   const explicitSupport = supporting.filter((item) => item.is_explicit).length;
   const protectedSingleSourceSupport = supporting.some((item) =>
     ['user_turn', 'system_turn', 'human_feedback', 'tool_output'].includes(item.source_type),
@@ -58,7 +65,7 @@ export function assessCandidateTrust(input: {
 
   let trustScore = candidate.trust_score;
   if (policy.requireGroundingForTrusted && supporting.length === 0) {
-    trustScore -= 0.35;
+    trustScore -= policy.noGroundingPenalty;
     reasons.push('no_raw_turn_grounding');
   }
   if (assistantSupport > 0) {
@@ -68,6 +75,10 @@ export function assessCandidateTrust(input: {
   if (toolSupport > 0) {
     trustScore += policy.toolEvidenceBoost * toolSupport;
     reasons.push('tool_or_feedback_evidence');
+  }
+  if (humanFeedbackSupport > 0) {
+    trustScore += policy.humanFeedbackBoost * humanFeedbackSupport;
+    reasons.push('human_feedback_evidence');
   }
   if (explicitSupport > 0) {
     trustScore += policy.explicitStatementBoost * explicitSupport;
@@ -81,7 +92,7 @@ export function assessCandidateTrust(input: {
     trustScore -= policy.executionFailurePenalty * failureSupport;
     reasons.push('failure_outcome_penalty');
   }
-  trustScore -= contradictionScore * 0.5;
+  trustScore -= contradictionScore * policy.contradictionTrustPenalty;
   if (contradictionScore > 0) {
     reasons.push('contradictory_evidence_present');
   }
@@ -160,7 +171,11 @@ export function assessKnowledgeReverification(input: {
     source_turns: input.evidence.some((item) => item.support_polarity === 'supports'),
     grounding_strength: input.knowledge.grounding_strength,
     evidence_count: input.evidence.filter((item) => item.support_polarity === 'supports').length,
-    trust_score: clamp(input.knowledge.trust_score + explicitness * 0.1 - contradictionScore * 0.25),
+    trust_score: clamp(
+      input.knowledge.trust_score +
+        explicitness * input.policy.reverificationExplicitnessBoost -
+        contradictionScore * input.policy.reverificationContradictionPenalty,
+    ),
     state: input.knowledge.knowledge_state === 'provisional' ? 'provisional' : 'candidate',
     created_at: input.knowledge.created_at,
     promoted_knowledge_id: input.knowledge.id,
@@ -181,7 +196,7 @@ export function buildKnowledgeConflict(input: {
   contradictionScore: number;
   policy: Required<ExtractionPolicy>;
 }): KnowledgeConflict {
-  const severity = contradictionPenalty(input.contradictionScore);
+  const severity = contradictionPenalty(input.contradictionScore, input.policy);
   return {
     existing_knowledge_id: input.existing.id,
     candidate_id: input.candidateId,

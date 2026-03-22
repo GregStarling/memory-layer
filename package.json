@@ -5,13 +5,13 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "homepage": "https://github.com/your-org/memory-layer#readme",
+  "homepage": "https://github.com/gstarling/memory-layer#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/your-org/memory-layer.git"
+    "url": "git+https://github.com/gstarling/memory-layer.git"
   },
   "bugs": {
-    "url": "https://github.com/your-org/memory-layer/issues"
+    "url": "https://github.com/gstarling/memory-layer/issues"
   },
   "bin": {
     "memory-layer": "./bin/memory-server.mjs"

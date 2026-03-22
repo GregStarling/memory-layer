@@ -3,13 +3,13 @@ import {
   createMemoryManager,
   createSQLiteAdapter,
 } from '../../dist/index.js';
-import { assertScenario, average, withFrozenNow } from './shared.mjs';
+import { assertScenario, average, tagEvalOutput, withFrozenNow } from './shared.mjs';
 
 function knowledgeFacts(results) {
   return results.knowledge.map((entry) => entry.item.fact);
 }
 
-export async function runLongHorizonEvals() {
+export async function runLongHorizonEvals(_options = {}) {
   const strategyAdapter = createSQLiteAdapter(':memory:');
   const strategyMemory = createMemoryManager({
     adapter: strategyAdapter,
@@ -230,7 +230,7 @@ export async function runLongHorizonEvals() {
     const provisionalFactExpired =
       maintenanceAdapter.getKnowledgeMemoryById(provisionalFact.id)?.retired_at != null;
 
-    return {
+    return tagEvalOutput('long-horizon', {
       metrics: {
         strategyOutcomeRecallRate: average([
           Number(successfulStrategyRecalled),
@@ -272,7 +272,63 @@ export async function runLongHorizonEvals() {
           knowledge: maintenanceAdapter.getKnowledgeMemoryById(provisionalFact.id),
         }),
       ],
-    };
+      diagnostic: {
+        metricTraces: {
+          strategyOutcomeRecallRate: {
+            stage: 'strategy_reverification',
+            successfulKnowledge: successfulInspection.knowledge,
+            failedKnowledge: failedInspection.knowledge,
+          },
+          memoryIsolationAccuracy: {
+            stage: 'cross_scope_context',
+            defaultContextFacts: defaultContext.relevantKnowledge.map((item) => item.fact),
+            workspaceFacts: knowledgeFacts(workspaceResults),
+          },
+          postMaintenanceFidelityScore: {
+            stage: 'maintenance_lifecycle',
+            report: maintenanceResult,
+            maintenanceFacts: maintenanceContext.relevantKnowledge.map((item) => item.fact),
+            staleProjectFact: maintenanceAdapter.getKnowledgeMemoryById(staleProjectFact.id),
+            provisionalFact: maintenanceAdapter.getKnowledgeMemoryById(provisionalFact.id),
+          },
+        },
+        scenarioTraces: {
+          recalls_successful_strategy_outcome: {
+            stage: 'strategy_reverification',
+            knowledge: successfulInspection.knowledge,
+            audits: successfulInspection.audits,
+          },
+          failed_strategy_does_not_dominate_default_recall: {
+            stage: 'strategy_reverification',
+            knowledge: failedInspection.knowledge,
+            audits: failedInspection.audits,
+          },
+          sibling_scope_memory_does_not_leak_by_default: {
+            stage: 'cross_scope_context',
+            defaultContextFacts: defaultContext.relevantKnowledge.map((item) => item.fact),
+          },
+          explicit_workspace_inheritance_can_surface_shared_memory: {
+            stage: 'cross_scope_context',
+            workspaceFacts: knowledgeFacts(workspaceResults),
+          },
+          important_constraint_survives_maintenance: {
+            stage: 'maintenance_lifecycle',
+            report: maintenanceResult,
+            maintenanceFacts: maintenanceContext.relevantKnowledge.map((item) => item.fact),
+          },
+          stale_project_fact_is_demoted_by_maintenance: {
+            stage: 'maintenance_lifecycle',
+            report: maintenanceResult,
+            knowledge: maintenanceAdapter.getKnowledgeMemoryById(staleProjectFact.id),
+          },
+          weak_provisional_fact_expires_during_maintenance: {
+            stage: 'maintenance_lifecycle',
+            report: maintenanceResult,
+            knowledge: maintenanceAdapter.getKnowledgeMemoryById(provisionalFact.id),
+          },
+        },
+      },
+    });
   } finally {
     await Promise.all([
       strategyMemory.close(),

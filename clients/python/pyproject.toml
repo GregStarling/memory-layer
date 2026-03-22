@@ -37,9 +37,9 @@ dev = [
 memory-layer-client = "memory_layer_client.cli:main"
 
 [project.urls]
-Repository = "https://github.com/your-org/memory-layer"
-Documentation = "https://github.com/your-org/memory-layer/tree/main/clients/python"
-Issues = "https://github.com/your-org/memory-layer/issues"
+Repository = "https://github.com/gstarling/memory-layer"
+Documentation = "https://github.com/gstarling/memory-layer/tree/main/clients/python"
+Issues = "https://github.com/gstarling/memory-layer/issues"
 
 [tool.setuptools.packages.find]
 include = ["memory_layer_client*"]

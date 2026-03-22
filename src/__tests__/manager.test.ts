@@ -174,6 +174,33 @@ describe('memory manager', () => {
     await manager.close();
   });
 
+  it('rejects reverification for knowledge outside the manager scope', async () => {
+    const manager = createMemoryManager({
+      adapter,
+      scope: makeScope(),
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      autoCompact: false,
+    });
+
+    const foreign = adapter.insertKnowledgeMemory({
+      ...makeScope({ scope_id: 'other-thread' }),
+      fact: 'Foreign knowledge',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+
+    await expect(manager.reverifyKnowledge(foreign.id)).rejects.toThrow(
+      'does not belong to the requested scope',
+    );
+    await manager.close();
+  });
+
   it('can process an exchange in one memory cycle', async () => {
     const manager = createMemoryManager({
       adapter,
@@ -226,9 +253,65 @@ describe('memory manager', () => {
     });
 
     const bootstrap = await manager.getSessionBootstrap('sqlite');
-    expect(bootstrap.workingMemory?.summary).toContain('Need to finish');
+    expect(bootstrap.workingMemory).toBeNull();
     expect(bootstrap.relevantKnowledge.length).toBeGreaterThan(0);
     await manager.close();
+  });
+
+  it('keeps active turns and working memory isolated to the current session', async () => {
+    const scope = makeScope();
+    const managerA = createMemoryManager({
+      adapter,
+      scope,
+      sessionId: 'session-a',
+      summarizer: async () => ({
+        summary: 'session a summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      monitorPolicy: {
+        floorTurns: 1,
+        floorTokens: 1,
+        hardTurnThreshold: 2,
+        softTurnThreshold: 10,
+        hardTokenThreshold: 5000,
+        softTokenThreshold: 5000,
+      },
+    });
+    const managerB = createMemoryManager({
+      adapter,
+      scope,
+      sessionId: 'session-b',
+      summarizer: async () => ({
+        summary: 'session b summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      monitorPolicy: {
+        floorTurns: 1,
+        floorTokens: 1,
+        hardTurnThreshold: 2,
+        softTurnThreshold: 10,
+        hardTokenThreshold: 5000,
+        softTokenThreshold: 5000,
+      },
+    });
+
+    await managerA.processTurn('user', 'alpha one');
+    await managerA.processTurn('assistant', 'alpha two');
+    await managerB.processTurn('user', 'beta one');
+    await managerB.processTurn('assistant', 'beta two');
+
+    const contextA = await managerA.getContext();
+    const contextB = await managerB.getContext();
+
+    expect(contextA.activeTurns.map((turn) => turn.content)).toEqual(['alpha two']);
+    expect(contextB.activeTurns.map((turn) => turn.content)).toEqual(['beta two']);
+    expect(contextA.workingMemory?.summary).toBe('session a summary');
+    expect(contextB.workingMemory?.summary).toBe('session b summary');
+
+    await managerA.close();
+    await managerB.close();
   });
 
   it('persists monitor state and defers soft compaction until forced', async () => {
@@ -319,6 +402,36 @@ describe('memory manager', () => {
 
     expect(adapter.getActiveWorkingMemory(makeScope()).length).toBeGreaterThan(0);
     expect(adapter.getActiveKnowledgeMemory(makeScope())).toEqual([]);
+    await manager.close();
+  });
+
+  it('resets monitor state when summarizer falls back to log_and_continue', async () => {
+    const scope = makeScope();
+    const manager = createMemoryManager({
+      adapter,
+      scope,
+      sessionId: 'session-1',
+      summarizer: async () => {
+        throw new Error('summary failed');
+      },
+      failurePolicy: {
+        summarizer: 'log_and_continue',
+      },
+      monitorPolicy: {
+        floorTurns: 1,
+        floorTokens: 1,
+        hardTurnThreshold: 2,
+        softTurnThreshold: 10,
+        hardTokenThreshold: 5000,
+        softTokenThreshold: 5000,
+      },
+    });
+
+    await manager.processTurn('user', 'one');
+    await manager.processTurn('assistant', 'two');
+
+    expect(adapter.getContextMonitor(scope)?.compaction_state).toBe('idle');
+    expect(adapter.getActiveWorkingMemory(scope)).toHaveLength(0);
     await manager.close();
   });
 

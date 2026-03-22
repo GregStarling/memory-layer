@@ -290,6 +290,26 @@ describe('HTTP server', () => {
         content: 'x'.repeat(512),
       }),
     });
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(413);
+  });
+
+  it('rejects malformed request validation inputs with 400s', async () => {
+    const base = await setup(13113);
+
+    const badTurn = await fetch(`${base}/v1/turns`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'invalid', content: 'hello' }),
+    });
+    expect(badTurn.status).toBe(400);
+
+    const badLimit = await fetch(`${base}/v1/search?q=test&limit=abc`);
+    expect(badLimit.status).toBe(400);
+
+    const partialScope = await fetch(`${base}/v1/search?q=test&tenant_id=acme&system_id=assistant`);
+    expect(partialScope.status).toBe(400);
+
+    const badScopeLevel = await fetch(`${base}/v1/search/cross-scope?q=test&scope_level=planet`);
+    expect(badScopeLevel.status).toBe(400);
   });
 });

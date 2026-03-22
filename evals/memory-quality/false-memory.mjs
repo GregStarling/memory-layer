@@ -5,9 +5,9 @@ import {
   extractKnowledge,
   wrapSyncAdapter,
 } from '../../dist/index.js';
-import { assertScenario, ratio } from './shared.mjs';
+import { assertScenario, ratio, tagEvalOutput } from './shared.mjs';
 
-export async function runFalseMemoryEvals() {
+export async function runFalseMemoryEvals(_options = {}) {
   const scope = {
     tenant_id: 'eval',
     system_id: 'memory-quality',
@@ -84,7 +84,7 @@ export async function runFalseMemoryEvals() {
       item.fact.includes('Docker-first deployment strategy'),
     );
 
-    return {
+    return tagEvalOutput('false-memory', {
       metrics: {
         falseMemoryRate: ratio(Number(falseFactSurfaced), 1),
       },
@@ -93,7 +93,24 @@ export async function runFalseMemoryEvals() {
           facts: context.relevantKnowledge.map((item) => item.fact),
         }),
       ],
-    };
+      diagnostic: {
+        metricTraces: {
+          falseMemoryRate: {
+            stage: 'promotion_guard',
+            compactionSummary: compaction.workingMemory.summary,
+            extractedFact: 'The user wants a Docker-first deployment strategy.',
+            finalContextFacts: context.relevantKnowledge.map((item) => item.fact),
+          },
+        },
+        scenarioTraces: {
+          summary_only_false_fact_is_not_promoted: {
+            stage: 'promotion_guard',
+            compactionSummary: compaction.workingMemory.summary,
+            finalContextFacts: context.relevantKnowledge.map((item) => item.fact),
+          },
+        },
+      },
+    });
   } finally {
     await asyncAdapter.close();
   }

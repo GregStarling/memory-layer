@@ -176,4 +176,26 @@ describe('MCP server handler', () => {
     const result = await handler.callTool('unknown_tool', {});
     expect(result.isError).toBe(true);
   });
+
+  it('rejects malformed MCP tool inputs', async () => {
+    handler = createMcpServerHandler();
+
+    const badLimit = await handler.callTool('memory_search', {
+      query: 'test',
+      limit: 'abc',
+    } as never);
+    expect(badLimit.isError).toBe(true);
+
+    const badScope = await handler.callTool('memory_search', {
+      query: 'test',
+      scope: [],
+    } as never);
+    expect(badScope.isError).toBe(true);
+
+    const badScopeLevel = await handler.callTool('memory_search_cross_scope', {
+      query: 'test',
+      scopeLevel: 'planet',
+    } as never);
+    expect(badScopeLevel.isError).toBe(true);
+  });
 });

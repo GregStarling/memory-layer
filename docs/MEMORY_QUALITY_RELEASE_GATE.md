@@ -14,7 +14,7 @@ npm run python:check
 npm run eval:platform-quality:enforce
 ```
 
-The enforced memory-quality run must pass every threshold. The enforced delta report blocks regressions versus the recorded baseline in `evals/memory-quality/baseline.json`. The Python and platform checks prove that hosted HTTP, Node CLI inspection, and Python client surfaces still work against the same running system.
+The enforced memory-quality run must pass every threshold. The enforced delta report blocks regressions versus the recorded baseline in `evals/memory-quality/baseline.json`. Refresh that baseline only after a full hard-gate pass so it remains a known-good release anchor instead of a stale historical snapshot. The Python and platform checks prove that hosted HTTP, Node CLI inspection, and Python client surfaces still work against the same running system.
 
 ## Final Thresholds
 

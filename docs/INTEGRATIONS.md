@@ -30,6 +30,12 @@ Run one HTTP service and route each request into its own scope:
 - `workspace_id`: shared project memory
 - `scope_id`: thread, task, run, or conversation
 
+Operational contract:
+
+- Use a single SQLite-backed service when one process should own writes.
+- Use Postgres-backed hosting when multiple workers or agents need concurrent shared-memory writes.
+- Use `collaboration_id` when memory must be intentionally shared across distinct systems without collapsing all workspace memory together.
+
 ## Autonomous Agent Pattern
 
 Use the `autonomous_agent` preset, aggressive compaction, work-item tracking, and periodic maintenance:
@@ -48,4 +54,4 @@ The repo now ships reference integrations for:
 - LangChain chat-history style memory bridging
 - Python HTTP client helpers for service-oriented deployments
 
-See `packages/` and `clients/python/` for concrete examples.
+See `src/integrations/` and `clients/python/` for concrete examples.

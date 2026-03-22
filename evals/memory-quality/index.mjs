@@ -1,31 +1,60 @@
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { runContradictionEvals } from './contradictions.mjs';
 import { runFidelityEvals } from './fidelity.mjs';
 import { runFalseMemoryEvals } from './false-memory.mjs';
 import { runLongHorizonEvals } from './long-horizon.mjs';
+import { runPlatformQualityEval } from '../platform-quality/index.mjs';
 import { runQualityModeReport } from './quality-modes.mjs';
 import { runRetentionEvals } from './retention.mjs';
-import { mergeScenarioOutputs } from './shared.mjs';
+import { buildDiagnosticReport, mergeScenarioOutputs } from './shared.mjs';
 
-export async function runMemoryQualityEvals() {
+const currentDir = path.dirname(fileURLToPath(import.meta.url));
+
+async function readBaselineReport() {
+  const raw = await readFile(path.join(currentDir, 'baseline.json'), 'utf8');
+  return JSON.parse(raw);
+}
+
+export async function runMemoryQualityEvals(options = {}) {
+  const diagnostic = options.diagnostic === true;
   const qualityModes = await runQualityModeReport();
   const outputs = await Promise.all([
-    runRetentionEvals(),
-    runContradictionEvals(),
-    runFalseMemoryEvals(),
-    runFidelityEvals(),
-    runLongHorizonEvals(),
+    runRetentionEvals({ diagnostic }),
+    runContradictionEvals({ diagnostic }),
+    runFalseMemoryEvals({ diagnostic }),
+    runFidelityEvals({ diagnostic }),
+    runLongHorizonEvals({ diagnostic }),
   ]);
-
-  return {
+  const merged = mergeScenarioOutputs(outputs);
+  const result = {
     eval: 'memory-quality',
     qualityModes,
-    ...mergeScenarioOutputs(outputs),
+    ...merged,
+  };
+
+  if (!diagnostic) {
+    return result;
+  }
+
+  const [baseline, platformQuality] = await Promise.all([readBaselineReport(), runPlatformQualityEval()]);
+  return {
+    ...result,
+    diagnostic: buildDiagnosticReport({
+      outputs,
+      engineResult: result,
+      baseline,
+      platformQuality,
+    }),
   };
 }
 
 async function main() {
   const enforce = process.argv.includes('--enforce');
-  const result = await runMemoryQualityEvals();
+  const diagnostic = process.argv.includes('--diagnostic');
+  const result = await runMemoryQualityEvals({ diagnostic });
   console.log(JSON.stringify(result, null, 2));
   if (enforce && !result.passed) {
     process.exit(1);

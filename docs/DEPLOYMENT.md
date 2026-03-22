@@ -70,6 +70,10 @@ The server reads and writes on stdio, so it fits directly into MCP-compatible ru
 ## Production Notes
 
 - Use a file-backed SQLite database or Postgres for durable deployments.
+- Treat SQLite as the lowest-friction embedded path. Its semantic retrieval is an in-process scan over local embeddings, which is appropriate for local and moderate-sized workloads but not the strongest scaling path.
+- Treat SQLite HTTP/MCP deployments as a single-process service contract. It is the right fit when one runtime owns writes and other components talk to that one service.
+- Use Postgres when multiple processes, workers, or hosted instances need to write shared memory concurrently. That is the operationally safe multi-writer path.
+- For the strongest hosted retrieval path, use Postgres with the `pgvector` extension enabled and keep the `knowledge_embeddings` HNSW index from `src/adapters/postgres/schema.sql`.
 - Put `MEMORY_API_KEY` behind an API gateway or private network if the service is shared.
 - Reserve `MEMORY_ADMIN_API_KEY` for compaction and maintenance automation.
 - Keep `bodyLimitBytes` low unless you intentionally ingest large prompts or transcripts.

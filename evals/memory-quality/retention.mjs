@@ -1,5 +1,5 @@
 import { createMemory } from '../../dist/index.js';
-import { assertScenario, average, ratio } from './shared.mjs';
+import { assertScenario, average, ratio, tagEvalOutput } from './shared.mjs';
 
 function hasFact(items, needle) {
   const loweredNeedle = needle.toLowerCase();
@@ -15,7 +15,7 @@ async function addNoise(memory, count) {
   }
 }
 
-export async function runRetentionEvals() {
+export async function runRetentionEvals(_options = {}) {
   const memory = createMemory({
     adapter: 'memory',
     scope: {
@@ -72,7 +72,7 @@ export async function runRetentionEvals() {
       ]),
     };
 
-    return {
+    return tagEvalOutput('retention', {
       metrics,
       scenarios: [
         assertScenario('retains_constraint_memory', constraintHit, {
@@ -94,7 +94,57 @@ export async function runRetentionEvals() {
           objectives: context.activeObjectives.map((item) => item.title),
         }),
       ],
-    };
+      diagnostic: {
+        metricTraces: {
+          constraintRetentionRate: {
+            stage: 'context_selection',
+            relevantKnowledge: context.relevantKnowledge.map((item) => item.fact),
+          },
+          preferenceRetentionRate: {
+            stage: 'context_selection',
+            relevantKnowledge: context.relevantKnowledge.map((item) => item.fact),
+          },
+          identityRetentionRate: {
+            stage: 'context_selection',
+            relevantKnowledge: context.relevantKnowledge.map((item) => item.fact),
+          },
+          procedureRetentionRate: {
+            stage: 'context_selection',
+            relevantKnowledge: context.relevantKnowledge.map((item) => item.fact),
+          },
+          trustedMemoryRecall: {
+            stage: 'trusted_core_selection',
+            trustedCoreFacts: context.trustedCoreMemory.map((item) => item.fact),
+            relevantKnowledge: context.relevantKnowledge.map((item) => item.fact),
+          },
+        },
+        scenarioTraces: {
+          retains_constraint_memory: {
+            stage: 'context_selection',
+            relevantKnowledge: context.relevantKnowledge.map((item) => item.fact),
+            trustedCoreFacts: context.trustedCoreMemory.map((item) => item.fact),
+          },
+          retains_preference_memory: {
+            stage: 'context_selection',
+            relevantKnowledge: context.relevantKnowledge.map((item) => item.fact),
+            trustedCoreFacts: context.trustedCoreMemory.map((item) => item.fact),
+          },
+          retains_identity_memory: {
+            stage: 'context_selection',
+            relevantKnowledge: context.relevantKnowledge.map((item) => item.fact),
+            trustedCoreFacts: context.trustedCoreMemory.map((item) => item.fact),
+          },
+          retains_procedure_memory: {
+            stage: 'context_selection',
+            relevantKnowledge: context.relevantKnowledge.map((item) => item.fact),
+          },
+          retains_active_objective_context: {
+            stage: 'objective_selection',
+            activeObjectives: context.activeObjectives.map((item) => item.title),
+          },
+        },
+      },
+    });
   } finally {
     await memory.close();
   }

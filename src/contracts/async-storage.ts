@@ -37,7 +37,7 @@ export interface AsyncStorageAdapter {
   insertTurn(input: NewTurn): Promise<Turn>;
   insertTurns(inputs: NewTurn[]): Promise<Turn[]>;
   getTurnById(id: number): Promise<Turn | null>;
-  getActiveTurns(scope: MemoryScope): Promise<Turn[]>;
+  getActiveTurns(scope: MemoryScope, sessionId?: string): Promise<Turn[]>;
   getActiveTurnsPaginated(
     scope: MemoryScope,
     options?: PaginationOptions,
@@ -53,14 +53,14 @@ export interface AsyncStorageAdapter {
     sessionId: string,
     startId: number,
     endId: number,
-    scope?: MemoryScope,
+    scope: MemoryScope,
   ): Promise<Turn[]>;
 
   insertWorkingMemory(input: NewWorkingMemory): Promise<WorkingMemory>;
   getWorkingMemoryById(id: number): Promise<WorkingMemory | null>;
-  getWorkingMemoryBySession(sessionId: string, scope?: MemoryScope): Promise<WorkingMemory[]>;
-  getActiveWorkingMemory(scope: MemoryScope): Promise<WorkingMemory[]>;
-  getLatestWorkingMemory(scope: MemoryScope): Promise<WorkingMemory | null>;
+  getWorkingMemoryBySession(sessionId: string, scope: MemoryScope): Promise<WorkingMemory[]>;
+  getActiveWorkingMemory(scope: MemoryScope, sessionId?: string): Promise<WorkingMemory[]>;
+  getLatestWorkingMemory(scope: MemoryScope, sessionId?: string): Promise<WorkingMemory | null>;
   getWorkingMemoryByTimeRange(scope: MemoryScope, range: TimeRange): Promise<WorkingMemory[]>;
   expireWorkingMemory(id: number): Promise<void>;
   markWorkingMemoryPromoted(id: number, knowledgeMemoryId: number): Promise<void>;

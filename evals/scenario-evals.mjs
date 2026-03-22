@@ -10,6 +10,77 @@ function assertResult(name, passed, detail) {
   return { name, passed, detail };
 }
 
+async function runHundredTurnSession({
+  preset,
+  scope,
+  summary,
+  facts,
+  query,
+  unresolvedWorkTitle,
+  userTurn,
+  assistantTurn,
+}) {
+  const manager = createClaudeMemoryManager({
+    dbPath: ':memory:',
+    scope,
+    preset,
+    summarizer: {
+      client: {
+        async generate(request) {
+          if (request.expectedFormat === 'object') {
+            return JSON.stringify({
+              summary,
+              key_entities: ['memory-layer'],
+              topic_tags: ['long-horizon'],
+            });
+          }
+          return JSON.stringify(facts);
+        },
+      },
+    },
+    extractor: {
+      client: {
+        async generate() {
+          return JSON.stringify(facts);
+        },
+      },
+    },
+    monitorPolicy: {
+      floorTurns: 2,
+      floorTokens: 1,
+      softTurnThreshold: 6,
+      hardTurnThreshold: 8,
+      softTokenThreshold: 200,
+      hardTokenThreshold: 300,
+      softRetainTurns: 4,
+      hardRetainTurns: 3,
+    },
+  });
+  const runtime = createMemoryRuntime(manager);
+  try {
+    if (unresolvedWorkTitle) {
+      await manager.trackWorkItem(unresolvedWorkTitle, 'unresolved_work', 'blocked');
+    }
+    for (let index = 0; index < 50; index += 1) {
+      await runtime.afterModelCall({
+        userInput: userTurn(index),
+        assistantOutput: assistantTurn(index),
+      });
+    }
+    const prepared = await runtime.beforeModelCall(query);
+    const recall = await manager.recall({
+      start_at: 0,
+      end_at: Math.floor(Date.now() / 1000) + 10,
+    });
+    return {
+      prepared,
+      recall,
+    };
+  } finally {
+    await manager.close();
+  }
+}
+
 async function runScenarios() {
   const scope = {
     tenant_id: 'eval',
@@ -84,6 +155,56 @@ async function runScenarios() {
     prepared.context.workingMemory?.summary?.toLowerCase().includes('typescript') ||
     prepared.context.workingMemory?.summary?.toLowerCase().includes('local-first');
 
+  const aiIdeLongRun = await runHundredTurnSession({
+    preset: 'ai_ide',
+    scope: {
+      tenant_id: 'eval',
+      system_id: 'quality',
+      workspace_id: 'long-run',
+      scope_id: 'ai-ide-100',
+    },
+    summary: 'AI IDE session: preserve local-first TypeScript constraints while refactoring over many turns.',
+    facts: [
+      { fact: 'The system must remain local-first.', factType: 'constraint', confidence: 'high' },
+      { fact: 'The user prefers TypeScript for implementation work.', factType: 'preference', confidence: 'high' },
+    ],
+    query: 'local-first TypeScript refactor guidance',
+    userTurn: (index) =>
+      `Turn ${index}: continue the refactor, keep the project local-first, and prefer TypeScript over ad-hoc rewrites.`,
+    assistantTurn: (index) =>
+      `Response ${index}: I will preserve the local-first constraint and keep the implementation in TypeScript.`,
+  });
+  const autonomousLongRun = await runHundredTurnSession({
+    preset: 'autonomous_agent',
+    scope: {
+      tenant_id: 'eval',
+      system_id: 'quality',
+      workspace_id: 'long-run',
+      scope_id: 'autonomous-100',
+    },
+    summary: 'Autonomous runtime: keep rollout work coordinated, local-first, and grounded in the shared checklist.',
+    facts: [
+      { fact: 'The system must remain local-first.', factType: 'constraint', confidence: 'high' },
+      { fact: 'Use the shared rollout checklist before deploys.', factType: 'decision', confidence: 'high' },
+    ],
+    query: 'rollout checklist local-first deployment',
+    unresolvedWorkTitle: 'Resolve rollout checklist blockers',
+    userTurn: (index) =>
+      `Turn ${index}: continue the rollout task, stay local-first, and use the shared rollout checklist before deploys.`,
+    assistantTurn: (index) =>
+      `Response ${index}: I will continue the rollout, preserve local-first behavior, and follow the shared checklist.`,
+  });
+  const aiIdeFacts = [
+    ...aiIdeLongRun.prepared.context.trustedCoreMemory.map((item) => item.fact),
+    ...aiIdeLongRun.prepared.context.taskRelevantKnowledge.map((item) => item.fact),
+    ...aiIdeLongRun.prepared.context.provisionalKnowledge.map((item) => item.fact),
+  ];
+  const autonomousFacts = [
+    ...autonomousLongRun.prepared.context.trustedCoreMemory.map((item) => item.fact),
+    ...autonomousLongRun.prepared.context.taskRelevantKnowledge.map((item) => item.fact),
+    ...autonomousLongRun.prepared.context.provisionalKnowledge.map((item) => item.fact),
+  ];
+
   const results = [
     assertResult('zero_config_retrieval', safeRetrievalAvailable, {
       knowledgeCount: prepared.context.relevantKnowledge.length,
@@ -112,6 +233,31 @@ async function runScenarios() {
       expiredWorkingMemoryIds: maintenance.expiredWorkingMemoryIds,
       retiredKnowledgeIds: maintenance.retiredKnowledgeIds,
       deletedWorkItemIds: maintenance.deletedWorkItemIds,
+      },
+    ),
+    assertResult(
+      'ai_ide_100_turn_session',
+      aiIdeLongRun.recall.turns.length === 100 &&
+        aiIdeLongRun.recall.workingMemory.length > 0 &&
+        aiIdeFacts.some((fact) => fact.toLowerCase().includes('local-first')) &&
+        aiIdeFacts.some((fact) => fact.toLowerCase().includes('typescript')),
+      {
+        turnCount: aiIdeLongRun.recall.turns.length,
+        workingMemoryCount: aiIdeLongRun.recall.workingMemory.length,
+        facts: aiIdeFacts,
+      },
+    ),
+    assertResult(
+      'autonomous_runner_100_turn_session',
+      autonomousLongRun.recall.turns.length === 100 &&
+        autonomousLongRun.recall.workingMemory.length > 0 &&
+        autonomousLongRun.prepared.context.unresolvedWork.includes('Resolve rollout checklist blockers') &&
+        autonomousFacts.some((fact) => fact.toLowerCase().includes('checklist')),
+      {
+        turnCount: autonomousLongRun.recall.turns.length,
+        workingMemoryCount: autonomousLongRun.recall.workingMemory.length,
+        unresolvedWork: autonomousLongRun.prepared.context.unresolvedWork,
+        facts: autonomousFacts,
       },
     ),
   ];

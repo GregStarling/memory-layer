@@ -69,6 +69,14 @@ function matchesScope(item: MemoryScope, scope: MemoryScope): boolean {
   );
 }
 
+function matchesScopedSession(
+  item: MemoryScope & { session_id?: string | null },
+  scope: MemoryScope,
+  sessionId?: string,
+): boolean {
+  return matchesScope(item, scope) && (sessionId == null || item.session_id === sessionId);
+}
+
 function matchesLevel(item: MemoryScope, scope: MemoryScope, level: ScopeLevel): boolean {
   const left = normalizeScope(item);
   const right = normalizeScope(scope);
@@ -211,8 +219,10 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       return state.turns.find((turn) => turn.id === id) ?? null;
     },
 
-    getActiveTurns(scope) {
-      return state.turns.filter((turn) => matchesScope(turn, scope) && turn.archived_at === null);
+    getActiveTurns(scope, sessionId) {
+      return state.turns.filter(
+        (turn) => matchesScopedSession(turn, scope, sessionId) && turn.archived_at === null,
+      );
     },
 
     getActiveTurnsPaginated(scope, options) {
@@ -261,7 +271,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
           turn.id >= startId &&
           turn.id <= endId &&
           turn.archived_at !== null &&
-          (!scope || matchesScope(turn, scope)),
+          matchesScope(turn, scope),
       );
     },
 
@@ -293,22 +303,21 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     },
 
     getWorkingMemoryBySession(sessionId, scope) {
-      return state.workingMemory.filter(
-        (item) => item.session_id === sessionId && (!scope || matchesScope(item, scope)),
-      );
+      return state.workingMemory.filter((item) => item.session_id === sessionId && matchesScope(item, scope));
     },
 
-    getActiveWorkingMemory(scope) {
+    getActiveWorkingMemory(scope, sessionId) {
       const now = nowSeconds();
       return state.workingMemory.filter(
         (item) =>
-          matchesScope(item, scope) && (item.expires_at === null || item.expires_at > now),
+          matchesScopedSession(item, scope, sessionId) &&
+          (item.expires_at === null || item.expires_at > now),
       );
     },
 
-    getLatestWorkingMemory(scope) {
+    getLatestWorkingMemory(scope, sessionId) {
       return (
-        this.getActiveWorkingMemory(scope).sort((a, b) => b.id - a.id)[0] ?? null
+        this.getActiveWorkingMemory(scope, sessionId).sort((a, b) => b.id - a.id)[0] ?? null
       );
     },
 

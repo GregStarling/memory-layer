@@ -5,7 +5,7 @@ import {
   extractKnowledge,
   wrapSyncAdapter,
 } from '../../dist/index.js';
-import { assertScenario, average, ratio } from './shared.mjs';
+import { assertScenario, average, tagEvalOutput } from './shared.mjs';
 
 function containsFact(context, fragment) {
   return context.relevantKnowledge.some((item) => item.fact.toLowerCase().includes(fragment.toLowerCase()));
@@ -19,7 +19,7 @@ function containsSummaryDetail(context, fragment) {
   return context.recentSummaries.some((item) => item.summary.toLowerCase().includes(needle));
 }
 
-export async function runFidelityEvals() {
+export async function runFidelityEvals(_options = {}) {
   const scope = {
     tenant_id: 'eval',
     system_id: 'memory-quality',
@@ -95,7 +95,7 @@ export async function runFidelityEvals() {
     const preservedSecondary =
       containsFact(context, 'green UI styling') || containsSummaryDetail(context, 'green UI styling');
 
-    return {
+    return tagEvalOutput('fidelity', {
       metrics: {
         postCompactionFidelityScore: average([
           Number(preservedConstraint),
@@ -114,7 +114,37 @@ export async function runFidelityEvals() {
           ].filter(Boolean),
         }),
       ],
-    };
+      diagnostic: {
+        metricTraces: {
+          postCompactionFidelityScore: {
+            stage: 'post_compaction_context',
+            compactionSummary: compaction.workingMemory.summary,
+            relevantKnowledge: context.relevantKnowledge.map((item) => ({
+              fact: item.fact,
+              state: item.knowledge_state,
+            })),
+            recentSummaries: [
+              context.workingMemory?.summary ?? null,
+              ...context.recentSummaries.map((item) => item.summary),
+            ].filter(Boolean),
+          },
+        },
+        scenarioTraces: {
+          critical_constraint_survives_compaction: {
+            stage: 'post_compaction_context',
+            relevantKnowledge: context.relevantKnowledge.map((item) => item.fact),
+          },
+          secondary_detail_can_survive_compaction: {
+            stage: 'post_compaction_context',
+            relevantKnowledge: context.relevantKnowledge.map((item) => item.fact),
+            summaries: [
+              context.workingMemory?.summary ?? null,
+              ...context.recentSummaries.map((item) => item.summary),
+            ].filter(Boolean),
+          },
+        },
+      },
+    });
   } finally {
     await asyncAdapter.close();
   }

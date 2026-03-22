@@ -1,3 +1,5 @@
+import type { KnowledgeClass } from './types.js';
+
 export type ConflictStrategy = 'supersede' | 'keep_both' | 'skip';
 export type ContextMode = 'chat' | 'coding' | 'autonomous_agent' | 'review';
 
@@ -72,6 +74,12 @@ export interface ExtractionPolicy {
   humanFeedbackBoost?: number;
   executionSuccessBoost?: number;
   executionFailurePenalty?: number;
+  noGroundingPenalty?: number;
+  contradictionTrustPenalty?: number;
+  reverificationExplicitnessBoost?: number;
+  reverificationContradictionPenalty?: number;
+  contradictionSeverityMediumThreshold?: number;
+  contradictionSeverityHighThreshold?: number;
 }
 
 export interface ContextPolicy {
@@ -89,6 +97,18 @@ export interface ContextPolicy {
   contradictionPenalty?: number;
   provisionalPenalty?: number;
   objectiveLinkWeight?: number;
+  scopeRelationWeight?: number;
+  collaborationScopeScore?: number;
+  systemScopeScore?: number;
+  tenantScopeScore?: number;
+  localTrustedBonus?: number;
+  localTrustedThreshold?: number;
+  lineageWeight?: number;
+  unrelatedLineagePenalty?: number;
+  minimumLineageScore?: number;
+  evidenceSaturationCount?: number;
+  classImportanceOverrides?: Partial<Record<KnowledgeClass, number>>;
+  semanticMinSimilarity?: number;
   trustedCoreLimit?: number;
   taskRelevantLimit?: number;
   diversityPenalty?: number;
@@ -141,6 +161,12 @@ export const DEFAULT_EXTRACTION_POLICY: Required<ExtractionPolicy> = {
   humanFeedbackBoost: 0.2,
   executionSuccessBoost: 0.15,
   executionFailurePenalty: 0.2,
+  noGroundingPenalty: 0.35,
+  contradictionTrustPenalty: 0.5,
+  reverificationExplicitnessBoost: 0.1,
+  reverificationContradictionPenalty: 0.25,
+  contradictionSeverityMediumThreshold: 0.35,
+  contradictionSeverityHighThreshold: 0.75,
 };
 
 export const DEFAULT_CONTEXT_POLICY: Required<ContextPolicy> = {
@@ -158,6 +184,18 @@ export const DEFAULT_CONTEXT_POLICY: Required<ContextPolicy> = {
   contradictionPenalty: 1.5,
   provisionalPenalty: 0.75,
   objectiveLinkWeight: 0.4,
+  scopeRelationWeight: 0.25,
+  collaborationScopeScore: 0.65,
+  systemScopeScore: 0.3,
+  tenantScopeScore: 0.1,
+  localTrustedBonus: 0.35,
+  localTrustedThreshold: 0.7,
+  lineageWeight: 0.3,
+  unrelatedLineagePenalty: 0.35,
+  minimumLineageScore: 0.5,
+  evidenceSaturationCount: 3,
+  classImportanceOverrides: {},
+  semanticMinSimilarity: 0.1,
   trustedCoreLimit: 8,
   taskRelevantLimit: 12,
   diversityPenalty: 0.2,

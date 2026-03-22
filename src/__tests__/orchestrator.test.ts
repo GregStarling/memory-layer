@@ -289,4 +289,25 @@ describe('orchestrator workflows', () => {
 
     expect(created.some((fact) => fact.fact.toLowerCase().includes('local-first'))).toBe(true);
   });
+
+  it('rejects compaction when turns belong to a different collaboration scope', async () => {
+    const memoryScope = scope({ collaboration_id: 'collab-a' });
+    const { sessionId, turns } = seedTurns({ ...memoryScope, collaboration_id: 'collab-b' }, 2);
+
+    await expect(
+      compactTurns(
+        asyncAdapter,
+        memoryScope,
+        sessionId,
+        turns,
+        async () => ({
+          summary: 'summary',
+          key_entities: [],
+          topic_tags: [],
+        }),
+        'manual',
+        0,
+      ),
+    ).rejects.toThrow('does not belong to the requested scope');
+  });
 });

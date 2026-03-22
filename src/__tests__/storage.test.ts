@@ -58,12 +58,12 @@ describe('SQLite storage adapter', () => {
   // ---------------------------------------------------------------------------
 
   describe('createSessionId', () => {
-    it('embeds all scope fields', () => {
+    it('returns an opaque run identifier', () => {
       const id = createSessionId(scope());
-      expect(id).toContain('acme');
-      expect(id).toContain('assistant');
-      expect(id).toContain('default');
-      expect(id).toContain('thread-1');
+      expect(id).toMatch(/^session_\d{4}-\d{2}-\d{2}_[a-f0-9]{8}$/);
+      expect(id).not.toContain('acme');
+      expect(id).not.toContain('assistant');
+      expect(id).not.toContain('thread-1');
     });
 
     it('generates unique ids each call', () => {
@@ -305,6 +305,30 @@ describe('SQLite storage adapter', () => {
       expect(adapter.getActiveTurns(s2)).toHaveLength(1);
     });
 
+    it('can filter active turns by session within one scope', () => {
+      const memoryScope = scope();
+      const sessionA = createSessionId(memoryScope);
+      const sessionB = createSessionId(memoryScope);
+      adapter.insertTurn({
+        ...memoryScope,
+        session_id: sessionA,
+        actor: 'user-1',
+        role: 'user',
+        content: 'session a',
+      });
+      adapter.insertTurn({
+        ...memoryScope,
+        session_id: sessionB,
+        actor: 'user-2',
+        role: 'user',
+        content: 'session b',
+      });
+
+      expect(adapter.getActiveTurns(memoryScope)).toHaveLength(2);
+      expect(adapter.getActiveTurns(memoryScope, sessionA)).toHaveLength(1);
+      expect(adapter.getActiveTurns(memoryScope, sessionB)).toHaveLength(1);
+    });
+
     it('excludes archived turns', () => {
       const memoryScope = scope();
       const sessionId = createSessionId(memoryScope);
@@ -400,7 +424,6 @@ describe('SQLite storage adapter', () => {
         compaction_trigger: 'manual',
       });
 
-      expect(adapter.getWorkingMemoryBySession(sessionId)).toHaveLength(2);
       expect(adapter.getWorkingMemoryBySession(sessionId, scopeA)).toHaveLength(1);
       expect(adapter.getWorkingMemoryBySession(sessionId, scopeB)).toHaveLength(1);
     });
@@ -474,7 +497,6 @@ describe('SQLite storage adapter', () => {
       adapter.archiveTurn(turnA.id, nowSec(), logA.id);
       adapter.archiveTurn(turnB.id, nowSec(), logB.id);
 
-      expect(adapter.getArchivedTurnRange(sessionId, turnA.id, turnB.id)).toHaveLength(2);
       expect(adapter.getArchivedTurnRange(sessionId, turnA.id, turnB.id, scopeA)).toHaveLength(1);
       expect(adapter.getArchivedTurnRange(sessionId, turnA.id, turnB.id, scopeB)).toHaveLength(1);
     });
@@ -635,6 +657,38 @@ describe('SQLite storage adapter', () => {
       });
       expect(adapter.getActiveWorkingMemory(memoryScope)).toHaveLength(1);
     });
+
+    it('can filter active working memory by session within one scope', () => {
+      const memoryScope = scope();
+      const sessionA = createSessionId(memoryScope);
+      const sessionB = createSessionId(memoryScope);
+      adapter.insertWorkingMemory({
+        ...memoryScope,
+        session_id: sessionA,
+        summary: 'session a',
+        key_entities: [],
+        topic_tags: [],
+        turn_id_start: 1,
+        turn_id_end: 1,
+        turn_count: 1,
+        compaction_trigger: 'manual',
+      });
+      const second = adapter.insertWorkingMemory({
+        ...memoryScope,
+        session_id: sessionB,
+        summary: 'session b',
+        key_entities: [],
+        topic_tags: [],
+        turn_id_start: 2,
+        turn_id_end: 2,
+        turn_count: 1,
+        compaction_trigger: 'manual',
+      });
+
+      expect(adapter.getActiveWorkingMemory(memoryScope)).toHaveLength(2);
+      expect(adapter.getActiveWorkingMemory(memoryScope, sessionA)).toHaveLength(1);
+      expect(adapter.getLatestWorkingMemory(memoryScope, sessionB)?.id).toBe(second.id);
+    });
   });
 
   describe('getLatestWorkingMemory', () => {
@@ -710,7 +764,7 @@ describe('SQLite storage adapter', () => {
         turn_count: 5,
         compaction_trigger: 'hard',
       });
-      const results = adapter.getWorkingMemoryBySession(sessionId);
+      const results = adapter.getWorkingMemoryBySession(sessionId, memoryScope);
       expect(results).toHaveLength(2);
       expect(results[0].id).toBe(wm1.id);
       expect(results[1].id).toBe(wm2.id);

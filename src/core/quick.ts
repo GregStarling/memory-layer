@@ -176,8 +176,8 @@ function resolveScope(scope?: string | MemoryScope): MemoryScope {
   if (typeof scope === 'string') {
     return {
       tenant_id: 'default',
-      system_id: scope,
-      scope_id: 'default',
+      system_id: 'default',
+      scope_id: scope,
     };
   }
 

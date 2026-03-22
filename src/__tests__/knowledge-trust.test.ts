@@ -4,9 +4,11 @@ import { createSQLiteAdapter } from '../adapters/sqlite/index.js';
 import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type { MemoryScope } from '../contracts/identity.js';
+import { DEFAULT_EXTRACTION_POLICY } from '../contracts/policy.js';
 import type { StorageAdapter } from '../contracts/storage.js';
 import { createMemoryManager } from '../core/manager.js';
 import { extractKnowledge } from '../core/orchestrator.js';
+import { assessCandidateTrust, buildKnowledgeConflict } from '../core/trust.js';
 import { createSessionId } from '../core/tokens.js';
 
 function scope(overrides: Partial<MemoryScope> = {}): MemoryScope {
@@ -108,6 +110,92 @@ describe('knowledge trust', () => {
 
     expect(created).toHaveLength(1);
     expect(created[0]?.knowledge_state).not.toBe('trusted');
+  });
+
+  it('lets extraction policy change trust math and contradiction severity', () => {
+    const candidate = {
+      id: 1,
+      tenant_id: 'acme',
+      system_id: 'assistant',
+      workspace_id: 'default',
+      collaboration_id: '',
+      scope_id: 'trust-thread',
+      working_memory_id: 1,
+      fact: 'The user approved the rollout.',
+      fact_type: 'decision' as const,
+      knowledge_class: 'strategy' as const,
+      normalized_fact: 'the user approved the rollout',
+      slot_key: null,
+      confidence: 'high' as const,
+      source_summary: true,
+      source_turns: true,
+      grounding_strength: 'strong' as const,
+      evidence_count: 1,
+      trust_score: 0.45,
+      state: 'candidate' as const,
+      created_at: 1,
+      promoted_knowledge_id: null,
+    };
+    const evidence = [
+      {
+        tenant_id: 'acme',
+        system_id: 'assistant',
+        workspace_id: 'default',
+        collaboration_id: '',
+        scope_id: 'trust-thread',
+        id: 1,
+        knowledge_memory_id: null,
+        knowledge_candidate_id: 1,
+        working_memory_id: 1,
+        turn_id: 1,
+        source_type: 'human_feedback' as const,
+        support_polarity: 'supports' as const,
+        speaker_role: 'user' as const,
+        actor: 'reviewer',
+        excerpt: 'Confirmed by reviewer.',
+        start_offset: null,
+        end_offset: null,
+        is_explicit: true,
+        explicitness_score: 1,
+        outcome: 'success' as const,
+        created_at: 1,
+      },
+    ];
+    const defaultAssessment = assessCandidateTrust({
+      candidate,
+      evidence,
+      policy: DEFAULT_EXTRACTION_POLICY,
+    });
+    const boostedAssessment = assessCandidateTrust({
+      candidate,
+      evidence,
+      policy: {
+        ...DEFAULT_EXTRACTION_POLICY,
+        humanFeedbackBoost: 0.45,
+      },
+    });
+    const conflict = buildKnowledgeConflict({
+      existing: adapter.insertKnowledgeMemory({
+        ...scope(),
+        fact: 'The deploy window is Tuesday.',
+        fact_type: 'reference',
+        knowledge_state: 'trusted',
+        knowledge_class: 'project_fact',
+        source: 'manual',
+        confidence: 'high',
+      }),
+      candidateId: 1,
+      relation: 'conflict',
+      contradictionScore: 0.6,
+      policy: {
+        ...DEFAULT_EXTRACTION_POLICY,
+        contradictionSeverityMediumThreshold: 0.7,
+        contradictionSeverityHighThreshold: 0.9,
+      },
+    });
+
+    expect(boostedAssessment.trust_score).toBeGreaterThan(defaultAssessment.trust_score);
+    expect(conflict.severity).toBe('low');
   });
 
   it('reverifies successful strategy memory into trusted strategy knowledge', async () => {

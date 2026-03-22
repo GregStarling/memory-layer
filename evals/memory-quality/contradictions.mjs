@@ -5,9 +5,9 @@ import {
   extractKnowledge,
   wrapSyncAdapter,
 } from '../../dist/index.js';
-import { assertScenario, average, ratio } from './shared.mjs';
+import { assertScenario, average, ratio, tagEvalOutput } from './shared.mjs';
 
-export async function runContradictionEvals() {
+export async function runContradictionEvals(_options = {}) {
   const scope = {
     tenant_id: 'eval',
     system_id: 'memory-quality',
@@ -24,6 +24,7 @@ export async function runContradictionEvals() {
     autoCompact: false,
     autoExtract: false,
   });
+  let assistantManager = null;
 
   async function extractFact(localScope, contents, fact, factType) {
     const sessionId = `${localScope.scope_id}-${Math.random().toString(36).slice(2, 8)}`;
@@ -99,7 +100,15 @@ export async function runContradictionEvals() {
       'The user prefers Go.',
       'preference',
     );
-    const assistantOnlyAssessment = await manager.reverifyKnowledge(assistantOnly[0].id);
+    assistantManager = createMemoryManager({
+      adapter,
+      scope: assistantScope,
+      sessionId: 'assistant-claim-eval',
+      summarizer: async () => ({ summary: '', key_entities: [], topic_tags: [] }),
+      autoCompact: false,
+      autoExtract: false,
+    });
+    const assistantOnlyAssessment = await assistantManager.reverifyKnowledge(assistantOnly[0].id);
     const assistantKnowledge = adapter.getKnowledgeMemoryById(assistantOnly[0].id);
 
     const metrics = {
@@ -116,7 +125,7 @@ export async function runContradictionEvals() {
       provisionalLeakRate: ratio(Number(assistantKnowledge?.knowledge_state === 'trusted'), 1),
     };
 
-    return {
+    return tagEvalOutput('contradictions', {
       metrics,
       scenarios: [
         assertScenario('prefers_latest_update_over_outdated_memory', newestIsPreferred, {
@@ -135,8 +144,78 @@ export async function runContradictionEvals() {
           assessment: assistantOnlyAssessment,
         }),
       ],
-    };
+      diagnostic: {
+        metricTraces: {
+          updateCorrectnessRate: {
+            stage: 'context_selection',
+            currentFacts: facts,
+            promotedFacts: replacement.map((item) => ({
+              id: item.id,
+              fact: item.fact,
+              state: item.knowledge_state,
+            })),
+            supersededFacts: [
+              {
+                id: initial[0]?.id ?? null,
+                fact: initial[0]?.fact ?? null,
+                state: originalAfter?.knowledge_state ?? null,
+              },
+            ],
+          },
+          contradictionResolutionAccuracy: {
+            stage: 'contradiction_resolution',
+            trustedConstraint: {
+              id: trustedConstraint[0]?.id ?? null,
+              fact: trustedConstraint[0]?.fact ?? null,
+            },
+            contradictionCandidateCount: weakContradiction.length,
+            contradictionDecision: {
+              disputedOriginalState: disputedOriginal?.knowledge_state ?? null,
+            },
+          },
+          trustedMemoryPrecision: {
+            stage: 'trust_ranking',
+            topFacts: facts,
+            replacementState: replacement[0]?.knowledge_state ?? null,
+            assistantClaimState: assistantKnowledge?.knowledge_state ?? null,
+          },
+          provisionalLeakRate: {
+            stage: 'trust_ranking',
+            assistantClaimState: assistantKnowledge?.knowledge_state ?? null,
+            assessment: assistantOnlyAssessment,
+          },
+        },
+        scenarioTraces: {
+          prefers_latest_update_over_outdated_memory: {
+            stage: 'context_selection',
+            facts,
+            updateContext: updateContext.relevantKnowledge.map((item) => ({
+              fact: item.fact,
+              state: item.knowledge_state,
+              trust: item.trust_score,
+            })),
+          },
+          outdated_memory_is_removed_or_demoted: {
+            stage: 'supersession',
+            priorFact: initial[0]?.fact ?? null,
+            priorStateAfterUpdate: originalAfter?.knowledge_state ?? null,
+          },
+          weak_contradiction_marks_prior_fact_disputed: {
+            stage: 'contradiction_resolution',
+            priorFact: trustedConstraint[0]?.fact ?? null,
+            priorStateAfterConflict: disputedOriginal?.knowledge_state ?? null,
+            contradictionCandidateCount: weakContradiction.length,
+          },
+          unsupported_assistant_claim_does_not_become_trusted: {
+            stage: 'trust_assessment',
+            assistantOnlyFact: assistantOnly[0]?.fact ?? null,
+            assistantState: assistantKnowledge?.knowledge_state ?? null,
+            assessment: assistantOnlyAssessment,
+          },
+        },
+      },
+    });
   } finally {
-    await manager.close();
+    await Promise.all([manager.close(), assistantManager?.close?.() ?? Promise.resolve()]);
   }
 }

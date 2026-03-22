@@ -1,4 +1,11 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import type { AsyncStorageAdapter } from '../../contracts/async-storage.js';
+import type {
+  EmbeddingAdapter,
+  EmbeddingVector,
+  SimilarEmbeddingResult,
+} from '../../contracts/embedding.js';
 import type { MemoryScope, ScopeLevel } from '../../contracts/identity.js';
 import { normalizeScope, widenScope } from '../../contracts/identity.js';
 import type { EventHook, Logger } from '../../contracts/observability.js';
@@ -37,7 +44,12 @@ export interface PostgresAdapterOptions {
 
 interface PgPool {
   query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+  connect(): Promise<PgClient & { release(): void }>;
   end(): Promise<void>;
+}
+
+interface PgClient {
+  query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
 }
 
 function scopeParams(scope: MemoryScope): unknown[] {
@@ -75,7 +87,9 @@ function wideScopeParams(scope: MemoryScope, level: ScopeLevel): unknown[] {
     case 'system':
       return [n.tenant_id, n.system_id];
     case 'workspace':
-      return [n.tenant_id, n.collaboration_id];
+      return n.collaboration_id.length > 0
+        ? [n.tenant_id, n.collaboration_id]
+        : [n.tenant_id, n.system_id, n.workspace_id];
     default:
       return scopeParams(scope);
   }
@@ -83,6 +97,37 @@ function wideScopeParams(scope: MemoryScope, level: ScopeLevel): unknown[] {
 
 function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+function vectorToLiteral(vector: EmbeddingVector): string {
+  return `[${Array.from(vector, (value) => (Number.isFinite(value) ? value : 0)).join(',')}]`;
+}
+
+function parseVectorValue(value: unknown): EmbeddingVector | null {
+  if (value == null) return null;
+  if (value instanceof Float32Array) return value;
+  if (Array.isArray(value)) {
+    return new Float32Array(value.map((entry) => Number(entry)));
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    const normalized = trimmed
+      .replace(/^\[/, '')
+      .replace(/\]$/, '')
+      .replace(/^\{/, '')
+      .replace(/\}$/, '');
+    if (normalized.length === 0) {
+      return new Float32Array();
+    }
+    return new Float32Array(
+      normalized
+        .split(',')
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0)
+        .map((entry) => Number(entry)),
+    );
+  }
+  return null;
 }
 
 function resolvePaginationOptions(options?: PaginationOptions): Required<PaginationOptions> {
@@ -99,7 +144,7 @@ function mapTurn(row: Record<string, unknown>): Turn {
     tenant_id: String(row.tenant_id),
     system_id: String(row.system_id),
     workspace_id: String(row.workspace_id ?? ''),
-    collaboration_id: String(row.collaboration_id ?? row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? ''),
     scope_id: String(row.scope_id),
     session_id: String(row.session_id),
     actor: String(row.actor),
@@ -120,7 +165,7 @@ function mapWorkingMemory(row: Record<string, unknown>): WorkingMemory {
     tenant_id: String(row.tenant_id),
     system_id: String(row.system_id),
     workspace_id: String(row.workspace_id ?? ''),
-    collaboration_id: String(row.collaboration_id ?? row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? ''),
     scope_id: String(row.scope_id),
     session_id: String(row.session_id),
     summary: String(row.summary),
@@ -143,7 +188,7 @@ function mapKnowledgeMemory(row: Record<string, unknown>): KnowledgeMemory {
     tenant_id: String(row.tenant_id),
     system_id: String(row.system_id),
     workspace_id: String(row.workspace_id ?? ''),
-    collaboration_id: String(row.collaboration_id ?? row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? ''),
     scope_id: String(row.scope_id),
     fact: String(row.fact),
     fact_type: row.fact_type as KnowledgeMemory['fact_type'],
@@ -198,7 +243,7 @@ function mapWorkItem(row: Record<string, unknown>): WorkItem {
     tenant_id: String(row.tenant_id),
     system_id: String(row.system_id),
     workspace_id: String(row.workspace_id ?? ''),
-    collaboration_id: String(row.collaboration_id ?? row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? ''),
     scope_id: String(row.scope_id),
     session_id: row.session_id != null ? String(row.session_id) : null,
     title: String(row.title),
@@ -217,7 +262,7 @@ function mapContextMonitor(row: Record<string, unknown>): ContextMonitor {
     tenant_id: String(row.tenant_id),
     system_id: String(row.system_id),
     workspace_id: String(row.workspace_id ?? ''),
-    collaboration_id: String(row.collaboration_id ?? row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? ''),
     scope_id: String(row.scope_id),
     compaction_state: row.compaction_state as ContextMonitor['compaction_state'],
     active_turn_count: Number(row.active_turn_count),
@@ -234,7 +279,7 @@ function mapCompactionLog(row: Record<string, unknown>): CompactionLog {
     tenant_id: String(row.tenant_id),
     system_id: String(row.system_id),
     workspace_id: String(row.workspace_id ?? ''),
-    collaboration_id: String(row.collaboration_id ?? row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? ''),
     scope_id: String(row.scope_id),
     session_id: String(row.session_id),
     trigger_type: row.trigger_type as CompactionLog['trigger_type'],
@@ -257,7 +302,7 @@ function mapKnowledgeMemoryAudit(row: Record<string, unknown>): KnowledgeMemoryA
     tenant_id: String(row.tenant_id),
     system_id: String(row.system_id),
     workspace_id: String(row.workspace_id ?? ''),
-    collaboration_id: String(row.collaboration_id ?? row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? ''),
     scope_id: String(row.scope_id),
     working_memory_id: Number(row.working_memory_id),
     fact: String(row.fact),
@@ -287,7 +332,7 @@ function mapKnowledgeCandidate(row: Record<string, unknown>): KnowledgeCandidate
     tenant_id: String(row.tenant_id),
     system_id: String(row.system_id),
     workspace_id: String(row.workspace_id ?? ''),
-    collaboration_id: String(row.collaboration_id ?? row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? ''),
     scope_id: String(row.scope_id),
     working_memory_id: Number(row.working_memory_id),
     fact: String(row.fact),
@@ -314,7 +359,7 @@ function mapKnowledgeEvidenceRow(row: Record<string, unknown>): KnowledgeEvidenc
     tenant_id: String(row.tenant_id),
     system_id: String(row.system_id),
     workspace_id: String(row.workspace_id ?? ''),
-    collaboration_id: String(row.collaboration_id ?? row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? ''),
     scope_id: String(row.scope_id),
     knowledge_memory_id: row.knowledge_memory_id != null ? Number(row.knowledge_memory_id) : null,
     knowledge_candidate_id:
@@ -354,16 +399,25 @@ export function createPostgresAdapter(
   options?: PostgresAdapterOptions,
 ): AsyncStorageAdapter {
   const now = nowSeconds;
+  const txStorage = new AsyncLocalStorage<{
+    client: PgClient & { release(): void };
+    savepointCounter: number;
+  }>();
+  const rootQuery = pool.query.bind(pool);
+  pool.query = ((text: string, values?: unknown[]) => {
+    const context = txStorage.getStore();
+    return context ? context.client.query(text, values) : rootQuery(text, values);
+  }) as PgPool['query'];
 
   return {
     async insertTurn(input: NewTurn): Promise<Turn> {
       const n = normalizeScope(input);
       const tokenEst = input.token_estimate ?? estimateTokens(input.content);
       const { rows } = await pool.query(
-        `INSERT INTO turns (tenant_id, system_id, workspace_id, scope_id, session_id, actor, role, content, priority, token_estimate, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        `INSERT INTO turns (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, actor, role, content, priority, token_estimate, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          RETURNING *`,
-        [n.tenant_id, n.system_id, n.workspace_id, n.scope_id, input.session_id, input.actor, input.role, input.content, input.priority ?? (input.role === 'system' ? 1.5 : 1), tokenEst, now()],
+        [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.session_id, input.actor, input.role, input.content, input.priority ?? (input.role === 'system' ? 1.5 : 1), tokenEst, now()],
       );
       return mapTurn(rows[0]);
     },
@@ -383,10 +437,10 @@ export function createPostgresAdapter(
       return rows[0] ? mapTurn(rows[0]) : null;
     },
 
-    async getActiveTurns(scope) {
-      const params = scopeParams(scope);
+    async getActiveTurns(scope, sessionId) {
+      const params = sessionId ? [...scopeParams(scope), sessionId] : scopeParams(scope);
       const { rows } = await pool.query(
-        `SELECT * FROM turns WHERE ${scopeWhere()} AND status = 'active' ORDER BY id ASC`,
+        `SELECT * FROM turns WHERE ${scopeWhere()} AND status = 'active'${sessionId ? ' AND session_id = $6' : ''} ORDER BY id ASC`,
         params,
       );
       return rows.map(mapTurn);
@@ -460,13 +514,20 @@ export function createPostgresAdapter(
     },
 
     async getArchivedTurnRange(sessionId, startId, endId, scope) {
-      const params: unknown[] = [sessionId, startId, endId];
-      let query = `SELECT * FROM turns WHERE session_id = $1 AND id >= $2 AND id <= $3 AND status = 'archived'`;
-      if (scope) {
-        const n = normalizeScope(scope);
-        params.push(n.tenant_id, n.system_id, n.workspace_id, n.scope_id);
-        query += ` AND tenant_id = $4 AND system_id = $5 AND workspace_id = $6 AND scope_id = $7`;
-      }
+      const n = normalizeScope(scope);
+      const params: unknown[] = [
+        sessionId,
+        startId,
+        endId,
+        n.tenant_id,
+        n.system_id,
+        n.workspace_id,
+        n.collaboration_id,
+        n.scope_id,
+      ];
+      let query =
+        `SELECT * FROM turns WHERE session_id = $1 AND id >= $2 AND id <= $3 AND status = 'archived'` +
+        ` AND tenant_id = $4 AND system_id = $5 AND workspace_id = $6 AND collaboration_id = $7 AND scope_id = $8`;
       query += ' ORDER BY id ASC';
       const { rows } = await pool.query(query, params);
       return rows.map(mapTurn);
@@ -475,10 +536,10 @@ export function createPostgresAdapter(
     async insertWorkingMemory(input) {
       const n = normalizeScope(input);
       const { rows } = await pool.query(
-        `INSERT INTO working_memory (tenant_id, system_id, workspace_id, scope_id, session_id, summary, key_entities, topic_tags, turn_id_start, turn_id_end, turn_count, compaction_trigger, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        `INSERT INTO working_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, summary, key_entities, topic_tags, turn_id_start, turn_id_end, turn_count, compaction_trigger, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          RETURNING *`,
-        [n.tenant_id, n.system_id, n.workspace_id, n.scope_id, input.session_id, input.summary,
+        [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.session_id, input.summary,
          JSON.stringify(input.key_entities), JSON.stringify(input.topic_tags),
          input.turn_id_start, input.turn_id_end, input.turn_count, input.compaction_trigger, now()],
       );
@@ -491,33 +552,28 @@ export function createPostgresAdapter(
     },
 
     async getWorkingMemoryBySession(sessionId, scope) {
-      if (scope) {
-        const params = [...scopeParams(scope), sessionId];
-        const { rows } = await pool.query(
-          `SELECT * FROM working_memory WHERE ${scopeWhere()} AND session_id = $5 ORDER BY id DESC`,
-          params,
-        );
-        return rows.map(mapWorkingMemory);
-      }
+      const params = [sessionId, ...scopeParams(scope)];
       const { rows } = await pool.query(
-        'SELECT * FROM working_memory WHERE session_id = $1 ORDER BY id DESC',
-        [sessionId],
+        `SELECT * FROM working_memory WHERE session_id = $1 AND tenant_id = $2 AND system_id = $3 AND workspace_id = $4 AND collaboration_id = $5 AND scope_id = $6 ORDER BY id DESC`,
+        params,
       );
       return rows.map(mapWorkingMemory);
     },
 
-    async getActiveWorkingMemory(scope) {
+    async getActiveWorkingMemory(scope, sessionId) {
+      const params = sessionId ? [...scopeParams(scope), sessionId] : scopeParams(scope);
       const { rows } = await pool.query(
-        `SELECT * FROM working_memory WHERE ${scopeWhere()} AND status = 'active' ORDER BY id DESC`,
-        scopeParams(scope),
+        `SELECT * FROM working_memory WHERE ${scopeWhere()} AND status = 'active'${sessionId ? ' AND session_id = $6' : ''} ORDER BY id DESC`,
+        params,
       );
       return rows.map(mapWorkingMemory);
     },
 
-    async getLatestWorkingMemory(scope) {
+    async getLatestWorkingMemory(scope, sessionId) {
+      const params = sessionId ? [...scopeParams(scope), sessionId] : scopeParams(scope);
       const { rows } = await pool.query(
-        `SELECT * FROM working_memory WHERE ${scopeWhere()} AND status = 'active' ORDER BY id DESC LIMIT 1`,
-        scopeParams(scope),
+        `SELECT * FROM working_memory WHERE ${scopeWhere()} AND status = 'active'${sessionId ? ' AND session_id = $6' : ''} ORDER BY id DESC LIMIT 1`,
+        params,
       );
       return rows[0] ? mapWorkingMemory(rows[0]) : null;
     },
@@ -549,10 +605,10 @@ export function createPostgresAdapter(
     async insertKnowledgeMemory(input) {
       const n = normalizeScope(input);
       const { rows } = await pool.query(
-        `INSERT INTO knowledge_memory (tenant_id, system_id, workspace_id, scope_id, fact, fact_type, knowledge_state, knowledge_class, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated, source, confidence, confidence_score, grounding_strength, evidence_count, trust_score, verification_status, verification_notes, last_verified_at, next_reverification_at, last_confirmed_at, confirmation_count, source_working_memory_id, source_turn_ids, successful_use_count, failed_use_count, disputed_at, dispute_reason, contradiction_score, superseded_at, created_at, last_accessed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $36)
+        `INSERT INTO knowledge_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id, fact, fact_type, knowledge_state, knowledge_class, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated, source, confidence, confidence_score, grounding_strength, evidence_count, trust_score, verification_status, verification_notes, last_verified_at, next_reverification_at, last_confirmed_at, confirmation_count, source_working_memory_id, source_turn_ids, successful_use_count, failed_use_count, disputed_at, dispute_reason, contradiction_score, superseded_at, created_at, last_accessed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $37)
          RETURNING *`,
-        [n.tenant_id, n.system_id, n.workspace_id, n.scope_id, input.fact, input.fact_type,
+        [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.fact, input.fact_type,
          input.knowledge_state ?? 'trusted', input.knowledge_class ?? 'project_fact',
          input.fact_subject ?? null, input.fact_attribute ?? null, input.fact_value ?? null,
          input.normalized_fact ?? null, input.slot_key ?? null, input.is_negated ?? false,
@@ -585,15 +641,16 @@ export function createPostgresAdapter(
       const n = normalizeScope(input);
       const { rows } = await pool.query(
         `INSERT INTO knowledge_candidate
-          (tenant_id, system_id, workspace_id, scope_id, working_memory_id, fact, fact_type,
+          (tenant_id, system_id, workspace_id, collaboration_id, scope_id, working_memory_id, fact, fact_type,
            knowledge_class, normalized_fact, slot_key, confidence, source_summary, source_turns,
            grounding_strength, evidence_count, trust_score, state, promoted_knowledge_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
          RETURNING *`,
         [
           n.tenant_id,
           n.system_id,
           n.workspace_id,
+          n.collaboration_id,
           n.scope_id,
           input.working_memory_id,
           input.fact,
@@ -645,13 +702,13 @@ export function createPostgresAdapter(
       const n = normalizeScope(input);
       const { rows } = await pool.query(
         `INSERT INTO knowledge_evidence
-          (tenant_id, system_id, workspace_id, scope_id, knowledge_memory_id, knowledge_candidate_id,
+          (tenant_id, system_id, workspace_id, collaboration_id, scope_id, knowledge_memory_id, knowledge_candidate_id,
            working_memory_id, turn_id, source_type, support_polarity, speaker_role, actor, excerpt,
            start_offset, end_offset, is_explicit, explicitness_score, outcome, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
          RETURNING *`,
         [
-          n.tenant_id, n.system_id, n.workspace_id, n.scope_id,
+          n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id,
           input.knowledge_memory_id ?? null, input.knowledge_candidate_id ?? null,
           input.working_memory_id ?? null, input.turn_id ?? null, input.source_type, input.support_polarity,
           input.speaker_role ?? null, input.actor ?? null, input.excerpt, input.start_offset ?? null,
@@ -923,10 +980,10 @@ export function createPostgresAdapter(
     async insertWorkItem(input) {
       const n = normalizeScope(input);
       const { rows } = await pool.query(
-        `INSERT INTO work_items (tenant_id, system_id, workspace_id, scope_id, session_id, title, kind, status, detail, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+        `INSERT INTO work_items (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, title, kind, status, detail, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
          RETURNING *`,
-        [n.tenant_id, n.system_id, n.workspace_id, n.scope_id, input.session_id,
+        [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.session_id,
          input.title, input.kind ?? 'objective', input.status ?? 'open', input.detail ?? null, now()],
       );
       return mapWorkItem(rows[0]);
@@ -990,10 +1047,10 @@ export function createPostgresAdapter(
     async insertCompactionLog(input) {
       const n = normalizeScope(input);
       const { rows } = await pool.query(
-        `INSERT INTO compaction_log (tenant_id, system_id, workspace_id, scope_id, session_id, trigger_type, turn_id_start, turn_id_end, turns_compacted, tokens_compacted_estimate, working_memory_id, active_turn_count_before, active_turn_count_after, duration_ms, model_call_made, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        `INSERT INTO compaction_log (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, trigger_type, turn_id_start, turn_id_end, turns_compacted, tokens_compacted_estimate, working_memory_id, active_turn_count_before, active_turn_count_after, duration_ms, model_call_made, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
          RETURNING *`,
-        [n.tenant_id, n.system_id, n.workspace_id, n.scope_id, input.session_id,
+        [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.session_id,
          input.trigger_type, input.turn_id_start, input.turn_id_end,
          input.turns_compacted, input.tokens_compacted_estimate, input.working_memory_id,
          input.active_turn_count_before, input.active_turn_count_after,
@@ -1010,26 +1067,166 @@ export function createPostgresAdapter(
     async getRecentCompactionLogs(scope, limit = 10) {
       const params = [...scopeParams(scope), limit];
       const { rows } = await pool.query(
-        `SELECT * FROM compaction_log WHERE ${scopeWhere()} ORDER BY id DESC LIMIT $5`,
+        `SELECT * FROM compaction_log WHERE ${scopeWhere()} ORDER BY id DESC LIMIT $6`,
         params,
       );
       return rows.map(mapCompactionLog);
     },
 
     async transaction<T>(fn: () => Promise<T>): Promise<T> {
-      await pool.query('BEGIN');
+      const existing = txStorage.getStore();
+      if (existing) {
+        const savepoint = `memory_layer_sp_${existing.savepointCounter++}`;
+        await existing.client.query(`SAVEPOINT ${savepoint}`);
+        try {
+          const result = await fn();
+          await existing.client.query(`RELEASE SAVEPOINT ${savepoint}`);
+          return result;
+        } catch (error) {
+          await existing.client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+          await existing.client.query(`RELEASE SAVEPOINT ${savepoint}`);
+          throw error;
+        }
+      }
+
+      const client = await pool.connect();
+      const context = { client, savepointCounter: 0 };
+      await client.query('BEGIN');
       try {
-        const result = await fn();
-        await pool.query('COMMIT');
+        const result = await txStorage.run(context, fn);
+        await client.query('COMMIT');
         return result;
       } catch (error) {
-        await pool.query('ROLLBACK');
+        await client.query('ROLLBACK');
         throw error;
+      } finally {
+        client.release();
       }
     },
 
     async close() {
       await pool.end();
+    },
+  };
+}
+
+export function createPostgresEmbeddingAdapter(
+  pool: PgPool,
+  options?: PostgresAdapterOptions,
+): EmbeddingAdapter {
+  return {
+    async storeEmbedding(knowledgeMemoryId, vector): Promise<void> {
+      const { rows } = await pool.query(
+        `INSERT INTO knowledge_embeddings (
+           knowledge_memory_id,
+           tenant_id,
+           system_id,
+           workspace_id,
+           collaboration_id,
+           scope_id,
+           embedding,
+           created_at
+         )
+         SELECT
+           km.id,
+           km.tenant_id,
+           km.system_id,
+           km.workspace_id,
+           km.collaboration_id,
+           km.scope_id,
+           $2::vector,
+           $3
+         FROM knowledge_memory km
+         WHERE km.id = $1
+         ON CONFLICT (knowledge_memory_id) DO UPDATE SET
+           tenant_id = EXCLUDED.tenant_id,
+           system_id = EXCLUDED.system_id,
+           workspace_id = EXCLUDED.workspace_id,
+           collaboration_id = EXCLUDED.collaboration_id,
+           scope_id = EXCLUDED.scope_id,
+           embedding = EXCLUDED.embedding,
+           created_at = EXCLUDED.created_at
+         RETURNING knowledge_memory_id`,
+        [knowledgeMemoryId, vectorToLiteral(vector), nowSeconds()],
+      );
+      if (!rows[0]) {
+        throw new Error(`memory-layer: cannot store embedding for missing knowledge ${knowledgeMemoryId}`);
+      }
+    },
+
+    async getEmbedding(knowledgeMemoryId): Promise<EmbeddingVector | null> {
+      const { rows } = await pool.query(
+        'SELECT embedding FROM knowledge_embeddings WHERE knowledge_memory_id = $1',
+        [knowledgeMemoryId],
+      );
+      return rows[0] ? parseVectorValue(rows[0].embedding) : null;
+    },
+
+    async findSimilar(
+      scope: MemoryScope,
+      queryVector: EmbeddingVector,
+      options,
+    ): Promise<SimilarEmbeddingResult[]> {
+      const params = [...scopeParams(scope), vectorToLiteral(queryVector)];
+      const minSimilarity = options?.minSimilarity ?? 0;
+      const limit = options?.limit ?? 10;
+      params.push(minSimilarity, limit);
+      const vectorParam = params.length - 2;
+      const minSimilarityParam = params.length - 1;
+      const limitParam = params.length;
+      const { rows } = await pool.query(
+        `SELECT ke.knowledge_memory_id, 1 - (ke.embedding <=> $${vectorParam}::vector) AS similarity
+         FROM knowledge_embeddings ke
+         JOIN knowledge_memory km ON km.id = ke.knowledge_memory_id
+         WHERE ${scopeWhere('ke')}
+           AND km.superseded_by_id IS NULL
+           AND km.retired_at IS NULL
+           AND 1 - (ke.embedding <=> $${vectorParam}::vector) >= $${minSimilarityParam}
+         ORDER BY ke.embedding <=> $${vectorParam}::vector ASC
+         LIMIT $${limitParam}`,
+        params,
+      );
+      return rows.map((row) => ({
+        knowledgeMemoryId: Number(row.knowledge_memory_id),
+        similarity: Number(row.similarity),
+      }));
+    },
+
+    async findSimilarCrossScope(
+      scope: MemoryScope,
+      level: ScopeLevel,
+      queryVector: EmbeddingVector,
+      options,
+    ): Promise<SimilarEmbeddingResult[]> {
+      const params = [...wideScopeParams(scope, level), vectorToLiteral(queryVector)];
+      const minSimilarity = options?.minSimilarity ?? 0;
+      const limit = options?.limit ?? 10;
+      params.push(minSimilarity, limit);
+      const vectorParam = params.length - 2;
+      const minSimilarityParam = params.length - 1;
+      const limitParam = params.length;
+      const { rows } = await pool.query(
+        `SELECT ke.knowledge_memory_id, 1 - (ke.embedding <=> $${vectorParam}::vector) AS similarity
+         FROM knowledge_embeddings ke
+         JOIN knowledge_memory km ON km.id = ke.knowledge_memory_id
+         WHERE ${wideScopeWhere(scope, level, 'ke')}
+           AND km.superseded_by_id IS NULL
+           AND km.retired_at IS NULL
+           AND 1 - (ke.embedding <=> $${vectorParam}::vector) >= $${minSimilarityParam}
+         ORDER BY ke.embedding <=> $${vectorParam}::vector ASC
+         LIMIT $${limitParam}`,
+        params,
+      );
+      return rows.map((row) => ({
+        knowledgeMemoryId: Number(row.knowledge_memory_id),
+        similarity: Number(row.similarity),
+      }));
+    },
+
+    async deleteEmbedding(knowledgeMemoryId): Promise<void> {
+      await pool.query('DELETE FROM knowledge_embeddings WHERE knowledge_memory_id = $1', [
+        knowledgeMemoryId,
+      ]);
     },
   };
 }

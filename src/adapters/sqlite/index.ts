@@ -114,6 +114,16 @@ function timeRangeWhere(range: TimeRange, column = 'created_at'): { clause: stri
   };
 }
 
+function sessionWhere(sessionId?: string, column = 'session_id'): { clause: string; params: string[] } {
+  if (!sessionId) {
+    return { clause: '', params: [] };
+  }
+  return {
+    clause: ` AND ${column} = ?`,
+    params: [sessionId],
+  };
+}
+
 type RankedTurnRow = Turn & { raw_rank: number | null };
 type RankedKnowledgeRow = KnowledgeMemoryRow & { raw_rank: number | null };
 
@@ -380,14 +390,15 @@ function createAdapterFromDatabase(
 
     getTurnById,
 
-    getActiveTurns(scope): Turn[] {
+    getActiveTurns(scope, sessionId): Turn[] {
+      const session = sessionWhere(sessionId);
       const rows = db
         .prepare(
           `SELECT * FROM turns
-           WHERE ${SCOPE_WHERE} AND archived_at IS NULL
+           WHERE ${SCOPE_WHERE} AND archived_at IS NULL${session.clause}
            ORDER BY id ASC`,
         )
-        .all(...scopeValues(scope)) as Turn[];
+        .all(...scopeValues(scope), ...session.params) as Turn[];
       return rows.map(rowToTurn);
     },
 
@@ -475,22 +486,13 @@ function createAdapterFromDatabase(
     },
 
     getArchivedTurnRange(sessionId: string, startId: number, endId: number, scope): Turn[] {
-      const query = scope
-        ? `SELECT * FROM turns
+      const query = `SELECT * FROM turns
            WHERE session_id = ? AND id >= ? AND id <= ? AND archived_at IS NOT NULL
              AND ${SCOPE_WHERE}
-           ORDER BY id ASC`
-        : `SELECT * FROM turns
-           WHERE session_id = ? AND id >= ? AND id <= ? AND archived_at IS NOT NULL
            ORDER BY id ASC`;
       const rows = db
         .prepare(query)
-        .all(
-          sessionId,
-          startId,
-          endId,
-          ...(scope ? scopeValues(scope) : []),
-        ) as Turn[];
+        .all(sessionId, startId, endId, ...scopeValues(scope)) as Turn[];
       return rows.map(rowToTurn);
     },
 
@@ -528,41 +530,41 @@ function createAdapterFromDatabase(
     getWorkingMemoryById,
 
     getWorkingMemoryBySession(sessionId: string, scope): WorkingMemory[] {
-      const query = scope
-        ? `SELECT * FROM working_memory
+      const query = `SELECT * FROM working_memory
            WHERE session_id = ? AND ${SCOPE_WHERE}
-           ORDER BY id ASC`
-        : 'SELECT * FROM working_memory WHERE session_id = ? ORDER BY id ASC';
+           ORDER BY id ASC`;
       const rows = db
         .prepare(query)
-        .all(sessionId, ...(scope ? scopeValues(scope) : [])) as WorkingMemoryRow[];
+        .all(sessionId, ...scopeValues(scope)) as WorkingMemoryRow[];
       return rows.map(rowToWorkingMemory);
     },
 
-    getActiveWorkingMemory(scope): WorkingMemory[] {
+    getActiveWorkingMemory(scope, sessionId): WorkingMemory[] {
       const now = nowSeconds();
+      const session = sessionWhere(sessionId);
       const rows = db
         .prepare(
           `SELECT * FROM working_memory
            WHERE ${SCOPE_WHERE}
-             AND (expires_at IS NULL OR expires_at > ?)
+             AND (expires_at IS NULL OR expires_at > ?)${session.clause}
            ORDER BY id DESC`,
         )
-        .all(...scopeValues(scope), now) as WorkingMemoryRow[];
+        .all(...scopeValues(scope), now, ...session.params) as WorkingMemoryRow[];
       return rows.map(rowToWorkingMemory);
     },
 
-    getLatestWorkingMemory(scope): WorkingMemory | null {
+    getLatestWorkingMemory(scope, sessionId): WorkingMemory | null {
       const now = nowSeconds();
+      const session = sessionWhere(sessionId);
       const row = db
         .prepare(
           `SELECT * FROM working_memory
            WHERE ${SCOPE_WHERE}
-             AND (expires_at IS NULL OR expires_at > ?)
+             AND (expires_at IS NULL OR expires_at > ?)${session.clause}
            ORDER BY id DESC
            LIMIT 1`,
         )
-        .get(...scopeValues(scope), now) as WorkingMemoryRow | undefined;
+        .get(...scopeValues(scope), now, ...session.params) as WorkingMemoryRow | undefined;
       return row ? rowToWorkingMemory(row) : null;
     },
 

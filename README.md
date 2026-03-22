@@ -26,7 +26,7 @@ npm install @anthropic-ai/sdk   # Claude summarizer + extractor
 npm install openai              # OpenAI summarizer + extractor
 ```
 
-Without a provider SDK, `memory-layer` uses a zero-dependency extractive summarizer and regex-based extractor. No API keys required.
+Without a provider SDK, `memory-layer` uses a zero-dependency extractive summarizer, regex-based extractor, and a local lexical-plus embedding fallback. No API keys required, but this local path should be treated as an honest fallback contract rather than the gold-standard semantic path.
 
 ## Quick Start
 
@@ -43,7 +43,7 @@ await memory.processExchange(
 const context = await memory.getContext('local-first');
 ```
 
-This path is intentionally low-friction and now defaults to the safer `balanced_memory` posture for local adoption.
+This path is intentionally low-friction and now defaults to the safer `balanced_memory` posture for local adoption. In local/no-provider mode, semantic retrieval is a lightweight lexical-plus fallback built from local hashed features. It is good enough for zero-config adoption, but it is not the highest-fidelity retrieval path.
 
 ### Persistent SQLite
 
@@ -76,6 +76,8 @@ const prepared = await runtime.beforeModelCall('Refactor the search layer.');
 ```
 
 When `OPENAI_API_KEY` or `VOYAGE_API_KEY` is present, `createMemory()` will automatically upgrade its embedding path for stronger semantic retrieval.
+
+For hosted or high-volume deployments, pair provider-backed extraction/embeddings with Postgres + `pgvector` so semantic retrieval can use ANN indexing instead of SQLite's in-process scan path.
 
 ### Claude-backed
 
@@ -157,6 +159,26 @@ interface MemoryScope {
 ```
 
 Cross-scope retrieval levels: `scope` (exact) | `workspace` | `system` | `tenant`
+
+## Surface Contract
+
+`memory-layer` exposes one memory model across several surfaces. They are intended to agree on core behavior, with a small number of intentional differences:
+
+| Surface | Best For | Contract |
+|------|------|------|
+| Node package | In-process Node runtimes | Full engine surface, fastest path, best fit for AI IDEs and embedded agents |
+| HTTP API | Polyglot and hosted deployments | Mirrors the core manager operations over REST and is documented in `openapi.yaml` |
+| MCP server | Tool ecosystems that already speak MCP | Exposes memory operations as MCP tools; same memory semantics, MCP-native transport |
+| CLI | Inspection, local ops, and quick admin tasks | Thin operational layer over the same storage and hosted APIs |
+| Python client | Python workers and hosted consumers | Mirrors the HTTP contract; it is intentionally an HTTP client, not a second engine implementation |
+
+Important intentional differences:
+
+- The Node package is the source of truth for engine behavior.
+- The HTTP surface is the canonical network contract and the only one described by `openapi.yaml`.
+- MCP and CLI are operational wrappers around the same engine and hosted contract, not separate memory models.
+- The Python client follows the HTTP surface exactly and should be evaluated against HTTP parity, not separate feature invention.
+- SQLite is the low-friction path. Postgres + `pgvector` is the strongest hosted scaling path.
 
 ## API Reference
 

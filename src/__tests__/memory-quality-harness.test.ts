@@ -16,6 +16,19 @@ describe('memory quality harness', () => {
     expect(Array.isArray(result.evaluations)).toBe(true);
   }, 20000);
 
+  it('returns diagnostic failure mapping when requested', async () => {
+    const { runMemoryQualityEvals } = await import('../../evals/memory-quality/index.mjs');
+    const result = await runMemoryQualityEvals({ diagnostic: true });
+
+    expect(result.diagnostic.currentTruth).toHaveProperty('enginePassed');
+    expect(result.diagnostic.currentTruth).toHaveProperty('platformPassed');
+    expect(Array.isArray(result.diagnostic.moduleOutputs)).toBe(true);
+    expect(result.diagnostic.moduleOutputs.length).toBeGreaterThan(0);
+    expect(result.diagnostic.failureMap).toHaveProperty('metricFailures');
+    expect(result.diagnostic.failureMap).toHaveProperty('scenarioFailures');
+    expect(result.diagnostic.failureMap).toHaveProperty('platformFailures');
+  }, 30000);
+
   it('marks deliberately broken metrics as failing', async () => {
     const { summarizeMetrics } = await import('../../evals/memory-quality/shared.mjs');
     const summary = summarizeMetrics({

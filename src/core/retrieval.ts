@@ -21,34 +21,43 @@ function overlapScore(source: string, targets: string[]): number {
   return matches / sourceTokens.size;
 }
 
-export function getClassImportanceScore(knowledge: KnowledgeMemory): number {
-  switch (knowledge.knowledge_class) {
-    case 'identity':
-      return 1;
-    case 'constraint':
-      return 0.95;
-    case 'preference':
-      return 0.85;
-    case 'strategy':
-      return 0.8;
-    case 'procedure':
-      return 0.75;
-    case 'project_fact':
-      return 0.6;
-    case 'episodic_fact':
-      return 0.4;
-    case 'anti_pattern':
-      return 0.45;
-    default:
-      return 0.5;
+const DEFAULT_CLASS_IMPORTANCE: Record<KnowledgeMemory['knowledge_class'], number> = {
+  identity: 1,
+  constraint: 0.95,
+  preference: 0.85,
+  strategy: 0.8,
+  procedure: 0.75,
+  project_fact: 0.6,
+  episodic_fact: 0.4,
+  anti_pattern: 0.45,
+};
+
+export function getClassImportanceScore(
+  knowledge: KnowledgeMemory,
+  policy?: Pick<Required<ContextPolicy>, 'classImportanceOverrides'>,
+): number {
+  const override = policy?.classImportanceOverrides?.[knowledge.knowledge_class];
+  if (override != null) {
+    return override;
   }
+  return DEFAULT_CLASS_IMPORTANCE[knowledge.knowledge_class] ?? 0.5;
 }
 
-export function getEvidenceDensityScore(knowledge: KnowledgeMemory): number {
-  return Math.min(1, knowledge.evidence_count / 3);
+export function getEvidenceDensityScore(
+  knowledge: KnowledgeMemory,
+  policy: Pick<Required<ContextPolicy>, 'evidenceSaturationCount'>,
+): number {
+  return Math.min(1, knowledge.evidence_count / Math.max(1, policy.evidenceSaturationCount));
 }
 
-export function getScopeRelationScore(current: MemoryScope, candidate: KnowledgeMemory): number {
+export function getScopeRelationScore(
+  current: MemoryScope,
+  candidate: KnowledgeMemory,
+  policy: Pick<
+    Required<ContextPolicy>,
+    'collaborationScopeScore' | 'systemScopeScore' | 'tenantScopeScore'
+  >,
+): number {
   const currentWorkspaceId = current.workspace_id ?? 'default';
   const currentCollaborationId = current.collaboration_id ?? '';
   if (
@@ -65,13 +74,13 @@ export function getScopeRelationScore(current: MemoryScope, candidate: Knowledge
     currentCollaborationId.length > 0 &&
     candidate.collaboration_id === currentCollaborationId
   ) {
-    return 0.65;
+    return policy.collaborationScopeScore;
   }
   if (candidate.tenant_id === current.tenant_id && candidate.system_id === current.system_id) {
-    return 0.3;
+    return policy.systemScopeScore;
   }
   if (candidate.tenant_id === current.tenant_id) {
-    return 0.1;
+    return policy.tenantScopeScore;
   }
   return 0;
 }
@@ -115,27 +124,27 @@ export function rankKnowledge(input: {
 } {
   const { knowledge, policy } = input;
   const trustScore = knowledge.trust_score ?? 0;
-  const classImportanceScore = getClassImportanceScore(knowledge);
-  const evidenceDensityScore = getEvidenceDensityScore(knowledge);
+  const classImportanceScore = getClassImportanceScore(knowledge, policy);
+  const evidenceDensityScore = getEvidenceDensityScore(knowledge, policy);
   const objectiveLinkScore =
     input.relevanceTexts && input.relevanceTexts.length > 0
       ? overlapScore(knowledge.fact, input.relevanceTexts)
       : 0;
-  const scopeRelationScore = getScopeRelationScore(input.scope, knowledge);
+  const scopeRelationScore = getScopeRelationScore(input.scope, knowledge, policy);
   const lineageScore =
     input.preferLineageMemory && knowledge.scope_id !== input.scope.scope_id
       ? getLineageScore(input.scope.scope_id, knowledge.scope_id)
       : 0;
   const localTrustedBonus =
     input.preferLocalTrusted &&
-    trustScore >= 0.7 &&
+    trustScore >= policy.localTrustedThreshold &&
     knowledge.scope_id === input.scope.scope_id
-      ? 0.35
+      ? policy.localTrustedBonus
       : 0;
-  const lineageBonus = input.preferLineageMemory ? lineageScore * 0.3 : 0;
+  const lineageBonus = input.preferLineageMemory ? lineageScore * policy.lineageWeight : 0;
   const unrelatedCrossScopePenalty =
     input.preferLineageMemory && knowledge.scope_id !== input.scope.scope_id
-      ? (1 - lineageScore) * 0.35
+      ? (1 - lineageScore) * policy.unrelatedLineagePenalty
       : 0;
   const provisionalPenalty =
     knowledge.knowledge_state === 'provisional' ? policy.provisionalPenalty : 0;
@@ -144,11 +153,12 @@ export function rankKnowledge(input: {
     input.lexicalScore * policy.lexicalWeight +
     input.semanticScore * policy.semanticWeight +
     input.recencyScore * policy.recencyWeight +
+    input.importanceScore * policy.importanceWeight +
     trustScore * policy.trustWeight +
     classImportanceScore * policy.durabilityWeight +
     evidenceDensityScore * policy.evidenceWeight +
     objectiveLinkScore * policy.objectiveLinkWeight +
-    scopeRelationScore * 0.25 +
+    scopeRelationScore * policy.scopeRelationWeight +
     localTrustedBonus +
     lineageBonus -
     unrelatedCrossScopePenalty -

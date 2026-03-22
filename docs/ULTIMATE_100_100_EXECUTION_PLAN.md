@@ -118,14 +118,14 @@ Build a memory-quality harness that can measure real gains or regressions.
 
 ### Task Board
 
-- [ ] `ml-p0-t1` Define the memory-quality rubric
-- [ ] `ml-p0-t2` Build the shared eval harness
-- [ ] `ml-p0-t3` Add retention eval scenarios
-- [ ] `ml-p0-t4` Add contradiction and update eval scenarios
-- [ ] `ml-p0-t5` Add false-memory and fidelity eval scenarios
-- [ ] `ml-p0-t6` Add long-horizon eval scenarios
-- [ ] `ml-p0-t7` Wire scripts and CI gate
-- [ ] `ml-p0-t8` Capture the current baseline
+- [x] `ml-p0-t1` Define the memory-quality rubric
+- [x] `ml-p0-t2` Build the shared eval harness
+- [x] `ml-p0-t3` Add retention eval scenarios
+- [x] `ml-p0-t4` Add contradiction and update eval scenarios
+- [x] `ml-p0-t5` Add false-memory and fidelity eval scenarios
+- [x] `ml-p0-t6` Add long-horizon eval scenarios
+- [x] `ml-p0-t7` Wire scripts and CI gate
+- [x] `ml-p0-t8` Capture the current baseline
 
 ### Exact Task Specs
 
@@ -307,17 +307,17 @@ Prevent trusted durable knowledge from being created from summary text alone.
 
 ### Task Board
 
-- [ ] `ml-p1-t1` Add candidate and evidence domain types
-- [ ] `ml-p1-t2` Extend storage contracts for candidates and evidence
-- [ ] `ml-p1-t3` Add SQLite schema v5 for grounded knowledge
-- [ ] `ml-p1-t4` Implement SQLite adapter support for candidates and evidence
-- [ ] `ml-p1-t5` Implement in-memory adapter parity
-- [ ] `ml-p1-t6` Implement Postgres adapter parity
-- [ ] `ml-p1-t7` Create raw-turn grounding engine
-- [ ] `ml-p1-t8` Split candidate generation from promotion
-- [ ] `ml-p1-t9` Persist evidence on promotion
-- [ ] `ml-p1-t10` Add grounding and evidence tests
-- [ ] `ml-p1-t11` Update evals to punish ungrounded promotion
+- [x] `ml-p1-t1` Add candidate and evidence domain types
+- [x] `ml-p1-t2` Extend storage contracts for candidates and evidence
+- [x] `ml-p1-t3` Add SQLite schema v5 for grounded knowledge
+- [x] `ml-p1-t4` Implement SQLite adapter support for candidates and evidence
+- [x] `ml-p1-t5` Implement in-memory adapter parity
+- [x] `ml-p1-t6` Implement Postgres adapter parity
+- [x] `ml-p1-t7` Create raw-turn grounding engine
+- [x] `ml-p1-t8` Split candidate generation from promotion
+- [x] `ml-p1-t9` Persist evidence on promotion
+- [x] `ml-p1-t10` Add grounding and evidence tests
+- [x] `ml-p1-t11` Update evals to punish ungrounded promotion
 
 ### Exact API Additions
 
@@ -545,16 +545,16 @@ Make trusted memory hard to earn and explicit to challenge.
 
 ### Task Board
 
-- [ ] `ml-p2-t1` Add trust and conflict types
-- [ ] `ml-p2-t2` Extend extraction policy with trust thresholds
-- [ ] `ml-p2-t3` Add SQLite schema v6 for dispute and supersession state
-- [ ] `ml-p2-t4` Implement adapter parity for dispute state
-- [ ] `ml-p2-t5` Create trust engine module
-- [ ] `ml-p2-t6` Route orchestrator promotion through trust state machine
-- [ ] `ml-p2-t7` Add knowledge inspection and reverification APIs
-- [ ] `ml-p2-t8` Add trust and contradiction tests
-- [ ] `ml-p2-t9` Tighten evals for trust precision
-- [ ] `ml-p2-t10` Add source-credibility and outcome-learning trust rules
+- [x] `ml-p2-t1` Add trust and conflict types
+- [x] `ml-p2-t2` Extend extraction policy with trust thresholds
+- [x] `ml-p2-t3` Add SQLite schema v6 for dispute and supersession state
+- [x] `ml-p2-t4` Implement adapter parity for dispute state
+- [x] `ml-p2-t5` Create trust engine module
+- [x] `ml-p2-t6` Route orchestrator promotion through trust state machine
+- [x] `ml-p2-t7` Add knowledge inspection and reverification APIs
+- [x] `ml-p2-t8` Add trust and contradiction tests
+- [x] `ml-p2-t9` Tighten evals for trust precision
+- [x] `ml-p2-t10` Add source-credibility and outcome-learning trust rules
 
 ### Exact API Additions
 
@@ -722,15 +722,15 @@ Create a stable trusted memory layer distinct from task relevance.
 
 ### Task Board
 
-- [ ] `ml-p3-t1` Extend memory context shape
-- [ ] `ml-p3-t2` Implement trusted core memory selector
-- [ ] `ml-p3-t3` Implement task-relevant knowledge selector
-- [ ] `ml-p3-t4` Rewire compatibility fields safely
-- [ ] `ml-p3-t5` Redesign formatter layout around trust buckets
-- [ ] `ml-p3-t6` Extend runtime input with diagnostic controls
-- [ ] `ml-p3-t7` Enrich selection reasons
-- [ ] `ml-p3-t8` Add core-memory and formatter tests
-- [ ] `ml-p3-t9` Update evals for stable core recall
+- [x] `ml-p3-t1` Extend memory context shape
+- [x] `ml-p3-t2` Implement trusted core memory selector
+- [x] `ml-p3-t3` Implement task-relevant knowledge selector
+- [x] `ml-p3-t4` Rewire compatibility fields safely
+- [x] `ml-p3-t5` Redesign formatter layout around trust buckets
+- [x] `ml-p3-t6` Extend runtime input with diagnostic controls
+- [x] `ml-p3-t7` Enrich selection reasons
+- [x] `ml-p3-t8` Add core-memory and formatter tests
+- [x] `ml-p3-t9` Update evals for stable core recall
 
 ### Exact API Additions
 
@@ -812,15 +812,15 @@ Make retrieval prefer trustworthy memory over weakly relevant memory.
 
 ### Task Board
 
-- [ ] `ml-p4-t1` Add trust-aware ranking policy fields
-- [ ] `ml-p4-t2` Implement class importance scoring
-- [ ] `ml-p4-t3` Refactor context ranking formula
-- [ ] `ml-p4-t4` Refactor search ranking formula
-- [ ] `ml-p4-t5` Add search filters for state, class, and trust
-- [ ] `ml-p4-t6` Tighten cross-scope trust rules
-- [ ] `ml-p4-t7` Add retrieval tests
-- [ ] `ml-p4-t8` Update evals for trusted precision and recall
-- [ ] `ml-p4-t9` Add lineage-aware retrieval and isolation rules
+- [x] `ml-p4-t1` Add trust-aware ranking policy fields
+- [x] `ml-p4-t2` Implement class importance scoring
+- [x] `ml-p4-t3` Refactor context ranking formula
+- [x] `ml-p4-t4` Refactor search ranking formula
+- [x] `ml-p4-t5` Add search filters for state, class, and trust
+- [x] `ml-p4-t6` Tighten cross-scope trust rules
+- [x] `ml-p4-t7` Add retrieval tests
+- [x] `ml-p4-t8` Update evals for trusted precision and recall
+- [x] `ml-p4-t9` Add lineage-aware retrieval and isolation rules
 
 ### Exact API Additions
 
@@ -922,14 +922,14 @@ Preserve important trusted memory and decay weak memory aggressively.
 
 ### Task Board
 
-- [ ] `ml-p5-t1` Extend maintenance policy for trust-aware lifecycle
-- [ ] `ml-p5-t2` Add SQLite schema v8 for reverification metadata
-- [ ] `ml-p5-t3` Implement adapter parity for reverification fields
-- [ ] `ml-p5-t4` Build lifecycle engine
-- [ ] `ml-p5-t5` Integrate lifecycle engine into maintenance flow
-- [ ] `ml-p5-t6` Add manager-level reverification entrypoint
-- [ ] `ml-p5-t7` Add lifecycle and reverification tests
-- [ ] `ml-p5-t8` Update evals for post-maintenance fidelity
+- [x] `ml-p5-t1` Extend maintenance policy for trust-aware lifecycle
+- [x] `ml-p5-t2` Add SQLite schema v8 for reverification metadata
+- [x] `ml-p5-t3` Implement adapter parity for reverification fields
+- [x] `ml-p5-t4` Build lifecycle engine
+- [x] `ml-p5-t5` Integrate lifecycle engine into maintenance flow
+- [x] `ml-p5-t6` Add manager-level reverification entrypoint
+- [x] `ml-p5-t7` Add lifecycle and reverification tests
+- [x] `ml-p5-t8` Update evals for post-maintenance fidelity
 
 ### Exact API Additions
 
@@ -1032,12 +1032,12 @@ Expose fidelity as a first-class product choice and make the recommended path sa
 
 ### Task Board
 
-- [ ] `ml-p6-t1` Add explicit quality-mode API
-- [ ] `ml-p6-t2` Map quality modes to actual engine behavior
-- [ ] `ml-p6-t3` Add compatibility bridge from old quality settings
-- [ ] `ml-p6-t4` Make the recommended default safer
-- [ ] `ml-p6-t5` Add quality-mode tests
-- [ ] `ml-p6-t6` Update eval reporting by quality mode
+- [x] `ml-p6-t1` Add explicit quality-mode API
+- [x] `ml-p6-t2` Map quality modes to actual engine behavior
+- [x] `ml-p6-t3` Add compatibility bridge from old quality settings
+- [x] `ml-p6-t4` Make the recommended default safer
+- [x] `ml-p6-t5` Add quality-mode tests
+- [x] `ml-p6-t6` Update eval reporting by quality mode
 
 ### Exact API Additions
 
@@ -1105,11 +1105,11 @@ Make memory quality a permanent release blocker.
 
 ### Task Board
 
-- [ ] `ml-p7-t1` Lock final thresholds in eval harness
-- [ ] `ml-p7-t2` Make CI block on memory quality permanently
-- [ ] `ml-p7-t3` Add baseline delta reporting
-- [ ] `ml-p7-t4` Publish final score interpretation docs
-- [ ] `ml-p7-t5` Run final audit and close remaining gaps
+- [x] `ml-p7-t1` Lock final thresholds in eval harness
+- [x] `ml-p7-t2` Make CI block on memory quality permanently
+- [x] `ml-p7-t3` Add baseline delta reporting
+- [x] `ml-p7-t4` Publish final score interpretation docs
+- [x] `ml-p7-t5` Run final audit and close remaining gaps
 
 ### Final Thresholds
 
@@ -1149,6 +1149,39 @@ The hard gate is the eval suite itself. Add unit coverage only if needed for eva
 - thresholds pass in CI
 - release flow blocks on quality regressions
 - score claims are fully evidence-backed
+
+### Plan Amendments
+
+The original seven phases materially improved the engine and platform, but a final audit still exposed five finish-line gaps that can prevent an honest 100/100 claim even when the prior gates are green:
+
+- ranking and trust behavior still depends on hidden constants instead of explicit policy in some paths
+- the strongest scalable semantic path still has an ANN and adapter-parity ceiling
+- contradiction logic is strong, but the operational proof for long-running autonomous and multi-agent behavior was still thinner than the claim
+- Node, HTTP, MCP, CLI, Python, docs, and package metadata were close but not yet reconciled to one final product contract
+- proof artifacts could still tell a stale or partial story even when current live evals pass
+
+Add the following finish-pass work before calling the repo 100/100:
+
+1. Make retrieval and trust fully policy-driven.
+   - remove or externalize hidden ranking/trust constants
+   - ensure policy fields actually control scoring outcomes across context assembly and search
+   - add proof tests that fail when policy knobs are ignored
+2. Close or honestly redefine the semantic/ANN ceiling.
+   - implement the strongest real ANN-backed path available
+   - align semantic scoring behavior across search and context assembly
+   - make the local/no-provider contract explicit if it remains weaker than provider-backed mode
+3. Add operational contradiction and coordination proof.
+   - extend evals to long-horizon autonomous and multi-agent scenarios
+   - document the deployment/concurrency contract for SQLite and Postgres clearly
+   - implement any missing writer-safety fix revealed by those evals
+4. Reconcile all product surfaces.
+   - eliminate placeholder metadata
+   - document one authoritative cross-surface contract for Node, HTTP, MCP, CLI, Python, and package exports
+5. Refresh proof artifacts and gate alignment.
+   - update stale baseline/proof files so delta reporting anchors to a known-good release state
+   - ensure release gates, docs, and proof artifacts all describe the same finish line
+
+This amendment is necessary because a repo is not 100/100 merely because the original phase list is complete. It is 100/100 only when the implementation, public contract, and proof artifacts all agree on the same claimed quality bar.
 
 ## Recommended Build Order
 

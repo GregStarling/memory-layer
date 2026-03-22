@@ -1,20 +1,20 @@
 {
-  "overallScore": 55.81,
-  "passed": false,
+  "overallScore": 100,
+  "passed": true,
   "metrics": {
     "constraintRetentionRate": 1,
     "preferenceRetentionRate": 1,
     "identityRetentionRate": 1,
     "procedureRetentionRate": 1,
-    "updateCorrectnessRate": 0,
-    "strategyOutcomeRecallRate": 0.5,
-    "falseMemoryRate": 1,
-    "contradictionResolutionAccuracy": 0,
-    "trustedMemoryPrecision": 0,
+    "updateCorrectnessRate": 1,
+    "strategyOutcomeRecallRate": 1,
+    "falseMemoryRate": 0,
+    "contradictionResolutionAccuracy": 1,
+    "trustedMemoryPrecision": 1,
     "trustedMemoryRecall": 1,
-    "memoryIsolationAccuracy": 0.5,
-    "provisionalLeakRate": 1,
-    "postCompactionFidelityScore": 0.5,
+    "memoryIsolationAccuracy": 1,
+    "provisionalLeakRate": 0,
+    "postCompactionFidelityScore": 1,
     "postMaintenanceFidelityScore": 1
   }
 }

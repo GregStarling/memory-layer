@@ -29,7 +29,7 @@ export interface StorageAdapter {
   insertTurn(input: NewTurn): Turn;
   insertTurns(inputs: NewTurn[]): Turn[];
   getTurnById(id: number): Turn | null;
-  getActiveTurns(scope: MemoryScope): Turn[];
+  getActiveTurns(scope: MemoryScope, sessionId?: string): Turn[];
   getActiveTurnsPaginated(scope: MemoryScope, options?: PaginationOptions): PaginatedResult<Turn>;
   getTurnsByTimeRange(scope: MemoryScope, range: TimeRange): Turn[];
   searchTurns(scope: MemoryScope, query: string, options?: SearchOptions): SearchResult<Turn>[];
@@ -38,14 +38,14 @@ export interface StorageAdapter {
     sessionId: string,
     startId: number,
     endId: number,
-    scope?: MemoryScope,
+    scope: MemoryScope,
   ): Turn[];
 
   insertWorkingMemory(input: NewWorkingMemory): WorkingMemory;
   getWorkingMemoryById(id: number): WorkingMemory | null;
-  getWorkingMemoryBySession(sessionId: string, scope?: MemoryScope): WorkingMemory[];
-  getActiveWorkingMemory(scope: MemoryScope): WorkingMemory[];
-  getLatestWorkingMemory(scope: MemoryScope): WorkingMemory | null;
+  getWorkingMemoryBySession(sessionId: string, scope: MemoryScope): WorkingMemory[];
+  getActiveWorkingMemory(scope: MemoryScope, sessionId?: string): WorkingMemory[];
+  getLatestWorkingMemory(scope: MemoryScope, sessionId?: string): WorkingMemory | null;
   getWorkingMemoryByTimeRange(scope: MemoryScope, range: TimeRange): WorkingMemory[];
   expireWorkingMemory(id: number): void;
   markWorkingMemoryPromoted(id: number, knowledgeMemoryId: number): void;

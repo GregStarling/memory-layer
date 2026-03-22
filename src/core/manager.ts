@@ -57,6 +57,7 @@ import {
   getDueReverificationKnowledge,
   resolveMaintenancePolicy,
 } from './knowledge-lifecycle.js';
+import { normalizeScope } from '../contracts/identity.js';
 
 export interface MemoryManagerConfig {
   /** Synchronous storage adapter (SQLite, in-memory). Mutually exclusive with asyncAdapter. */
@@ -170,6 +171,17 @@ function manualKnowledgeClassForFactType(factType: FactType): KnowledgeMemory['k
   }
 }
 
+function knowledgeMatchesScope(knowledge: KnowledgeMemory, scope: MemoryScope): boolean {
+  const normalized = normalizeScope(scope);
+  return (
+    knowledge.tenant_id === normalized.tenant_id &&
+    knowledge.system_id === normalized.system_id &&
+    knowledge.workspace_id === normalized.workspace_id &&
+    knowledge.collaboration_id === normalized.collaboration_id &&
+    knowledge.scope_id === normalized.scope_id
+  );
+}
+
 export function createMemoryManager(config: MemoryManagerConfig): MemoryManager {
   const asyncAdapter = resolveAdapter(config);
   const autoCompact = config.autoCompact ?? true;
@@ -213,6 +225,17 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     });
   }
 
+  function emitDegradation(
+    kind: 'summarizer' | 'extractor' | 'embeddings',
+    detail: Record<string, unknown>,
+  ): void {
+    emitMemoryEvent('manager', config.scope, { logger: config.logger, onEvent }, 0, {
+      action: 'degraded_mode',
+      subsystem: kind,
+      ...detail,
+    });
+  }
+
   async function withFailurePolicy<T>(
     kind: 'summarizer' | 'extractor',
     run: () => Promise<T>,
@@ -242,10 +265,19 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
       if (strategy === 'disable_auto_extract' && kind === 'extractor') {
         autoExtractEnabled = false;
+        emitDegradation(kind, {
+          strategy,
+          error: String(error),
+          autoExtractEnabled,
+        });
         return fallback();
       }
 
       if (strategy === 'log_and_continue') {
+        emitDegradation(kind, {
+          strategy,
+          error: String(error),
+        });
         return fallback();
       }
 
@@ -282,6 +314,10 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       config.logger?.warn('memory.embeddings.query_vector_failed', {
         error: String(error),
       });
+      emitDegradation('embeddings', {
+        stage: 'query_vector',
+        error: String(error),
+      });
       return undefined;
     }
   }
@@ -294,18 +330,35 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       const vectors = await circuitBreakers.embeddings.execute(() =>
         config.embeddingGenerator!(knowledge.map((item) => item.fact)),
       );
-      knowledge.forEach((item, index) => {
+      for (const [index, item] of knowledge.entries()) {
         const vector = vectors[index];
         if (vector) {
-          config.embeddingAdapter!.storeEmbedding(item.id, vector);
+          await config.embeddingAdapter!.storeEmbedding(item.id, vector);
         }
-      });
+      }
     } catch (error) {
       config.logger?.warn('memory.embeddings.index_failed', {
         error: String(error),
         knowledgeCount: knowledge.length,
       });
+      emitDegradation('embeddings', {
+        stage: 'index',
+        error: String(error),
+        knowledgeCount: knowledge.length,
+      });
     }
+  }
+
+  function normalizeSemanticMatches(
+    matches: Array<{ knowledgeMemoryId: number; similarity: number }>,
+  ): Map<number, number> {
+    if (matches.length === 0) {
+      return new Map();
+    }
+    const maxSimilarity = Math.max(...matches.map((match) => match.similarity), 1);
+    return new Map(
+      matches.map((match) => [match.knowledgeMemoryId, match.similarity / maxSimilarity]),
+    );
   }
 
   async function getHybridKnowledgeResults(
@@ -313,6 +366,10 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     options?: SearchOptions,
     level: ScopeLevel = config.crossScopeLevel ?? 'scope',
   ): Promise<SearchResult<KnowledgeMemory>[]> {
+    const resolvedContextPolicy = {
+      ...DEFAULT_CONTEXT_POLICY,
+      ...config.contextPolicy,
+    };
     const lexical =
       level === 'scope'
         ? await asyncAdapter.searchKnowledge(config.scope, query, options)
@@ -327,21 +384,34 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       return filteredLexical;
     }
 
-    const semantic =
-      level === 'scope'
-        ? config.embeddingAdapter.findSimilar(config.scope, queryVector, {
-            limit: options?.limit ?? 10,
-            minSimilarity: 0.1,
-          })
-        : config.embeddingAdapter.findSimilarCrossScope(config.scope, level, queryVector, {
-            limit: options?.limit ?? 10,
-            minSimilarity: 0.1,
-          });
+    let semantic: Array<{ knowledgeMemoryId: number; similarity: number }>;
+    try {
+      semantic =
+        level === 'scope'
+          ? await config.embeddingAdapter.findSimilar(config.scope, queryVector, {
+              limit: options?.limit ?? 10,
+              minSimilarity: resolvedContextPolicy.semanticMinSimilarity,
+            })
+          : await config.embeddingAdapter.findSimilarCrossScope(config.scope, level, queryVector, {
+              limit: options?.limit ?? 10,
+              minSimilarity: resolvedContextPolicy.semanticMinSimilarity,
+            });
+    } catch (error) {
+      config.logger?.warn('memory.embeddings.semantic_search_failed', {
+        error: String(error),
+        scopeLevel: level,
+      });
+      emitDegradation('embeddings', {
+        stage: 'semantic_search',
+        error: String(error),
+        scopeLevel: level,
+      });
+      return filteredLexical;
+    }
 
     const lexicalRanks = new Map<number, number>();
-    const semanticRanks = new Map<number, number>();
+    const semanticRanks = normalizeSemanticMatches(semantic);
     filteredLexical.forEach((result) => lexicalRanks.set(result.item.id, result.rank));
-    semantic.forEach((result) => semanticRanks.set(result.knowledgeMemoryId, result.similarity));
 
     const merged = new Map<number, SearchResult<KnowledgeMemory>>();
     for (const result of filteredLexical) {
@@ -362,10 +432,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         semanticScore: semanticRanks.get(knowledge.id) ?? 0,
         recencyScore,
         importanceScore: Math.min(1, knowledge.access_count / 10),
-        policy: {
-          ...DEFAULT_CONTEXT_POLICY,
-          ...config.contextPolicy,
-        },
+        policy: resolvedContextPolicy,
         scope: config.scope,
         relevanceTexts: [query],
         preferLocalTrusted: options?.preferLocalTrusted ?? true,
@@ -391,7 +458,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
   }
 
   async function getContextInternal(relevanceQuery?: string, asOf?: number): Promise<MemoryContext> {
-    const activeTurns = await asyncAdapter.getActiveTurns(config.scope);
+    const activeTurns = await asyncAdapter.getActiveTurns(config.scope, config.sessionId);
     const queryVector = await buildQueryVector(
       relevanceQuery ??
         activeTurns
@@ -401,6 +468,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     );
 
     return buildMemoryContext(asyncAdapter, config.scope, {
+      sessionId: config.sessionId,
       relevanceQuery,
       queryVector,
       embeddingAdapter: config.embeddingAdapter,
@@ -438,10 +506,15 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     );
 
     if (!result) {
+      await persistMonitorState('idle', score, turns);
+      emitDegradation('summarizer', {
+        stage: 'compaction',
+        strategy: config.failurePolicy?.summarizer ?? 'throw',
+      });
       return null;
     }
 
-    const remainingTurns = await asyncAdapter.getActiveTurns(config.scope);
+    const remainingTurns = await asyncAdapter.getActiveTurns(config.scope, config.sessionId);
     await persistMonitorState(
       'idle',
       score,
@@ -475,7 +548,10 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
   }
 
   async function runCompaction(turns: Turn[]): Promise<CompactionResult | null> {
-    const latestWorkingMemory = await asyncAdapter.getLatestWorkingMemory(config.scope);
+    const latestWorkingMemory = await asyncAdapter.getLatestWorkingMemory(
+      config.scope,
+      config.sessionId,
+    );
     const report = assessContext(
       {
         scope: config.scope,
@@ -549,7 +625,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       const turn = await insertManagedTurn(role, content, actor);
 
       if (autoCompact) {
-        const activeTurns = await asyncAdapter.getActiveTurns(config.scope);
+        const activeTurns = await asyncAdapter.getActiveTurns(config.scope, config.sessionId);
         await runCompaction(activeTurns);
       }
 
@@ -564,7 +640,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         actors?.assistant ?? 'assistant',
       );
       const compactionResult = autoCompact
-        ? await runCompaction(await asyncAdapter.getActiveTurns(config.scope))
+        ? await runCompaction(await asyncAdapter.getActiveTurns(config.scope, config.sessionId))
         : null;
       return {
         userTurn,
@@ -634,8 +710,11 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       if (deferredSoftCompaction) {
         config.logger?.info('memory.compaction.flushing_deferred');
       }
-      const turns = await asyncAdapter.getActiveTurns(config.scope);
-      const latestWorkingMemory = await asyncAdapter.getLatestWorkingMemory(config.scope);
+      const turns = await asyncAdapter.getActiveTurns(config.scope, config.sessionId);
+      const latestWorkingMemory = await asyncAdapter.getLatestWorkingMemory(
+        config.scope,
+        config.sessionId,
+      );
       const report = assessContext(
         {
           scope: config.scope,
@@ -691,7 +770,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
     async inspectKnowledge(id) {
       const knowledge = await asyncAdapter.getKnowledgeMemoryById(id);
-      if (!knowledge) {
+      if (!knowledge || !knowledgeMatchesScope(knowledge, config.scope)) {
         return { knowledge: null, evidence: [], audits: [] };
       }
       const evidence = await asyncAdapter.listKnowledgeEvidenceForKnowledge(id);
@@ -740,6 +819,9 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       const knowledge = await asyncAdapter.getKnowledgeMemoryById(id);
       if (!knowledge) {
         throw new Error(`Memory validation: knowledge memory ${id} was not found`);
+      }
+      if (!knowledgeMatchesScope(knowledge, config.scope)) {
+        throw new Error(`Memory validation: knowledge memory ${id} does not belong to the requested scope`);
       }
       const evidence = await asyncAdapter.listKnowledgeEvidenceForKnowledge(id);
       const policy = {

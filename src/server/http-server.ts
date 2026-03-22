@@ -46,6 +46,15 @@ export interface HttpServerConfig {
   crossScopeLevel?: ScopeLevel;
 }
 
+class HttpRequestError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 function writeJson(res: ServerResponse, status: number, data: unknown): void {
   const body = JSON.stringify(data);
   res.writeHead(status, {
@@ -79,13 +88,18 @@ async function readBody(
     req.on('end', () => {
       try {
         if (tooLarge) {
-          reject(new Error('Request body too large'));
+          reject(new HttpRequestError(413, 'Request body too large'));
           return;
         }
         const text = Buffer.concat(chunks).toString('utf-8');
-        resolve(text ? JSON.parse(text) : {});
+        const parsed = text ? JSON.parse(text) : {};
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          reject(new HttpRequestError(400, 'JSON body must be an object'));
+          return;
+        }
+        resolve(parsed as Record<string, unknown>);
       } catch {
-        reject(new Error('Invalid JSON body'));
+        reject(new HttpRequestError(400, 'Invalid JSON body'));
       }
     });
     req.on('error', reject);
@@ -98,8 +112,12 @@ function parseQuery(url: string): Record<string, string> {
   const params: Record<string, string> = {};
   const search = url.slice(idx + 1);
   for (const pair of search.split('&')) {
-    const [key, value] = pair.split('=');
-    if (key) params[decodeURIComponent(key)] = decodeURIComponent(value ?? '');
+    try {
+      const [key, value] = pair.split('=');
+      if (key) params[decodeURIComponent(key)] = decodeURIComponent(value ?? '');
+    } catch {
+      throw new HttpRequestError(400, 'Invalid query string');
+    }
   }
   return params;
 }
@@ -110,45 +128,141 @@ function parseOptionalInteger(value: string | undefined): number | undefined {
   return Number.isInteger(parsed) ? parsed : undefined;
 }
 
+function normalizePath(path: string): string {
+  if (path.length > 1 && path.endsWith('/')) {
+    return path.slice(0, -1);
+  }
+  return path;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function requireString(value: unknown, name: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new HttpRequestError(400, `Missing or invalid field: ${name}`);
+  }
+  return value;
+}
+
+function optionalString(value: unknown, name: string): string | undefined {
+  if (value == null) return undefined;
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new HttpRequestError(400, `Invalid field: ${name}`);
+  }
+  return value;
+}
+
+function requireEnum<T extends string>(value: unknown, allowed: readonly T[], name: string): T {
+  if (typeof value !== 'string' || !allowed.includes(value as T)) {
+    throw new HttpRequestError(400, `Invalid field: ${name}`);
+  }
+  return value as T;
+}
+
+function parseLimit(value: string | undefined): number | undefined {
+  const parsed = parseOptionalInteger(value);
+  if (value != null && parsed == null) {
+    throw new HttpRequestError(400, 'Invalid limit parameter');
+  }
+  return parsed;
+}
+
+function parseScopeLevel(
+  value: unknown,
+  name: string,
+  allowed: readonly ScopeLevel[] = ['scope', 'workspace', 'system', 'tenant'],
+): ScopeLevel | undefined {
+  if (value == null || value === '') return undefined;
+  return requireEnum(value, allowed, name);
+}
+
+function resolvePartialScope(
+  source: Record<string, unknown>,
+  labels: [string, string, string],
+): MemoryScope | undefined {
+  const requiredValues = [source.tenant_id, source.system_id, source.scope_id];
+  const provided = requiredValues.filter((value) => value != null && value !== '').length;
+  if (provided === 0) {
+    return undefined;
+  }
+  if (provided !== 3) {
+    throw new HttpRequestError(400, `Incomplete scope override: ${labels.join(', ')}`);
+  }
+  return {
+    tenant_id: requireString(source.tenant_id, labels[0]),
+    system_id: requireString(source.system_id, labels[1]),
+    workspace_id: optionalString(source.workspace_id, 'workspace_id'),
+    collaboration_id: optionalString(source.collaboration_id, 'collaboration_id'),
+    scope_id: requireString(source.scope_id, labels[2]),
+  };
+}
+
+function parseEventTypes(value: string | undefined): Set<MemoryEventType> | undefined {
+  if (!value) return undefined;
+  const allowed: MemoryEventType[] = [
+    'manager',
+    'search',
+    'compaction',
+    'extraction',
+    'promotion',
+    'knowledge_change',
+    'context_assembly',
+    'semantic_search',
+  ];
+  return new Set(
+    value
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((entry) => requireEnum(entry, allowed, 'event_types')),
+  );
+}
+
 function resolveRequestScope(
   fallbackScope: string | MemoryScope | undefined,
   req: IncomingMessage,
   query: Record<string, string>,
   body?: Record<string, unknown>,
 ): string | MemoryScope {
-  const bodyScope =
-    body?.scope && typeof body.scope === 'object' ? (body.scope as MemoryScope) : undefined;
+  const bodyScope = body?.scope;
   if (bodyScope) {
-    return bodyScope;
+    if (!isRecord(bodyScope)) {
+      throw new HttpRequestError(400, 'Invalid scope override');
+    }
+    normalizeScope(bodyScope as unknown as MemoryScope);
+    return bodyScope as unknown as MemoryScope;
   }
 
-  const headerScope = {
-    tenant_id: req.headers['x-memory-tenant'],
-    system_id: req.headers['x-memory-system'],
-    workspace_id: req.headers['x-memory-workspace'],
-    collaboration_id: req.headers['x-memory-collaboration'],
-    scope_id: req.headers['x-memory-scope'],
-  };
-  if (headerScope.tenant_id && headerScope.system_id && headerScope.scope_id) {
-    return {
-      tenant_id: String(headerScope.tenant_id),
-      system_id: String(headerScope.system_id),
-      workspace_id: headerScope.workspace_id ? String(headerScope.workspace_id) : undefined,
-      collaboration_id: headerScope.collaboration_id
-        ? String(headerScope.collaboration_id)
-        : undefined,
-      scope_id: String(headerScope.scope_id),
-    };
+  const headerScope = resolvePartialScope(
+    {
+      tenant_id: req.headers['x-memory-tenant'],
+      system_id: req.headers['x-memory-system'],
+      workspace_id: req.headers['x-memory-workspace'],
+      collaboration_id: req.headers['x-memory-collaboration'],
+      scope_id: req.headers['x-memory-scope'],
+    },
+    ['x-memory-tenant', 'x-memory-system', 'x-memory-scope'],
+  );
+  if (headerScope) {
+    normalizeScope(headerScope);
+    return headerScope;
   }
 
-  if (query.tenant_id && query.system_id && query.scope_id) {
-    return {
+  const queryScope = resolvePartialScope(
+    {
       tenant_id: query.tenant_id,
       system_id: query.system_id,
       workspace_id: query.workspace_id,
       collaboration_id: query.collaboration_id,
       scope_id: query.scope_id,
-    };
+    },
+    ['tenant_id', 'system_id', 'scope_id'],
+  );
+  if (queryScope) {
+    normalizeScope(queryScope);
+    return queryScope;
   }
 
   return fallbackScope ?? 'default';
@@ -213,11 +327,15 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
             'memory-layer: hosted Postgres mode requires the "pg" package. Install it with: npm install pg',
           );
         });
-        const { createPostgresAdapter } = await import('../adapters/postgres/index.js');
+        const { createPostgresAdapter, createPostgresEmbeddingAdapter } = await import(
+          '../adapters/postgres/index.js'
+        );
         const Pool = pgModule.Pool ?? pgModule.default?.Pool;
         const pool = new Pool({ connectionString: databaseUrl });
+        const asyncAdapter = createPostgresAdapter(pool);
         return {
-          asyncAdapter: createPostgresAdapter(pool),
+          asyncAdapter,
+          embeddingAdapter: createPostgresEmbeddingAdapter(pool),
           close: async () => {
             await pool.end();
           },
@@ -316,19 +434,19 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       }
     }
 
-    const url = req.url ?? '/';
-    const path = url.split('?')[0];
-    const query = parseQuery(url);
-
     try {
+      const url = req.url ?? '/';
+      const path = normalizePath(url.split('?')[0]);
+      const query = parseQuery(url);
+
       // POST /v1/turns
       if (path === '/v1/turns' && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
         const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
         const turn = await requestManager.processTurn(
-          body.role as 'user' | 'assistant' | 'system',
-          String(body.content),
-          body.actor ? String(body.actor) : undefined,
+          requireEnum(body.role, ['user', 'assistant', 'system'], 'role'),
+          requireString(body.content, 'content'),
+          optionalString(body.actor, 'actor'),
         );
         writeJson(res, 201, { turnId: turn.id, role: turn.role });
         return;
@@ -339,8 +457,8 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const body = await readBody(req, bodyLimitBytes);
         const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
         const exchange = await requestManager.processExchange(
-          String(body.userContent),
-          String(body.assistantContent),
+          requireString(body.userContent, 'userContent'),
+          requireString(body.assistantContent, 'assistantContent'),
         );
         writeJson(res, 201, {
           userTurnId: exchange.userTurn.id,
@@ -389,7 +507,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
         const results = await requestManager.search(
           query.q,
-          query.limit ? { limit: Number(query.limit) } : undefined,
+          query.limit ? { limit: parseLimit(query.limit) } : undefined,
         );
         writeJson(res, 200, {
           turns: results.turns.map((r) => ({
@@ -415,11 +533,15 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           return;
         }
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const scopeLevel = (query.scope_level as ScopeLevel | undefined) ?? 'workspace';
+        const scopeLevel = parseScopeLevel(query.scope_level, 'scope_level', [
+          'workspace',
+          'system',
+          'tenant',
+        ]) ?? 'workspace';
         const results = await requestManager.searchCrossScope(
           query.q,
           scopeLevel,
-          query.limit ? { limit: Number(query.limit) } : undefined,
+          query.limit ? { limit: parseLimit(query.limit) } : undefined,
         );
         writeJson(res, 200, {
           knowledge: results.knowledge.map((r) => ({
@@ -519,9 +641,11 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const body = await readBody(req, bodyLimitBytes);
         const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
         const fact = await requestManager.learnFact(
-          String(body.fact),
-          body.factType as FactType,
-          (body.confidence as FactConfidence) ?? 'high',
+          requireString(body.fact, 'fact'),
+          requireEnum(body.factType, ['preference', 'entity', 'decision', 'constraint', 'reference'], 'factType') as FactType,
+          (body.confidence == null
+            ? 'high'
+            : requireEnum(body.confidence, ['high', 'medium', 'low'], 'confidence')) as FactConfidence,
         );
         writeJson(res, 201, { knowledgeId: fact.id });
         return;
@@ -532,10 +656,17 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const body = await readBody(req, bodyLimitBytes);
         const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
         const item = await requestManager.trackWorkItem(
-          String(body.title),
-          (body.kind as 'objective' | 'unresolved_work' | 'constraint') ?? 'objective',
-          (body.status as 'open' | 'in_progress' | 'blocked' | 'done') ?? 'open',
-          body.detail ? String(body.detail) : undefined,
+          requireString(body.title, 'title'),
+          requireEnum(body.kind ?? 'objective', ['objective', 'unresolved_work', 'constraint'], 'kind') as
+            | 'objective'
+            | 'unresolved_work'
+            | 'constraint',
+          requireEnum(body.status ?? 'open', ['open', 'in_progress', 'blocked', 'done'], 'status') as
+            | 'open'
+            | 'in_progress'
+            | 'blocked'
+            | 'done',
+          optionalString(body.detail, 'detail'),
         );
         writeJson(res, 201, { workItemId: item.id });
         return;
@@ -613,8 +744,13 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         }
         const body = await readBody(req, bodyLimitBytes);
         const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
-        const limit =
-          typeof body.limit === 'number' && Number.isInteger(body.limit) ? body.limit : undefined;
+        let limit: number | undefined;
+        if (body.limit != null) {
+          if (typeof body.limit !== 'number' || !Number.isInteger(body.limit)) {
+            throw new HttpRequestError(400, 'Invalid field: limit');
+          }
+          limit = body.limit;
+        }
         const report = await requestManager.runReverification({ limit });
         writeJson(res, 200, report);
         return;
@@ -629,7 +765,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           return;
         }
         const changes = await requestManager.pollForChanges(sinceValue, {
-          scopeLevel: (query.scope_level as ScopeLevel | undefined) ?? 'scope',
+          scopeLevel: parseScopeLevel(query.scope_level, 'scope_level') ?? 'scope',
         });
         writeJson(res, 200, {
           changes: changes.map((knowledge) => ({
@@ -657,15 +793,8 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         sseClients.add({
           response: res,
           scope: typeof scope === 'string' ? undefined : scope,
-          scopeLevel: (query.scope_level as ScopeLevel | undefined) ?? 'scope',
-          eventTypes: query.event_types
-            ? new Set(
-                query.event_types
-                  .split(',')
-                  .map((value) => value.trim())
-                  .filter(Boolean) as MemoryEventType[],
-              )
-            : undefined,
+          scopeLevel: parseScopeLevel(query.scope_level, 'scope_level') ?? 'scope',
+          eventTypes: parseEventTypes(query.event_types),
         });
         req.on('close', () => {
           for (const client of sseClients) {
@@ -679,6 +808,10 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       writeError(res, 404, `Not found: ${req.method} ${path}`);
     } catch (error) {
+      if (error instanceof HttpRequestError) {
+        writeError(res, error.status, error.message);
+        return;
+      }
       writeError(
         res,
         500,

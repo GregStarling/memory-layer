@@ -1,46 +1,24 @@
 import type { StorageAdapter } from '../contracts/storage.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 
+const NATIVE_SYNC_ADAPTER = Symbol('nativeSyncAdapter');
+
 /**
  * Wraps a synchronous `StorageAdapter` into an `AsyncStorageAdapter`.
  * Every method call is wrapped in `Promise.resolve()` so sync adapters
  * (SQLite, in-memory) can be used in async-first codepaths without changes.
  *
- * Transaction handling: since `await` always defers to the microtask queue
- * (even for already-resolved Promises), we cannot execute an async function
- * synchronously inside the sync adapter's `transaction()` wrapper. Instead,
- * we collect all write operations during `fn()` execution and replay them
- * inside a sync transaction after `fn()` settles. This preserves atomicity
- * and rollback semantics.
+ * The wrapper itself does not provide rollback semantics for arbitrary async
+ * functions. Higher-level workflows that need true sync transactions can
+ * detect the native adapter through `getNativeSyncAdapter()` and execute the
+ * full write sequence inside `adapter.transaction(...)`.
  */
 export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
-  // Pending write operations recorded during a transaction.
-  type WriteOp = () => void;
-  let pendingWrites: WriteOp[] | null = null;
-
-  // When inside a transaction, write methods push a thunk and return the
-  // result of calling the sync adapter (which executes outside a DB
-  // transaction). After fn() settles, we replay inside a real transaction.
-  //
-  // Actually, this won't work because later operations depend on IDs
-  // returned by earlier operations.
-  //
-  // Different approach: just await fn() directly. The sync adapter's
-  // operations will execute immediately (synchronously) when their
-  // Promise.resolve() microtask runs. JavaScript's single-threaded
-  // model means no other code can interleave between microtasks within
-  // the same tick. This effectively provides atomicity.
-  //
-  // For rollback: we cannot provide true rollback with Promise.resolve()
-  // wrappers. If fn() rejects partway through, some writes will have
-  // already been committed. This is acceptable for the testing/convenience
-  // use case of wrapSyncAdapter.
-
-  return {
+  const wrapped: AsyncStorageAdapter = {
     insertTurn: (input) => Promise.resolve(adapter.insertTurn(input)),
     insertTurns: (inputs) => Promise.resolve(adapter.insertTurns(inputs)),
     getTurnById: (id) => Promise.resolve(adapter.getTurnById(id)),
-    getActiveTurns: (scope) => Promise.resolve(adapter.getActiveTurns(scope)),
+    getActiveTurns: (scope, sessionId) => Promise.resolve(adapter.getActiveTurns(scope, sessionId)),
     getActiveTurnsPaginated: (scope, options) =>
       Promise.resolve(adapter.getActiveTurnsPaginated(scope, options)),
     getTurnsByTimeRange: (scope, range) =>
@@ -56,8 +34,10 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
     getWorkingMemoryById: (id) => Promise.resolve(adapter.getWorkingMemoryById(id)),
     getWorkingMemoryBySession: (sessionId, scope) =>
       Promise.resolve(adapter.getWorkingMemoryBySession(sessionId, scope)),
-    getActiveWorkingMemory: (scope) => Promise.resolve(adapter.getActiveWorkingMemory(scope)),
-    getLatestWorkingMemory: (scope) => Promise.resolve(adapter.getLatestWorkingMemory(scope)),
+    getActiveWorkingMemory: (scope, sessionId) =>
+      Promise.resolve(adapter.getActiveWorkingMemory(scope, sessionId)),
+    getLatestWorkingMemory: (scope, sessionId) =>
+      Promise.resolve(adapter.getLatestWorkingMemory(scope, sessionId)),
     getWorkingMemoryByTimeRange: (scope, range) =>
       Promise.resolve(adapter.getWorkingMemoryByTimeRange(scope, range)),
     expireWorkingMemory: (id) => Promise.resolve(adapter.expireWorkingMemory(id)),
@@ -144,4 +124,19 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
       adapter.close();
     },
   };
+
+  Object.defineProperty(wrapped, NATIVE_SYNC_ADAPTER, {
+    value: adapter,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+
+  return wrapped;
+}
+
+export function getNativeSyncAdapter(adapter: AsyncStorageAdapter): StorageAdapter | null {
+  return (adapter as AsyncStorageAdapter & { [NATIVE_SYNC_ADAPTER]?: StorageAdapter })[
+    NATIVE_SYNC_ADAPTER
+  ] ?? null;
 }

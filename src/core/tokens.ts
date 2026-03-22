@@ -68,15 +68,8 @@ export function estimateTokens(text: string): number {
 }
 
 export function createSessionId(scope: MemoryScope): string {
-  const normalized = normalizeScope(scope);
+  normalizeScope(scope);
   const date = new Date().toISOString().slice(0, 10);
   const rand = randomBytes(4).toString('hex');
-  return [
-    normalized.tenant_id,
-    normalized.system_id,
-    normalized.workspace_id,
-    normalized.scope_id,
-    date,
-    rand,
-  ].join('_');
+  return ['session', date, rand].join('_');
 }

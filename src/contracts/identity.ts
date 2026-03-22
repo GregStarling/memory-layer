@@ -2,10 +2,15 @@ export const DEFAULT_WORKSPACE_ID = 'default';
 export type ScopeLevel = 'scope' | 'workspace' | 'system' | 'tenant';
 
 export interface MemoryScope {
+  /** Multi-tenant partition. */
   tenant_id: string;
+  /** Calling agent or system identity, not a shared-memory boundary. */
   system_id: string;
+  /** Workspace or project boundary. */
   workspace_id?: string;
+  /** Explicit shared-memory boundary across multiple systems or agents. */
   collaboration_id?: string;
+  /** Task, thread, or branch boundary within a workspace/collaboration. */
   scope_id: string;
 }
 

@@ -25,7 +25,7 @@ describe('createMemory quick factory', () => {
     await memory.close();
   });
 
-  it('supports string scope shorthand and in-memory adapter', async () => {
+  it('maps string scope shorthand to scope_id for the quick path', async () => {
     const memory = createMemory({
       adapter: 'memory',
       scope: 'my-agent',
@@ -34,6 +34,8 @@ describe('createMemory quick factory', () => {
     await memory.processExchange('hello', 'hi');
     const recall = await memory.recall({ start_at: 0 });
     expect(recall.turns).toHaveLength(2);
+    expect(recall.turns[0]?.scope_id).toBe('my-agent');
+    expect(recall.turns[0]?.system_id).toBe('default');
     await memory.close();
   });
 
