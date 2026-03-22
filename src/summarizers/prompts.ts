@@ -2,7 +2,11 @@ import type { Turn } from '../contracts/types.js';
 import type { ExtractedFact } from '../core/extractor.js';
 import type { SummarizerOutput } from '../core/orchestrator.js';
 
-export const SUMMARIZATION_SYSTEM_PROMPT = `You summarize AI conversation history into compact working memory.
+export const SUMMARIZATION_PROMPT_VERSION = 'v2';
+export const EXTRACTION_PROMPT_VERSION = 'v2';
+
+export const SUMMARIZATION_SYSTEM_PROMPT = `Prompt version: ${SUMMARIZATION_PROMPT_VERSION}
+You summarize AI conversation history into compact working memory.
 Return strict JSON with this shape:
 {
   "summary": "short factual summary",
@@ -16,7 +20,8 @@ Rules:
 - topic_tags must contain at most 5 strings.
 - Return JSON only.`;
 
-export const EXTRACTION_SYSTEM_PROMPT = `You extract durable facts that should become long-term memory.
+export const EXTRACTION_SYSTEM_PROMPT = `Prompt version: ${EXTRACTION_PROMPT_VERSION}
+You extract durable facts that should become long-term memory.
 Return strict JSON array with items shaped like:
 {
   "fact": "durable fact text",
@@ -38,7 +43,7 @@ export function formatTurnsForSummarization(turns: Turn[]): string {
 }
 
 function extractJsonPayload(text: string): string {
-  const trimmed = text.trim();
+  const trimmed = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
   if (trimmed.startsWith('{')) {
     return trimmed;
   }
@@ -60,8 +65,16 @@ function extractJsonPayload(text: string): string {
   throw new Error('Memory summarizer: response did not contain JSON');
 }
 
+function parseJson<T>(text: string): T {
+  try {
+    return JSON.parse(extractJsonPayload(text)) as T;
+  } catch (error) {
+    throw new Error(`Memory summarizer: failed to parse JSON response (${String(error)})`);
+  }
+}
+
 export function parseSummarizerResponse(text: string): SummarizerOutput {
-  const payload = JSON.parse(extractJsonPayload(text)) as Partial<SummarizerOutput>;
+  const payload = parseJson<Partial<SummarizerOutput>>(text);
   if (typeof payload.summary !== 'string') {
     throw new Error('Memory summarizer: missing summary');
   }
@@ -79,7 +92,8 @@ export function parseSummarizerResponse(text: string): SummarizerOutput {
 }
 
 export function parseExtractionResponse(text: string): ExtractedFact[] {
-  const payload = JSON.parse(extractJsonPayload(text)) as Array<Partial<ExtractedFact>>;
+  const parsed = parseJson<Array<Partial<ExtractedFact>> | { items?: Array<Partial<ExtractedFact>>; facts?: Array<Partial<ExtractedFact>> }>(text);
+  const payload = Array.isArray(parsed) ? parsed : parsed.items ?? parsed.facts ?? [];
   if (!Array.isArray(payload)) {
     throw new Error('Memory extractor: response must be a JSON array');
   }
@@ -88,6 +102,12 @@ export function parseExtractionResponse(text: string): ExtractedFact[] {
     .map((item) => {
       if (typeof item.fact !== 'string' || typeof item.factType !== 'string') {
         throw new Error('Memory extractor: invalid extracted fact');
+      }
+      if (!['preference', 'entity', 'decision', 'constraint', 'reference'].includes(item.factType)) {
+        throw new Error(`Memory extractor: invalid factType '${item.factType}'`);
+      }
+      if (item.confidence && !['high', 'medium'].includes(item.confidence)) {
+        throw new Error(`Memory extractor: invalid confidence '${item.confidence}'`);
       }
       return {
         fact: item.fact,

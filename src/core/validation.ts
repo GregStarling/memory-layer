@@ -7,11 +7,17 @@ import type {
   FactConfidence,
   FactSource,
   FactType,
+  KnowledgeAuditDecision,
   NewCompactionLog,
+  NewKnowledgeMemoryAudit,
   NewKnowledgeMemory,
+  NewWorkItem,
   NewTurn,
   NewWorkingMemory,
+  TimeRange,
   TurnRole,
+  WorkItemKind,
+  WorkItemStatus,
 } from '../contracts/types.js';
 import {
   COMPACTION_STATES,
@@ -19,7 +25,10 @@ import {
   FACT_CONFIDENCES,
   FACT_SOURCES,
   FACT_TYPES,
+  KNOWLEDGE_AUDIT_DECISIONS,
   TURN_ROLES,
+  WORK_ITEM_KINDS,
+  WORK_ITEM_STATUSES,
 } from '../contracts/types.js';
 
 export function nowSeconds(): number {
@@ -86,8 +95,20 @@ export function assertFactConfidence(confidence: FactConfidence): void {
   assertEnum(confidence, FACT_CONFIDENCES, 'confidence');
 }
 
+export function assertKnowledgeAuditDecision(decision: KnowledgeAuditDecision): void {
+  assertEnum(decision, KNOWLEDGE_AUDIT_DECISIONS, 'decision');
+}
+
 export function assertCompactionState(state: CompactionState): void {
   assertEnum(state, COMPACTION_STATES, 'compaction_state');
+}
+
+export function assertWorkItemKind(kind: WorkItemKind): void {
+  assertEnum(kind, WORK_ITEM_KINDS, 'kind');
+}
+
+export function assertWorkItemStatus(status: WorkItemStatus): void {
+  assertEnum(status, WORK_ITEM_STATUSES, 'status');
 }
 
 export function validateNewTurn(input: NewTurn): NormalizedMemoryScope {
@@ -120,6 +141,17 @@ export function validateNewKnowledgeMemory(input: NewKnowledgeMemory): Normalize
   return scope;
 }
 
+export function validateNewKnowledgeMemoryAudit(
+  input: NewKnowledgeMemoryAudit,
+): NormalizedMemoryScope {
+  const scope = assertScope(input);
+  assertNonEmpty(input.fact, 'fact');
+  assertFactType(input.fact_type);
+  assertFactConfidence(input.confidence);
+  assertKnowledgeAuditDecision(input.decision);
+  return scope;
+}
+
 export function validateContextMonitorUpsert(input: ContextMonitorUpsert): NormalizedMemoryScope {
   const scope = assertScope(input);
   assertCompactionState(input.compaction_state);
@@ -131,6 +163,24 @@ export function validateNewCompactionLog(input: NewCompactionLog): NormalizedMem
   assertNonEmpty(input.session_id, 'session_id');
   assertCompactionTrigger(input.trigger_type, 'trigger_type');
   assertTurnRange(input.turn_id_start, input.turn_id_end);
+  return scope;
+}
+
+export function validateTimeRange(range: TimeRange): void {
+  if (
+    range.start_at !== undefined &&
+    range.end_at !== undefined &&
+    range.end_at < range.start_at
+  ) {
+    throw new Error("Memory validation: 'end_at' must be >= 'start_at'");
+  }
+}
+
+export function validateNewWorkItem(input: NewWorkItem): NormalizedMemoryScope {
+  const scope = assertScope(input);
+  assertNonEmpty(input.title, 'title');
+  assertWorkItemKind(input.kind);
+  assertWorkItemStatus(input.status ?? 'open');
   return scope;
 }
 

@@ -5,6 +5,7 @@ import { createOpenAISummarizer } from '../summarizers/openai.js';
 import {
   formatTurnsForSummarization,
   parseSummarizerResponse,
+  SUMMARIZATION_PROMPT_VERSION,
   SUMMARIZATION_SYSTEM_PROMPT,
 } from '../summarizers/prompts.js';
 import type { Turn } from '../contracts/types.js';
@@ -45,8 +46,39 @@ describe('summarizer helpers', () => {
     });
   });
 
+  it('recovers JSON from fenced output', () => {
+    expect(
+      parseSummarizerResponse(
+        '```json\n{"summary":"short","key_entities":["memory"],"topic_tags":["context"]}\n```',
+      ),
+    ).toEqual({
+      summary: 'short',
+      key_entities: ['memory'],
+      topic_tags: ['context'],
+    });
+  });
+
   it('exposes a non-empty system prompt', () => {
     expect(SUMMARIZATION_SYSTEM_PROMPT.length).toBeGreaterThan(20);
+    expect(SUMMARIZATION_SYSTEM_PROMPT).toContain(SUMMARIZATION_PROMPT_VERSION);
+  });
+
+  it('supports custom structured clients', async () => {
+    const summarizer = createOpenAISummarizer({
+      prompt: 'custom prompt',
+      client: {
+        async generate(request) {
+          expect(request.systemPrompt).toBe('custom prompt');
+          return '{"summary":"custom","key_entities":["sdk"],"topic_tags":["tests"]}';
+        },
+      },
+    });
+
+    await expect(summarizer([makeTurn('hello')])).resolves.toEqual({
+      summary: 'custom',
+      key_entities: ['sdk'],
+      topic_tags: ['tests'],
+    });
   });
 
   it('throws a clear error when anthropic sdk is missing', async () => {

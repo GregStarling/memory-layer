@@ -1,11 +1,26 @@
 import type Database from 'better-sqlite3';
 
-import { scopeValues, type MemoryScope } from '../../contracts/identity.js';
+import { normalizeScope, scopeValues, type MemoryScope, type ScopeLevel } from '../../contracts/identity.js';
 import type { EmbeddingAdapter, EmbeddingVector, SimilarEmbeddingResult } from '../../contracts/embedding.js';
 import type { Logger } from '../../contracts/observability.js';
 import { nowSeconds } from '../../core/validation.js';
 
 const SCOPE_WHERE = 'km.tenant_id = ? AND km.system_id = ? AND km.workspace_id = ? AND km.scope_id = ?';
+
+function scopeWhereForLevel(level: ScopeLevel): string {
+  if (level === 'tenant') return 'km.tenant_id = ?';
+  if (level === 'system') return 'km.tenant_id = ? AND km.system_id = ?';
+  if (level === 'workspace') return 'km.tenant_id = ? AND km.system_id = ? AND km.workspace_id = ?';
+  return SCOPE_WHERE;
+}
+
+function scopeParamsForLevel(scope: MemoryScope, level: ScopeLevel): string[] {
+  const normalized = normalizeScope(scope);
+  if (level === 'tenant') return [normalized.tenant_id];
+  if (level === 'system') return [normalized.tenant_id, normalized.system_id];
+  if (level === 'workspace') return [normalized.tenant_id, normalized.system_id, normalized.workspace_id];
+  return [...scopeValues(normalized)];
+}
 
 function ensureEmbeddingSchema(db: Database.Database): void {
   db.exec(`
@@ -88,6 +103,37 @@ export function createSQLiteEmbeddingAdapter(
           candidateCount: rows.length,
         });
       }
+
+      const minSimilarity = options?.minSimilarity ?? 0;
+      const limit = options?.limit ?? 10;
+
+      return rows
+        .map((row) => ({
+          knowledgeMemoryId: row.knowledge_memory_id,
+          similarity: cosineSimilarity(queryVector, bufferToVector(row.vector)),
+        }))
+        .filter((row) => row.similarity >= minSimilarity)
+        .sort((a, b) => b.similarity - a.similarity)
+        .slice(0, limit);
+    },
+
+    findSimilarCrossScope(
+      scope: MemoryScope,
+      level: ScopeLevel,
+      queryVector: EmbeddingVector,
+      options,
+    ): SimilarEmbeddingResult[] {
+      const rows = db
+        .prepare(
+          `SELECT ke.knowledge_memory_id, ke.vector
+           FROM knowledge_embeddings ke
+           JOIN knowledge_memory km ON km.id = ke.knowledge_memory_id
+           WHERE ${scopeWhereForLevel(level)} AND km.superseded_by_id IS NULL`,
+        )
+        .all(...scopeParamsForLevel(scope, level)) as Array<{
+        knowledge_memory_id: number;
+        vector: Buffer;
+      }>;
 
       const minSimilarity = options?.minSimilarity ?? 0;
       const limit = options?.limit ?? 10;

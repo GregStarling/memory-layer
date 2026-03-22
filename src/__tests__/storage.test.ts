@@ -246,6 +246,114 @@ describe('SQLite storage adapter', () => {
     });
   });
 
+  describe('session-scoped safety', () => {
+    it('filters working memory by scope when requested', () => {
+      const sessionId = 'shared-session';
+      const scopeA = scope();
+      const scopeB = scope({ scope_id: 'thread-2' });
+      adapter.insertWorkingMemory({
+        ...scopeA,
+        session_id: sessionId,
+        summary: 'scope A summary',
+        key_entities: [],
+        topic_tags: [],
+        turn_id_start: 1,
+        turn_id_end: 1,
+        turn_count: 1,
+        compaction_trigger: 'manual',
+      });
+      adapter.insertWorkingMemory({
+        ...scopeB,
+        session_id: sessionId,
+        summary: 'scope B summary',
+        key_entities: [],
+        topic_tags: [],
+        turn_id_start: 1,
+        turn_id_end: 1,
+        turn_count: 1,
+        compaction_trigger: 'manual',
+      });
+
+      expect(adapter.getWorkingMemoryBySession(sessionId)).toHaveLength(2);
+      expect(adapter.getWorkingMemoryBySession(sessionId, scopeA)).toHaveLength(1);
+      expect(adapter.getWorkingMemoryBySession(sessionId, scopeB)).toHaveLength(1);
+    });
+
+    it('filters archived turn ranges by scope when requested', () => {
+      const sessionId = 'shared-session';
+      const scopeA = scope();
+      const scopeB = scope({ scope_id: 'thread-2' });
+      const turnA = adapter.insertTurn({
+        ...scopeA,
+        session_id: sessionId,
+        actor: 'user-1',
+        role: 'user',
+        content: 'scope A archived',
+      });
+      const turnB = adapter.insertTurn({
+        ...scopeB,
+        session_id: sessionId,
+        actor: 'user-2',
+        role: 'user',
+        content: 'scope B archived',
+      });
+      const wmA = adapter.insertWorkingMemory({
+        ...scopeA,
+        session_id: sessionId,
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+        turn_id_start: turnA.id,
+        turn_id_end: turnA.id,
+        turn_count: 1,
+        compaction_trigger: 'manual',
+      });
+      const logA = adapter.insertCompactionLog({
+        ...scopeA,
+        session_id: sessionId,
+        trigger_type: 'manual',
+        turn_id_start: turnA.id,
+        turn_id_end: turnA.id,
+        turns_compacted: 1,
+        tokens_compacted_estimate: turnA.token_estimate,
+        working_memory_id: wmA.id,
+        active_turn_count_before: 1,
+        active_turn_count_after: 0,
+        duration_ms: 1,
+      });
+      const wmB = adapter.insertWorkingMemory({
+        ...scopeB,
+        session_id: sessionId,
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+        turn_id_start: turnB.id,
+        turn_id_end: turnB.id,
+        turn_count: 1,
+        compaction_trigger: 'manual',
+      });
+      const logB = adapter.insertCompactionLog({
+        ...scopeB,
+        session_id: sessionId,
+        trigger_type: 'manual',
+        turn_id_start: turnB.id,
+        turn_id_end: turnB.id,
+        turns_compacted: 1,
+        tokens_compacted_estimate: turnB.token_estimate,
+        working_memory_id: wmB.id,
+        active_turn_count_before: 1,
+        active_turn_count_after: 0,
+        duration_ms: 1,
+      });
+      adapter.archiveTurn(turnA.id, nowSec(), logA.id);
+      adapter.archiveTurn(turnB.id, nowSec(), logB.id);
+
+      expect(adapter.getArchivedTurnRange(sessionId, turnA.id, turnB.id)).toHaveLength(2);
+      expect(adapter.getArchivedTurnRange(sessionId, turnA.id, turnB.id, scopeA)).toHaveLength(1);
+      expect(adapter.getArchivedTurnRange(sessionId, turnA.id, turnB.id, scopeB)).toHaveLength(1);
+    });
+  });
+
   describe('archiveTurn', () => {
     it('sets archived_at and compaction_log_id', () => {
       const memoryScope = scope();

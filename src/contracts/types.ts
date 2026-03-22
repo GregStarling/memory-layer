@@ -10,11 +10,21 @@ export type FactType =
   | 'reference';
 export type FactSource = 'user_stated' | 'promoted_from_working' | 'manual';
 export type FactConfidence = 'high' | 'medium';
+export type KnowledgeRelation = 'duplicate' | 'compatible' | 'update' | 'conflict';
+export type KnowledgeAuditDecision =
+  | 'created'
+  | 'duplicate'
+  | 'compatible'
+  | 'updated'
+  | 'conflict'
+  | 'skipped_low_confidence';
 export type CompactionState =
   | 'idle'
   | 'soft_triggered'
   | 'hard_triggered'
   | 'compacting';
+export type WorkItemKind = 'objective' | 'unresolved_work' | 'constraint';
+export type WorkItemStatus = 'open' | 'in_progress' | 'blocked' | 'done';
 
 export const TURN_ROLES: readonly TurnRole[] = ['user', 'assistant', 'system'];
 export const COMPACTION_TRIGGERS: readonly CompactionTrigger[] = [
@@ -36,11 +46,36 @@ export const FACT_SOURCES: readonly FactSource[] = [
   'manual',
 ];
 export const FACT_CONFIDENCES: readonly FactConfidence[] = ['high', 'medium'];
+export const KNOWLEDGE_RELATIONS: readonly KnowledgeRelation[] = [
+  'duplicate',
+  'compatible',
+  'update',
+  'conflict',
+];
+export const KNOWLEDGE_AUDIT_DECISIONS: readonly KnowledgeAuditDecision[] = [
+  'created',
+  'duplicate',
+  'compatible',
+  'updated',
+  'conflict',
+  'skipped_low_confidence',
+];
 export const COMPACTION_STATES: readonly CompactionState[] = [
   'idle',
   'soft_triggered',
   'hard_triggered',
   'compacting',
+];
+export const WORK_ITEM_KINDS: readonly WorkItemKind[] = [
+  'objective',
+  'unresolved_work',
+  'constraint',
+];
+export const WORK_ITEM_STATUSES: readonly WorkItemStatus[] = [
+  'open',
+  'in_progress',
+  'blocked',
+  'done',
 ];
 
 export interface Turn extends NormalizedMemoryScope {
@@ -97,10 +132,17 @@ export interface KnowledgeMemory extends NormalizedMemoryScope {
   id: number;
   fact: string;
   fact_type: FactType;
+  fact_subject: string | null;
+  fact_attribute: string | null;
+  fact_value: string | null;
+  normalized_fact: string | null;
+  slot_key: string | null;
+  is_negated: boolean;
   source: FactSource;
   confidence: FactConfidence;
   source_working_memory_id: number | null;
   superseded_by_id: number | null;
+  retired_at: number | null;
   created_at: number;
   last_accessed_at: number;
   access_count: number;
@@ -110,9 +152,55 @@ export interface KnowledgeMemory extends NormalizedMemoryScope {
 export interface NewKnowledgeMemory extends MemoryScope {
   fact: string;
   fact_type: FactType;
+  fact_subject?: string | null;
+  fact_attribute?: string | null;
+  fact_value?: string | null;
+  normalized_fact?: string | null;
+  slot_key?: string | null;
+  is_negated?: boolean;
   source: FactSource;
   confidence: FactConfidence;
   source_working_memory_id?: number | null;
+  retired_at?: number | null;
+}
+
+export interface KnowledgeMemoryAudit extends NormalizedMemoryScope {
+  id: number;
+  working_memory_id: number | null;
+  fact: string;
+  fact_type: FactType;
+  fact_subject: string | null;
+  fact_attribute: string | null;
+  fact_value: string | null;
+  normalized_fact: string | null;
+  slot_key: string | null;
+  is_negated: boolean;
+  confidence: FactConfidence;
+  source_text: string | null;
+  decision: KnowledgeAuditDecision;
+  created_knowledge_id: number | null;
+  related_knowledge_id: number | null;
+  detail: string | null;
+  created_at: number;
+}
+
+export interface NewKnowledgeMemoryAudit extends MemoryScope {
+  working_memory_id?: number | null;
+  fact: string;
+  fact_type: FactType;
+  fact_subject?: string | null;
+  fact_attribute?: string | null;
+  fact_value?: string | null;
+  normalized_fact?: string | null;
+  slot_key?: string | null;
+  is_negated?: boolean;
+  confidence: FactConfidence;
+  source_text?: string | null;
+  decision: KnowledgeAuditDecision;
+  created_knowledge_id?: number | null;
+  related_knowledge_id?: number | null;
+  detail?: string | null;
+  created_at?: number;
 }
 
 export interface ContextMonitor extends NormalizedMemoryScope {
@@ -174,4 +262,31 @@ export interface SearchOptions {
 export interface SearchResult<T> {
   item: T;
   rank: number;
+}
+
+export interface TimeRange {
+  start_at?: number;
+  end_at?: number;
+}
+
+export interface WorkItem extends NormalizedMemoryScope {
+  id: number;
+  session_id: string | null;
+  kind: WorkItemKind;
+  title: string;
+  detail: string | null;
+  status: WorkItemStatus;
+  source_working_memory_id: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface NewWorkItem extends MemoryScope {
+  session_id?: string | null;
+  kind: WorkItemKind;
+  title: string;
+  detail?: string | null;
+  status?: WorkItemStatus;
+  source_working_memory_id?: number | null;
+  created_at?: number;
 }

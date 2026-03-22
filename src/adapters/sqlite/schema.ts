@@ -1,5 +1,7 @@
 import type Database from 'better-sqlite3';
 
+export const CURRENT_SCHEMA_VERSION = 2;
+
 export function createSQLiteSchema(database: Database.Database): void {
   database.pragma('journal_mode = WAL');
   database.pragma('foreign_keys = ON');
@@ -65,10 +67,17 @@ export function createSQLiteSchema(database: Database.Database): void {
       scope_id                 TEXT    NOT NULL,
       fact                     TEXT    NOT NULL,
       fact_type                TEXT    NOT NULL,
+      fact_subject             TEXT,
+      fact_attribute           TEXT,
+      fact_value               TEXT,
+      normalized_fact          TEXT,
+      slot_key                 TEXT,
+      is_negated               INTEGER NOT NULL DEFAULT 0,
       source                   TEXT    NOT NULL,
       confidence               TEXT    NOT NULL DEFAULT 'high',
       source_working_memory_id INTEGER REFERENCES working_memory(id),
       superseded_by_id         INTEGER REFERENCES knowledge_memory(id),
+      retired_at               INTEGER,
       created_at               INTEGER NOT NULL,
       last_accessed_at         INTEGER NOT NULL,
       access_count             INTEGER NOT NULL DEFAULT 1,
@@ -77,6 +86,7 @@ export function createSQLiteSchema(database: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_km_scope ON knowledge_memory(tenant_id, system_id, workspace_id, scope_id);
     CREATE INDEX IF NOT EXISTS idx_km_superseded ON knowledge_memory(superseded_by_id);
+    CREATE INDEX IF NOT EXISTS idx_km_slot ON knowledge_memory(tenant_id, system_id, workspace_id, scope_id, slot_key);
 
     CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_memory_fts USING fts5(
       fact, content=knowledge_memory, content_rowid=id
@@ -85,6 +95,32 @@ export function createSQLiteSchema(database: Database.Database): void {
     CREATE TRIGGER IF NOT EXISTS km_ai AFTER INSERT ON knowledge_memory BEGIN
       INSERT INTO knowledge_memory_fts(rowid, fact) VALUES (new.id, new.fact);
     END;
+
+    CREATE TABLE IF NOT EXISTS knowledge_memory_audit (
+      id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id            TEXT    NOT NULL,
+      system_id            TEXT    NOT NULL,
+      workspace_id         TEXT    NOT NULL DEFAULT 'default',
+      scope_id             TEXT    NOT NULL,
+      working_memory_id    INTEGER REFERENCES working_memory(id),
+      fact                 TEXT    NOT NULL,
+      fact_type            TEXT    NOT NULL,
+      fact_subject         TEXT,
+      fact_attribute       TEXT,
+      fact_value           TEXT,
+      normalized_fact      TEXT,
+      slot_key             TEXT,
+      is_negated           INTEGER NOT NULL DEFAULT 0,
+      confidence           TEXT    NOT NULL DEFAULT 'medium',
+      source_text          TEXT,
+      decision             TEXT    NOT NULL,
+      created_knowledge_id INTEGER REFERENCES knowledge_memory(id),
+      related_knowledge_id INTEGER REFERENCES knowledge_memory(id),
+      detail               TEXT,
+      created_at           INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_kma_scope ON knowledge_memory_audit(tenant_id, system_id, workspace_id, scope_id, id DESC);
 
     CREATE TABLE IF NOT EXISTS context_monitor (
       id                    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,5 +159,57 @@ export function createSQLiteSchema(database: Database.Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_cl_scope ON compaction_log(tenant_id, system_id, workspace_id, scope_id);
+
+    CREATE TABLE IF NOT EXISTS work_items (
+      id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id             TEXT,
+      tenant_id              TEXT    NOT NULL,
+      system_id              TEXT    NOT NULL,
+      workspace_id           TEXT    NOT NULL DEFAULT 'default',
+      scope_id               TEXT    NOT NULL,
+      kind                   TEXT    NOT NULL,
+      title                  TEXT    NOT NULL,
+      detail                 TEXT,
+      status                 TEXT    NOT NULL DEFAULT 'open',
+      source_working_memory_id INTEGER REFERENCES working_memory(id),
+      created_at             INTEGER NOT NULL,
+      updated_at             INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_work_items_scope ON work_items(tenant_id, system_id, workspace_id, scope_id, status);
+
+    CREATE TABLE IF NOT EXISTS schema_meta (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      schema_version INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
   `);
+
+  const knowledgeMemoryAlterStatements = [
+    'ALTER TABLE knowledge_memory ADD COLUMN fact_subject TEXT',
+    'ALTER TABLE knowledge_memory ADD COLUMN fact_attribute TEXT',
+    'ALTER TABLE knowledge_memory ADD COLUMN fact_value TEXT',
+    'ALTER TABLE knowledge_memory ADD COLUMN normalized_fact TEXT',
+    'ALTER TABLE knowledge_memory ADD COLUMN slot_key TEXT',
+    'ALTER TABLE knowledge_memory ADD COLUMN is_negated INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE knowledge_memory ADD COLUMN retired_at INTEGER',
+  ];
+
+  for (const statement of knowledgeMemoryAlterStatements) {
+    try {
+      database.exec(statement);
+    } catch {
+      // Column already exists on upgraded databases.
+    }
+  }
+
+  database
+    .prepare(
+      `INSERT INTO schema_meta (id, schema_version, updated_at)
+       VALUES (1, ?, strftime('%s','now'))
+       ON CONFLICT(id) DO UPDATE SET
+         schema_version = excluded.schema_version,
+         updated_at = excluded.updated_at`,
+    )
+    .run(CURRENT_SCHEMA_VERSION);
 }

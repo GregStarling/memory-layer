@@ -90,4 +90,24 @@ describe('sqlite embeddings', () => {
     adapter.embeddings.deleteEmbedding(knowledge.id);
     expect(adapter.embeddings.getEmbedding(knowledge.id)).toBeNull();
   });
+
+  it('supports cross-scope semantic search when requested', () => {
+    const scopeA = makeScope({ scope_id: 'thread-1' });
+    const scopeB = makeScope({ scope_id: 'thread-2' });
+    const knowledge = adapter.insertKnowledgeMemory({
+      ...scopeA,
+      fact: 'shared workspace fact',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+    adapter.embeddings.storeEmbedding(knowledge.id, new Float32Array([1, 0]));
+
+    const results = adapter.embeddings.findSimilarCrossScope(
+      scopeB,
+      'workspace',
+      new Float32Array([1, 0]),
+    );
+    expect(results[0]?.knowledgeMemoryId).toBe(knowledge.id);
+  });
 });

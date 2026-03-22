@@ -1,20 +1,22 @@
 import type { Summarizer } from '../core/orchestrator.js';
-import {
-  formatTurnsForSummarization,
-  parseSummarizerResponse,
-  SUMMARIZATION_SYSTEM_PROMPT,
-} from './prompts.js';
+import { createClientSummarizer, type StructuredGenerationClient } from './client.js';
 
 export interface ClaudeSummarizerOptions {
   apiKey?: string;
   model?: string;
   maxTokens?: number;
+  prompt?: string;
+  client?: StructuredGenerationClient;
 }
 
 export function createClaudeSummarizer(
   options: ClaudeSummarizerOptions = {},
 ): Summarizer {
-  return async (turns) => {
+  if (options.client) {
+    return createClientSummarizer(options.client, options);
+  }
+
+  return async (...args) => {
     const moduleName = '@anthropic-ai/sdk';
     let sdkModule: any;
     try {
@@ -29,23 +31,27 @@ export function createClaudeSummarizer(
     const client = new Anthropic({
       apiKey: options.apiKey ?? process.env.ANTHROPIC_API_KEY,
     });
+    return createClientSummarizer(
+      {
+        async generate(request) {
+          const response = await client.messages.create({
+            model: request.model ?? 'claude-sonnet-4-20250514',
+            max_tokens: request.maxTokens ?? 1024,
+            system: request.systemPrompt,
+            messages: [
+              {
+                role: 'user',
+                content: request.userPrompt,
+              },
+            ],
+          });
 
-    const response = await client.messages.create({
-      model: options.model ?? 'claude-sonnet-4-20250514',
-      max_tokens: options.maxTokens ?? 1024,
-      system: SUMMARIZATION_SYSTEM_PROMPT,
-      messages: [
-        {
-          role: 'user',
-          content: formatTurnsForSummarization(turns),
+          return Array.isArray(response.content)
+            ? response.content.map((part: any) => part.text ?? '').join('\n')
+            : String(response.content ?? '');
         },
-      ],
-    });
-
-    const text = Array.isArray(response.content)
-      ? response.content.map((part: any) => part.text ?? '').join('\n')
-      : String(response.content ?? '');
-
-    return parseSummarizerResponse(text);
+      },
+      options,
+    )(...args);
   };
 }

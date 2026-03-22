@@ -1,3 +1,14 @@
+export type ConflictStrategy = 'supersede' | 'keep_both' | 'skip';
+export type ContextMode = 'chat' | 'coding' | 'autonomous_agent' | 'review';
+
+export interface MaintenancePolicy {
+  workingMemoryTtlSeconds?: number;
+  completedWorkItemTtlSeconds?: number;
+  knowledgeStaleAfterSeconds?: number;
+  minKnowledgeAccessCount?: number;
+  maxActiveKnowledgeItems?: number;
+}
+
 export interface MonitorPolicy {
   softTurnThreshold?: number;
   hardTurnThreshold?: number;
@@ -22,9 +33,12 @@ export interface ExtractionPolicy {
   maxFactsPerExtraction?: number;
   deduplicateFacts?: boolean;
   touchDuplicates?: boolean;
+  minConfidenceForPromotion?: 'high' | 'medium';
+  conflictStrategy?: ConflictStrategy;
 }
 
 export interface ContextPolicy {
+  mode?: ContextMode;
   maxKnowledgeItems?: number;
   maxRecentSummaries?: number;
   tokenBudget?: number;
@@ -32,6 +46,9 @@ export interface ContextPolicy {
   semanticWeight?: number;
   recencyWeight?: number;
   importanceWeight?: number;
+  diversityPenalty?: number;
+  maxPerFactType?: number;
+  touchSelectedKnowledge?: boolean;
 }
 
 export const DEFAULT_MONITOR_POLICY: Required<MonitorPolicy> = {
@@ -58,14 +75,28 @@ export const DEFAULT_EXTRACTION_POLICY: Required<ExtractionPolicy> = {
   maxFactsPerExtraction: 10,
   deduplicateFacts: true,
   touchDuplicates: true,
+  minConfidenceForPromotion: 'medium',
+  conflictStrategy: 'supersede',
 };
 
 export const DEFAULT_CONTEXT_POLICY: Required<ContextPolicy> = {
   maxKnowledgeItems: 20,
   maxRecentSummaries: 3,
+  mode: 'chat',
   tokenBudget: Number.MAX_SAFE_INTEGER,
   lexicalWeight: 1,
   semanticWeight: 1,
   recencyWeight: 1,
   importanceWeight: 0.25,
+  diversityPenalty: 0.2,
+  maxPerFactType: 8,
+  touchSelectedKnowledge: true,
+};
+
+export const DEFAULT_MAINTENANCE_POLICY: Required<MaintenancePolicy> = {
+  workingMemoryTtlSeconds: 30 * 24 * 60 * 60,
+  completedWorkItemTtlSeconds: 14 * 24 * 60 * 60,
+  knowledgeStaleAfterSeconds: 60 * 24 * 60 * 60,
+  minKnowledgeAccessCount: 1,
+  maxActiveKnowledgeItems: 500,
 };

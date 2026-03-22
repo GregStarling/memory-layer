@@ -1,4 +1,5 @@
 export const DEFAULT_WORKSPACE_ID = 'default';
+export type ScopeLevel = 'scope' | 'workspace' | 'system' | 'tenant';
 
 export interface MemoryScope {
   tenant_id: string;
@@ -12,6 +13,11 @@ export interface NormalizedMemoryScope {
   system_id: string;
   workspace_id: string;
   scope_id: string;
+}
+
+export interface ScopeQuery {
+  scope: MemoryScope;
+  level: ScopeLevel;
 }
 
 function assertScopeValue(value: string | undefined, name: keyof MemoryScope): string {
@@ -38,4 +44,11 @@ export function scopeValues(scope: MemoryScope): [string, string, string, string
     normalized.workspace_id,
     normalized.scope_id,
   ];
+}
+
+export function widenScope(scope: MemoryScope, level: ScopeLevel): ScopeQuery {
+  return {
+    scope: normalizeScope(scope),
+    level,
+  };
 }

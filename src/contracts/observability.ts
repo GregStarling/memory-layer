@@ -14,15 +14,17 @@ export const noopLogger: Logger = {
   error() {},
 };
 
+export type MemoryEventType =
+  | 'compaction'
+  | 'promotion'
+  | 'extraction'
+  | 'search'
+  | 'context_assembly'
+  | 'semantic_search'
+  | 'manager';
+
 export interface MemoryEvent {
-  type:
-    | 'compaction'
-    | 'promotion'
-    | 'extraction'
-    | 'search'
-    | 'context_assembly'
-    | 'semantic_search'
-    | 'manager';
+  type: MemoryEventType;
   scope: NormalizedMemoryScope;
   timestamp: number;
   durationMs: number;

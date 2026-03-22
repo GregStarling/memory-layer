@@ -12,3 +12,4 @@ npm run eval:retrieval
 Current evals:
 
 - `retrieval-quality.mjs`: checks that prompt-ready context ranks an obviously relevant fact first
+- `scenario-evals.mjs`: runs continuity scenarios for retrieval, bootstrap, unresolved work, and temporal recall

@@ -2,7 +2,9 @@ import type {
   CompactionLog,
   ContextMonitor,
   KnowledgeMemory,
+  KnowledgeMemoryAudit,
   Turn,
+  WorkItem,
   WorkingMemory,
 } from '../../contracts/types.js';
 
@@ -13,6 +15,14 @@ interface WorkingMemoryRow extends Omit<WorkingMemory, 'key_entities' | 'topic_t
 
 interface CompactionLogRow extends Omit<CompactionLog, 'model_call_made'> {
   model_call_made: number;
+}
+
+interface KnowledgeMemoryRow extends Omit<KnowledgeMemory, 'is_negated'> {
+  is_negated: number;
+}
+
+interface KnowledgeMemoryAuditRow extends Omit<KnowledgeMemoryAudit, 'is_negated'> {
+  is_negated: number;
 }
 
 function parseJsonArray(json: string): string[] {
@@ -42,12 +52,27 @@ export function rowToWorkingMemory(row: WorkingMemoryRow): WorkingMemory {
 }
 
 /** Identity — exists so all row types pass through a mapper consistently. */
-export function rowToKnowledgeMemory(row: KnowledgeMemory): KnowledgeMemory {
-  return row;
+export function rowToKnowledgeMemory(row: KnowledgeMemoryRow): KnowledgeMemory {
+  return {
+    ...row,
+    is_negated: row.is_negated === 1,
+  };
+}
+
+export function rowToKnowledgeMemoryAudit(row: KnowledgeMemoryAuditRow): KnowledgeMemoryAudit {
+  return {
+    ...row,
+    is_negated: row.is_negated === 1,
+  };
 }
 
 /** Identity — exists so all row types pass through a mapper consistently. */
 export function rowToContextMonitor(row: ContextMonitor): ContextMonitor {
+  return row;
+}
+
+/** Identity — exists so all row types pass through a mapper consistently. */
+export function rowToWorkItem(row: WorkItem): WorkItem {
   return row;
 }
 
@@ -58,4 +83,4 @@ export function rowToCompactionLog(row: CompactionLogRow): CompactionLog {
   };
 }
 
-export type { CompactionLogRow, WorkingMemoryRow };
+export type { CompactionLogRow, KnowledgeMemoryAuditRow, KnowledgeMemoryRow, WorkingMemoryRow };

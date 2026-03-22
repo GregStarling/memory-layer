@@ -1,4 +1,4 @@
-import type { MemoryScope } from './identity.js';
+import type { MemoryScope, ScopeLevel } from './identity.js';
 
 export type EmbeddingVector = Float32Array;
 export type EmbeddingGenerator = (texts: string[]) => Promise<EmbeddingVector[]>;
@@ -13,6 +13,12 @@ export interface EmbeddingAdapter {
   getEmbedding(knowledgeMemoryId: number): EmbeddingVector | null;
   findSimilar(
     scope: MemoryScope,
+    queryVector: EmbeddingVector,
+    options?: { limit?: number; minSimilarity?: number },
+  ): SimilarEmbeddingResult[];
+  findSimilarCrossScope(
+    scope: MemoryScope,
+    level: ScopeLevel,
     queryVector: EmbeddingVector,
     options?: { limit?: number; minSimilarity?: number },
   ): SimilarEmbeddingResult[];

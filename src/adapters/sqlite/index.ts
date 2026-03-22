@@ -4,19 +4,24 @@ import path from 'path';
 import Database from 'better-sqlite3';
 
 import type { EmbeddingAdapter } from '../../contracts/embedding.js';
-import { scopeValues } from '../../contracts/identity.js';
+import { normalizeScope, scopeValues, type ScopeLevel } from '../../contracts/identity.js';
 import type { StorageAdapter } from '../../contracts/storage.js';
 import type {
   CompactionLog,
   ContextMonitor,
   KnowledgeMemory,
+  KnowledgeMemoryAudit,
   NewCompactionLog,
+  NewKnowledgeMemoryAudit,
   NewKnowledgeMemory,
+  NewWorkItem,
   NewTurn,
   NewWorkingMemory,
   SearchOptions,
   SearchResult,
+  TimeRange,
   Turn,
+  WorkItem,
   WorkingMemory,
 } from '../../contracts/types.js';
 import { estimateTokens } from '../../core/tokens.js';
@@ -26,7 +31,10 @@ import {
   nowSeconds,
   validateContextMonitorUpsert,
   validateNewCompactionLog,
+  validateNewKnowledgeMemoryAudit,
   validateNewKnowledgeMemory,
+  validateNewWorkItem,
+  validateTimeRange,
   validateNewTurn,
   validateNewWorkingMemory,
 } from '../../core/validation.js';
@@ -34,10 +42,14 @@ import {
   rowToCompactionLog,
   rowToContextMonitor,
   rowToKnowledgeMemory,
+  rowToKnowledgeMemoryAudit,
   rowToTurn,
+  rowToWorkItem,
   rowToWorkingMemory,
   serializeStringArray,
   type CompactionLogRow,
+  type KnowledgeMemoryAuditRow,
+  type KnowledgeMemoryRow,
   type WorkingMemoryRow,
 } from './mappers.js';
 import { createSQLiteEmbeddingAdapter } from './embeddings.js';
@@ -45,8 +57,43 @@ import { createSQLiteSchema } from './schema.js';
 
 const SCOPE_WHERE = 'tenant_id = ? AND system_id = ? AND workspace_id = ? AND scope_id = ?';
 
+function scopeWhereForLevel(level: ScopeLevel): string {
+  if (level === 'tenant') return 'tenant_id = ?';
+  if (level === 'system') return 'tenant_id = ? AND system_id = ?';
+  if (level === 'workspace') return 'tenant_id = ? AND system_id = ? AND workspace_id = ?';
+  return SCOPE_WHERE;
+}
+
+function scopeParamsForLevel(scope: Parameters<typeof normalizeScope>[0], level: ScopeLevel): string[] {
+  const normalized = normalizeScope(scope);
+  if (level === 'tenant') return [normalized.tenant_id];
+  if (level === 'system') return [normalized.tenant_id, normalized.system_id];
+  if (level === 'workspace') {
+    return [normalized.tenant_id, normalized.system_id, normalized.workspace_id];
+  }
+  return [...scopeValues(normalized)];
+}
+
+function timeRangeWhere(range: TimeRange, column = 'created_at'): { clause: string; params: number[] } {
+  validateTimeRange(range);
+  const clauses: string[] = [];
+  const params: number[] = [];
+  if (range.start_at !== undefined) {
+    clauses.push(`${column} >= ?`);
+    params.push(range.start_at);
+  }
+  if (range.end_at !== undefined) {
+    clauses.push(`${column} <= ?`);
+    params.push(range.end_at);
+  }
+  return {
+    clause: clauses.length > 0 ? ` AND ${clauses.join(' AND ')}` : '',
+    params,
+  };
+}
+
 type RankedTurnRow = Turn & { raw_rank: number | null };
-type RankedKnowledgeRow = KnowledgeMemory & { raw_rank: number | null };
+type RankedKnowledgeRow = KnowledgeMemoryRow & { raw_rank: number | null };
 
 function normalizeRank(rawRank: number | null): number {
   const safe = Number.isFinite(rawRank) ? Math.max(0, Number(rawRank)) : 0;
@@ -111,7 +158,7 @@ function createAdapterFromDatabase(
   function getKnowledgeMemoryById(id: number): KnowledgeMemory | null {
     const row = db
       .prepare('SELECT * FROM knowledge_memory WHERE id = ?')
-      .get(id) as KnowledgeMemory | undefined;
+      .get(id) as KnowledgeMemoryRow | undefined;
     return row ? rowToKnowledgeMemory(row) : null;
   }
 
@@ -127,6 +174,21 @@ function createAdapterFromDatabase(
       .prepare('SELECT * FROM compaction_log WHERE id = ?')
       .get(id) as CompactionLogRow | undefined;
     return row ? rowToCompactionLog(row) : null;
+  }
+
+  function getRecentKnowledgeMemoryAudits(
+    scope: Parameters<StorageAdapter['getRecentKnowledgeMemoryAudits']>[0],
+    limit = 10,
+  ): KnowledgeMemoryAudit[] {
+    const rows = db
+      .prepare(
+        `SELECT * FROM knowledge_memory_audit
+         WHERE ${SCOPE_WHERE}
+         ORDER BY id DESC
+         LIMIT ?`,
+      )
+      .all(...scopeValues(scope), limit) as KnowledgeMemoryAuditRow[];
+    return rows.map(rowToKnowledgeMemoryAudit);
   }
 
   return {
@@ -166,6 +228,18 @@ function createAdapterFromDatabase(
            ORDER BY id ASC`,
         )
         .all(...scopeValues(scope)) as Turn[];
+      return rows.map(rowToTurn);
+    },
+
+    getTurnsByTimeRange(scope, range): Turn[] {
+      const time = timeRangeWhere(range, 'created_at');
+      const rows = db
+        .prepare(
+          `SELECT * FROM turns
+           WHERE ${SCOPE_WHERE}${time.clause}
+           ORDER BY created_at ASC`,
+        )
+        .all(...scopeValues(scope), ...time.params) as Turn[];
       return rows.map(rowToTurn);
     },
 
@@ -215,14 +289,23 @@ function createAdapterFromDatabase(
       ).run(archivedAt, compactionLogId, id);
     },
 
-    getArchivedTurnRange(sessionId: string, startId: number, endId: number): Turn[] {
-      const rows = db
-        .prepare(
-          `SELECT * FROM turns
+    getArchivedTurnRange(sessionId: string, startId: number, endId: number, scope): Turn[] {
+      const query = scope
+        ? `SELECT * FROM turns
            WHERE session_id = ? AND id >= ? AND id <= ? AND archived_at IS NOT NULL
-           ORDER BY id ASC`,
-        )
-        .all(sessionId, startId, endId) as Turn[];
+             AND ${SCOPE_WHERE}
+           ORDER BY id ASC`
+        : `SELECT * FROM turns
+           WHERE session_id = ? AND id >= ? AND id <= ? AND archived_at IS NOT NULL
+           ORDER BY id ASC`;
+      const rows = db
+        .prepare(query)
+        .all(
+          sessionId,
+          startId,
+          endId,
+          ...(scope ? scopeValues(scope) : []),
+        ) as Turn[];
       return rows.map(rowToTurn);
     },
 
@@ -258,10 +341,15 @@ function createAdapterFromDatabase(
 
     getWorkingMemoryById,
 
-    getWorkingMemoryBySession(sessionId: string): WorkingMemory[] {
+    getWorkingMemoryBySession(sessionId: string, scope): WorkingMemory[] {
+      const query = scope
+        ? `SELECT * FROM working_memory
+           WHERE session_id = ? AND ${SCOPE_WHERE}
+           ORDER BY id ASC`
+        : 'SELECT * FROM working_memory WHERE session_id = ? ORDER BY id ASC';
       const rows = db
-        .prepare('SELECT * FROM working_memory WHERE session_id = ? ORDER BY id ASC')
-        .all(sessionId) as WorkingMemoryRow[];
+        .prepare(query)
+        .all(sessionId, ...(scope ? scopeValues(scope) : [])) as WorkingMemoryRow[];
       return rows.map(rowToWorkingMemory);
     },
 
@@ -292,6 +380,18 @@ function createAdapterFromDatabase(
       return row ? rowToWorkingMemory(row) : null;
     },
 
+    getWorkingMemoryByTimeRange(scope, range): WorkingMemory[] {
+      const time = timeRangeWhere(range, 'created_at');
+      const rows = db
+        .prepare(
+          `SELECT * FROM working_memory
+           WHERE ${SCOPE_WHERE}${time.clause}
+           ORDER BY created_at ASC`,
+        )
+        .all(...scopeValues(scope), ...time.params) as WorkingMemoryRow[];
+      return rows.map(rowToWorkingMemory);
+    },
+
     expireWorkingMemory(id: number): void {
       db.prepare('UPDATE working_memory SET expires_at = ? WHERE id = ?').run(nowSeconds(), id);
     },
@@ -308,9 +408,10 @@ function createAdapterFromDatabase(
       const result = db
         .prepare(
           `INSERT INTO knowledge_memory
-            (tenant_id, system_id, workspace_id, scope_id, fact, fact_type, source, confidence,
-             source_working_memory_id, created_at, last_accessed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            (tenant_id, system_id, workspace_id, scope_id, fact, fact_type, fact_subject,
+             fact_attribute, fact_value, normalized_fact, slot_key, is_negated, source, confidence,
+             source_working_memory_id, retired_at, created_at, last_accessed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           scope.tenant_id,
@@ -319,9 +420,16 @@ function createAdapterFromDatabase(
           scope.scope_id,
           input.fact,
           input.fact_type,
+          input.fact_subject ?? null,
+          input.fact_attribute ?? null,
+          input.fact_value ?? null,
+          input.normalized_fact ?? null,
+          input.slot_key ?? null,
+          input.is_negated ? 1 : 0,
           input.source,
           input.confidence,
           input.source_working_memory_id ?? null,
+          input.retired_at ?? null,
           createdAt,
           createdAt,
         );
@@ -334,10 +442,33 @@ function createAdapterFromDatabase(
       const rows = db
         .prepare(
           `SELECT * FROM knowledge_memory
-           WHERE ${SCOPE_WHERE} AND superseded_by_id IS NULL
+           WHERE ${SCOPE_WHERE} AND superseded_by_id IS NULL AND retired_at IS NULL
            ORDER BY last_accessed_at DESC`,
         )
-        .all(...scopeValues(scope)) as KnowledgeMemory[];
+        .all(...scopeValues(scope)) as KnowledgeMemoryRow[];
+      return rows.map(rowToKnowledgeMemory);
+    },
+
+    getActiveKnowledgeCrossScope(scope, level): KnowledgeMemory[] {
+      const rows = db
+        .prepare(
+          `SELECT * FROM knowledge_memory
+           WHERE ${scopeWhereForLevel(level)} AND superseded_by_id IS NULL AND retired_at IS NULL
+           ORDER BY last_accessed_at DESC`,
+        )
+        .all(...scopeParamsForLevel(scope, level)) as KnowledgeMemoryRow[];
+      return rows.map(rowToKnowledgeMemory);
+    },
+
+    getKnowledgeByTimeRange(scope, range): KnowledgeMemory[] {
+      const time = timeRangeWhere(range, 'created_at');
+      const rows = db
+        .prepare(
+          `SELECT * FROM knowledge_memory
+           WHERE ${SCOPE_WHERE}${time.clause}
+           ORDER BY created_at ASC`,
+        )
+        .all(...scopeValues(scope), ...time.params) as KnowledgeMemoryRow[];
       return rows.map(rowToKnowledgeMemory);
     },
 
@@ -352,7 +483,7 @@ function createAdapterFromDatabase(
              JOIN knowledge_memory ON knowledge_memory_fts.rowid = knowledge_memory.id
              WHERE knowledge_memory_fts MATCH ?
                AND ${SCOPE_WHERE}
-               AND (? = 0 OR knowledge_memory.superseded_by_id IS NULL)
+               AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))
              ORDER BY bm25(knowledge_memory_fts)
              LIMIT ?`,
           )
@@ -378,12 +509,166 @@ function createAdapterFromDatabase(
       }
     },
 
+    searchKnowledgeCrossScope(scope, level, query, options): SearchResult<KnowledgeMemory>[] {
+      const startedAt = Date.now();
+      const resolved = resolveSearchOptions(options);
+      try {
+        const rows = db
+          .prepare(
+            `SELECT knowledge_memory.*, bm25(knowledge_memory_fts) AS raw_rank
+             FROM knowledge_memory_fts
+             JOIN knowledge_memory ON knowledge_memory_fts.rowid = knowledge_memory.id
+             WHERE knowledge_memory_fts MATCH ?
+               AND ${scopeWhereForLevel(level)}
+               AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))
+             ORDER BY bm25(knowledge_memory_fts)
+             LIMIT ?`,
+          )
+          .all(
+            query,
+            ...scopeParamsForLevel(scope, level),
+            resolved.activeOnly ? 1 : 0,
+            resolved.limit,
+          ) as RankedKnowledgeRow[];
+        const results = rows.map((row) => ({
+          item: rowToKnowledgeMemory(row),
+          rank: normalizeRank(row.raw_rank),
+        }));
+        emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
+          entity: 'knowledge',
+          query,
+          resultCount: results.length,
+          scopeLevel: level,
+        });
+        return results;
+      } catch {
+        emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
+          entity: 'knowledge',
+          query,
+          resultCount: 0,
+          invalidQuery: true,
+          scopeLevel: level,
+        });
+        return [];
+      }
+    },
+
+    insertKnowledgeMemoryAudit(input: NewKnowledgeMemoryAudit): KnowledgeMemoryAudit {
+      const scope = validateNewKnowledgeMemoryAudit(input);
+      const createdAt = input.created_at ?? nowSeconds();
+      const result = db
+        .prepare(
+          `INSERT INTO knowledge_memory_audit
+            (tenant_id, system_id, workspace_id, scope_id, working_memory_id, fact, fact_type,
+             fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated,
+             confidence, source_text, decision, created_knowledge_id, related_knowledge_id, detail, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          scope.tenant_id,
+          scope.system_id,
+          scope.workspace_id,
+          scope.scope_id,
+          input.working_memory_id ?? null,
+          input.fact,
+          input.fact_type,
+          input.fact_subject ?? null,
+          input.fact_attribute ?? null,
+          input.fact_value ?? null,
+          input.normalized_fact ?? null,
+          input.slot_key ?? null,
+          input.is_negated ? 1 : 0,
+          input.confidence,
+          input.source_text ?? null,
+          input.decision,
+          input.created_knowledge_id ?? null,
+          input.related_knowledge_id ?? null,
+          input.detail ?? null,
+          createdAt,
+        );
+      const row = db
+        .prepare('SELECT * FROM knowledge_memory_audit WHERE id = ?')
+        .get(Number(result.lastInsertRowid)) as KnowledgeMemoryAuditRow;
+      return rowToKnowledgeMemoryAudit(row);
+    },
+
+    getRecentKnowledgeMemoryAudits,
+
+    insertWorkItem(input: NewWorkItem): WorkItem {
+      const scope = validateNewWorkItem(input);
+      const createdAt = input.created_at ?? nowSeconds();
+      const result = db
+        .prepare(
+          `INSERT INTO work_items
+            (session_id, tenant_id, system_id, workspace_id, scope_id, kind, title, detail, status,
+             source_working_memory_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.session_id ?? null,
+          scope.tenant_id,
+          scope.system_id,
+          scope.workspace_id,
+          scope.scope_id,
+          input.kind,
+          input.title,
+          input.detail ?? null,
+          input.status ?? 'open',
+          input.source_working_memory_id ?? null,
+          createdAt,
+          createdAt,
+        );
+      const row = db
+        .prepare('SELECT * FROM work_items WHERE id = ?')
+        .get(Number(result.lastInsertRowid)) as WorkItem;
+      return rowToWorkItem(row);
+    },
+
+    getActiveWorkItems(scope): WorkItem[] {
+      const rows = db
+        .prepare(
+          `SELECT * FROM work_items
+           WHERE ${SCOPE_WHERE} AND status != 'done'
+           ORDER BY updated_at DESC`,
+        )
+        .all(...scopeValues(scope)) as WorkItem[];
+      return rows.map(rowToWorkItem);
+    },
+
+    getWorkItemsByTimeRange(scope, range): WorkItem[] {
+      const time = timeRangeWhere(range, 'created_at');
+      const rows = db
+        .prepare(
+          `SELECT * FROM work_items
+           WHERE ${SCOPE_WHERE}${time.clause}
+           ORDER BY created_at ASC`,
+        )
+        .all(...scopeValues(scope), ...time.params) as WorkItem[];
+      return rows.map(rowToWorkItem);
+    },
+
+    updateWorkItemStatus(id, status): void {
+      db.prepare('UPDATE work_items SET status = ?, updated_at = ? WHERE id = ?').run(
+        status,
+        nowSeconds(),
+        id,
+      );
+    },
+
+    deleteWorkItem(id): void {
+      db.prepare('DELETE FROM work_items WHERE id = ?').run(id);
+    },
+
     touchKnowledgeMemory(id: number): void {
       db.prepare(
         `UPDATE knowledge_memory
          SET last_accessed_at = ?, access_count = access_count + 1
          WHERE id = ?`,
       ).run(nowSeconds(), id);
+    },
+
+    retireKnowledgeMemory(id: number, retiredAt = nowSeconds()): void {
+      db.prepare('UPDATE knowledge_memory SET retired_at = ? WHERE id = ?').run(retiredAt, id);
     },
 
     supersedeKnowledgeMemory(oldId: number, newId: number): void {

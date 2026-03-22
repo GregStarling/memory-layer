@@ -1,20 +1,22 @@
 import type { Summarizer } from '../core/orchestrator.js';
-import {
-  formatTurnsForSummarization,
-  parseSummarizerResponse,
-  SUMMARIZATION_SYSTEM_PROMPT,
-} from './prompts.js';
+import { createClientSummarizer, type StructuredGenerationClient } from './client.js';
 
 export interface OpenAISummarizerOptions {
   apiKey?: string;
   model?: string;
   maxTokens?: number;
+  prompt?: string;
+  client?: StructuredGenerationClient;
 }
 
 export function createOpenAISummarizer(
   options: OpenAISummarizerOptions = {},
 ): Summarizer {
-  return async (turns) => {
+  if (options.client) {
+    return createClientSummarizer(options.client, options);
+  }
+
+  return async (...args) => {
     const moduleName = 'openai';
     let sdkModule: any;
     try {
@@ -27,24 +29,29 @@ export function createOpenAISummarizer(
     const client = new OpenAI({
       apiKey: options.apiKey ?? process.env.OPENAI_API_KEY,
     });
+    return createClientSummarizer(
+      {
+        async generate(request) {
+          const response = await client.chat.completions.create({
+            model: request.model ?? 'gpt-4.1-mini',
+            max_tokens: request.maxTokens ?? 1024,
+            messages: [
+              {
+                role: 'system',
+                content: request.systemPrompt,
+              },
+              {
+                role: 'user',
+                content: request.userPrompt,
+              },
+            ],
+            response_format: { type: 'json_object' },
+          });
 
-    const response = await client.chat.completions.create({
-      model: options.model ?? 'gpt-4.1-mini',
-      max_tokens: options.maxTokens ?? 1024,
-      messages: [
-        {
-          role: 'system',
-          content: SUMMARIZATION_SYSTEM_PROMPT,
+          return response.choices?.[0]?.message?.content ?? '';
         },
-        {
-          role: 'user',
-          content: formatTurnsForSummarization(turns),
-        },
-      ],
-      response_format: { type: 'json_object' },
-    });
-
-    const text = response.choices?.[0]?.message?.content ?? '';
-    return parseSummarizerResponse(text);
+      },
+      options,
+    )(...args);
   };
 }

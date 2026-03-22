@@ -1,8 +1,6 @@
 import {
-  createMemoryManager,
-  createRegexExtractor,
-  createSQLiteAdapter,
-  createSessionId,
+  createClaudeMemoryManager,
+  createMemoryRuntime,
 } from 'memory-layer';
 
 async function main(): Promise<void> {
@@ -13,23 +11,19 @@ async function main(): Promise<void> {
     scope_id: 'conversation-123',
   };
 
-  const manager = createMemoryManager({
-    adapter: createSQLiteAdapter('./data/chat-assistant.db'),
+  const manager = createClaudeMemoryManager({
+    dbPath: './data/chat-assistant.db',
     scope,
-    sessionId: createSessionId(scope),
-    summarizer: async (turns) => ({
-      summary: `Conversation summary across ${turns.length} turns`,
-      key_entities: ['customer', 'support'],
-      topic_tags: ['support'],
-    }),
-    extractor: createRegexExtractor(),
+    preset: 'chat_agent',
   });
+  const runtime = createMemoryRuntime(manager);
 
-  await manager.processTurn('user', 'I prefer short answers and local-first tools.');
-  await manager.processTurn('assistant', 'Understood. I will keep replies concise.');
-
-  const context = manager.getContext('local-first short answers');
-  console.log(context);
+  const prepared = await runtime.beforeModelCall('I prefer short answers and local-first tools.');
+  console.log(prepared.prompt);
+  await runtime.afterModelCall({
+    userInput: 'I prefer short answers and local-first tools.',
+    assistantOutput: 'Understood. I will keep replies concise.',
+  });
 
   manager.close();
 }

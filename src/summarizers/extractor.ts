@@ -1,23 +1,20 @@
 import type { Extractor } from '../core/extractor.js';
-import {
-  EXTRACTION_SYSTEM_PROMPT,
-  parseExtractionResponse,
-} from './prompts.js';
+import { createClientExtractor, type StructuredGenerationClient } from './client.js';
 
-function formatExtractionInput(
-  summary: string,
-  keyEntities: string[],
-  topicTags: string[],
-): string {
-  return [
-    `Summary: ${summary}`,
-    `Key entities: ${keyEntities.join(', ') || 'none'}`,
-    `Topic tags: ${topicTags.join(', ') || 'none'}`,
-  ].join('\n');
+export interface ProviderExtractorOptions {
+  apiKey?: string;
+  model?: string;
+  maxTokens?: number;
+  prompt?: string;
+  client?: StructuredGenerationClient;
 }
 
-export function createClaudeExtractor(): Extractor {
-  return async (summary, keyEntities, topicTags) => {
+export function createClaudeExtractor(options: ProviderExtractorOptions = {}): Extractor {
+  if (options.client) {
+    return createClientExtractor(options.client, options);
+  }
+
+  return async (...args) => {
     const moduleName = '@anthropic-ai/sdk';
     let sdkModule: any;
     try {
@@ -30,31 +27,39 @@ export function createClaudeExtractor(): Extractor {
 
     const Anthropic = sdkModule.default ?? sdkModule.Anthropic ?? sdkModule;
     const client = new Anthropic({
-      apiKey: process.env.ANTHROPIC_API_KEY,
+      apiKey: options.apiKey ?? process.env.ANTHROPIC_API_KEY,
     });
+    return createClientExtractor(
+      {
+        async generate(request) {
+          const response = await client.messages.create({
+            model: request.model ?? 'claude-sonnet-4-20250514',
+            max_tokens: request.maxTokens ?? 1024,
+            system: request.systemPrompt,
+            messages: [
+              {
+                role: 'user',
+                content: request.userPrompt,
+              },
+            ],
+          });
 
-    const response = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 1024,
-      system: EXTRACTION_SYSTEM_PROMPT,
-      messages: [
-        {
-          role: 'user',
-          content: formatExtractionInput(summary, keyEntities, topicTags),
+          return Array.isArray(response.content)
+            ? response.content.map((part: any) => part.text ?? '').join('\n')
+            : String(response.content ?? '');
         },
-      ],
-    });
-
-    const text = Array.isArray(response.content)
-      ? response.content.map((part: any) => part.text ?? '').join('\n')
-      : String(response.content ?? '');
-
-    return parseExtractionResponse(text);
+      },
+      options,
+    )(...args);
   };
 }
 
-export function createOpenAIExtractor(): Extractor {
-  return async (summary, keyEntities, topicTags) => {
+export function createOpenAIExtractor(options: ProviderExtractorOptions = {}): Extractor {
+  if (options.client) {
+    return createClientExtractor(options.client, options);
+  }
+
+  return async (...args) => {
     const moduleName = 'openai';
     let sdkModule: any;
     try {
@@ -65,23 +70,28 @@ export function createOpenAIExtractor(): Extractor {
 
     const OpenAI = sdkModule.default ?? sdkModule.OpenAI ?? sdkModule;
     const client = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
+      apiKey: options.apiKey ?? process.env.OPENAI_API_KEY,
     });
+    return createClientExtractor(
+      {
+        async generate(request) {
+          const response = await client.chat.completions.create({
+            model: request.model ?? 'gpt-4.1-mini',
+            max_tokens: request.maxTokens ?? 1024,
+            messages: [
+              { role: 'system', content: request.systemPrompt },
+              {
+                role: 'user',
+                content: request.userPrompt,
+              },
+            ],
+            response_format: { type: 'json_object' },
+          });
 
-    const response = await client.chat.completions.create({
-      model: 'gpt-4.1-mini',
-      max_tokens: 1024,
-      messages: [
-        { role: 'system', content: EXTRACTION_SYSTEM_PROMPT },
-        {
-          role: 'user',
-          content: formatExtractionInput(summary, keyEntities, topicTags),
+          return response.choices?.[0]?.message?.content ?? '[]';
         },
-      ],
-      response_format: { type: 'json_object' },
-    });
-
-    const text = response.choices?.[0]?.message?.content ?? '[]';
-    return parseExtractionResponse(text);
+      },
+      options,
+    )(...args);
   };
 }
