@@ -28,6 +28,7 @@ const context = await buildMemoryContext(asyncAdapter, scope, {
 });
 
 const passed = context.relevantKnowledge[0]?.fact.includes('sqlite') ?? false;
+const shouldEnforce = process.argv.includes('--enforce');
 
 console.log(
   JSON.stringify(
@@ -42,3 +43,7 @@ console.log(
 );
 
 adapter.close();
+
+if (shouldEnforce && !passed) {
+  process.exit(1);
+}

@@ -1095,6 +1095,58 @@ describe('SQLite storage adapter', () => {
     });
   });
 
+  describe('getKnowledgeMemoryAuditsForKnowledge', () => {
+    it('filters audits to a specific knowledge record', () => {
+      const memoryScope = scope();
+      const first = adapter.insertKnowledgeMemory({
+        ...memoryScope,
+        fact: 'Primary deployment runbook',
+        fact_type: 'reference',
+        knowledge_class: 'project_fact',
+        source: 'manual',
+        confidence: 'high',
+      });
+      const second = adapter.insertKnowledgeMemory({
+        ...memoryScope,
+        fact: 'Secondary rollback note',
+        fact_type: 'reference',
+        knowledge_class: 'project_fact',
+        source: 'manual',
+        confidence: 'high',
+      });
+
+      adapter.insertKnowledgeMemoryAudit({
+        ...memoryScope,
+        fact: first.fact,
+        fact_type: first.fact_type,
+        confidence: 'high',
+        decision: 'created',
+        created_knowledge_id: first.id,
+      });
+      adapter.insertKnowledgeMemoryAudit({
+        ...memoryScope,
+        fact: second.fact,
+        fact_type: second.fact_type,
+        confidence: 'high',
+        decision: 'created',
+        created_knowledge_id: second.id,
+      });
+      const latest = adapter.insertKnowledgeMemoryAudit({
+        ...memoryScope,
+        fact: first.fact,
+        fact_type: first.fact_type,
+        confidence: 'high',
+        decision: 'updated',
+        related_knowledge_id: first.id,
+      });
+
+      const audits = adapter.getKnowledgeMemoryAuditsForKnowledge(memoryScope, first.id, 10);
+      expect(audits).toHaveLength(2);
+      expect(audits[0].id).toBe(latest.id);
+      expect(audits.every((audit) => audit.created_knowledge_id === first.id || audit.related_knowledge_id === first.id)).toBe(true);
+    });
+  });
+
   // ---------------------------------------------------------------------------
   // Adapter isolation
   // ---------------------------------------------------------------------------

@@ -30,7 +30,7 @@ Without a provider SDK, `memory-layer` uses a zero-dependency extractive summari
 
 ## Quick Start
 
-### Zero-config (in-memory, extractive summarization)
+### Local Bootstrap (zero-config)
 
 ```typescript
 import { createMemory } from 'memory-layer';
@@ -43,6 +43,8 @@ await memory.processExchange(
 const context = await memory.getContext('local-first');
 ```
 
+This path is intentionally low-friction and now defaults to the safer `balanced_memory` posture for local adoption.
+
 ### Persistent SQLite
 
 ```typescript
@@ -52,6 +54,28 @@ const memory = createMemory({
   scope: 'my-agent',
 });
 ```
+
+### Recommended Gold Path (provider-backed)
+
+If provider credentials are available, prefer the provider-backed path for the strongest extraction and retrieval quality:
+
+```typescript
+import { createMemory, createMemoryRuntime } from 'memory-layer';
+
+const manager = createMemory({
+  adapter: 'sqlite',
+  path: './data/memory.db',
+  preset: 'ai_ide',
+  qualityMode: 'high_fidelity_memory',
+  summarizer: 'openai',
+  extractor: 'openai',
+});
+
+const runtime = createMemoryRuntime(manager);
+const prepared = await runtime.beforeModelCall('Refactor the search layer.');
+```
+
+When `OPENAI_API_KEY` or `VOYAGE_API_KEY` is present, `createMemory()` will automatically upgrade its embedding path for stronger semantic retrieval.
 
 ### Claude-backed
 

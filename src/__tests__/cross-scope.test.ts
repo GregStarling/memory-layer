@@ -67,4 +67,32 @@ describe('cross-scope learning', () => {
     expect(results.knowledge.map((item) => item.item.id)).toContain(knowledge.id);
     await manager.close();
   });
+
+  it('shares workspace memory across agent identities when collaboration matches', async () => {
+    const scopeA = makeScope({
+      system_id: 'planner-agent',
+      collaboration_id: 'factory-1',
+      scope_id: 'task-1',
+    });
+    const scopeB = makeScope({
+      system_id: 'executor-agent',
+      collaboration_id: 'factory-1',
+      scope_id: 'task-2',
+    });
+    const knowledge = adapter.insertKnowledgeMemory({
+      ...scopeA,
+      fact: 'Shared collaboration memory',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+
+    const asyncAdapter = wrapSyncAdapter(adapter);
+    const context = await buildMemoryContext(asyncAdapter, scopeB, {
+      crossScopeLevel: 'workspace',
+      relevanceQuery: 'shared collaboration',
+    });
+
+    expect(context.relevantKnowledge.map((item) => item.id)).toContain(knowledge.id);
+  });
 });

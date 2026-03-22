@@ -42,23 +42,26 @@ interface PgPool {
 
 function scopeParams(scope: MemoryScope): unknown[] {
   const n = normalizeScope(scope);
-  return [n.tenant_id, n.system_id, n.workspace_id, n.scope_id];
+  return [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id];
 }
 
 function scopeWhere(prefix = ''): string {
   const p = prefix ? `${prefix}.` : '';
-  return `${p}tenant_id = $1 AND ${p}system_id = $2 AND ${p}workspace_id = $3 AND ${p}scope_id = $4`;
+  return `${p}tenant_id = $1 AND ${p}system_id = $2 AND ${p}workspace_id = $3 AND ${p}collaboration_id = $4 AND ${p}scope_id = $5`;
 }
 
-function wideScopeWhere(level: ScopeLevel, prefix = ''): string {
+function wideScopeWhere(scope: MemoryScope, level: ScopeLevel, prefix = ''): string {
   const p = prefix ? `${prefix}.` : '';
+  const normalized = normalizeScope(scope);
   switch (level) {
     case 'tenant':
       return `${p}tenant_id = $1`;
     case 'system':
       return `${p}tenant_id = $1 AND ${p}system_id = $2`;
     case 'workspace':
-      return `${p}tenant_id = $1 AND ${p}system_id = $2 AND ${p}workspace_id = $3`;
+      return normalized.collaboration_id.length > 0
+        ? `${p}tenant_id = $1 AND ${p}collaboration_id = $2`
+        : `${p}tenant_id = $1 AND ${p}system_id = $2 AND ${p}workspace_id = $3`;
     default:
       return scopeWhere(prefix);
   }
@@ -72,7 +75,7 @@ function wideScopeParams(scope: MemoryScope, level: ScopeLevel): unknown[] {
     case 'system':
       return [n.tenant_id, n.system_id];
     case 'workspace':
-      return [n.tenant_id, n.system_id, n.workspace_id];
+      return [n.tenant_id, n.collaboration_id];
     default:
       return scopeParams(scope);
   }
@@ -96,6 +99,7 @@ function mapTurn(row: Record<string, unknown>): Turn {
     tenant_id: String(row.tenant_id),
     system_id: String(row.system_id),
     workspace_id: String(row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? row.workspace_id ?? ''),
     scope_id: String(row.scope_id),
     session_id: String(row.session_id),
     actor: String(row.actor),
@@ -116,6 +120,7 @@ function mapWorkingMemory(row: Record<string, unknown>): WorkingMemory {
     tenant_id: String(row.tenant_id),
     system_id: String(row.system_id),
     workspace_id: String(row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? row.workspace_id ?? ''),
     scope_id: String(row.scope_id),
     session_id: String(row.session_id),
     summary: String(row.summary),
@@ -138,6 +143,7 @@ function mapKnowledgeMemory(row: Record<string, unknown>): KnowledgeMemory {
     tenant_id: String(row.tenant_id),
     system_id: String(row.system_id),
     workspace_id: String(row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? row.workspace_id ?? ''),
     scope_id: String(row.scope_id),
     fact: String(row.fact),
     fact_type: row.fact_type as KnowledgeMemory['fact_type'],
@@ -163,6 +169,10 @@ function mapKnowledgeMemory(row: Record<string, unknown>): KnowledgeMemory {
       row.next_reverification_at != null ? Number(row.next_reverification_at) : null,
     last_confirmed_at: row.last_confirmed_at != null ? Number(row.last_confirmed_at) : null,
     confirmation_count: Number(row.confirmation_count ?? 0),
+    source_system_id: row.source_system_id != null ? String(row.source_system_id) : null,
+    source_scope_id: row.source_scope_id != null ? String(row.source_scope_id) : null,
+    source_collaboration_id:
+      row.source_collaboration_id != null ? String(row.source_collaboration_id) : null,
     source_working_memory_id: row.source_working_memory_id != null ? Number(row.source_working_memory_id) : null,
     source_turn_ids: Array.isArray(row.source_turn_ids)
       ? row.source_turn_ids.map((value) => Number(value))
@@ -188,6 +198,7 @@ function mapWorkItem(row: Record<string, unknown>): WorkItem {
     tenant_id: String(row.tenant_id),
     system_id: String(row.system_id),
     workspace_id: String(row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? row.workspace_id ?? ''),
     scope_id: String(row.scope_id),
     session_id: row.session_id != null ? String(row.session_id) : null,
     title: String(row.title),
@@ -206,6 +217,7 @@ function mapContextMonitor(row: Record<string, unknown>): ContextMonitor {
     tenant_id: String(row.tenant_id),
     system_id: String(row.system_id),
     workspace_id: String(row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? row.workspace_id ?? ''),
     scope_id: String(row.scope_id),
     compaction_state: row.compaction_state as ContextMonitor['compaction_state'],
     active_turn_count: Number(row.active_turn_count),
@@ -222,6 +234,7 @@ function mapCompactionLog(row: Record<string, unknown>): CompactionLog {
     tenant_id: String(row.tenant_id),
     system_id: String(row.system_id),
     workspace_id: String(row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? row.workspace_id ?? ''),
     scope_id: String(row.scope_id),
     session_id: String(row.session_id),
     trigger_type: row.trigger_type as CompactionLog['trigger_type'],
@@ -244,6 +257,7 @@ function mapKnowledgeMemoryAudit(row: Record<string, unknown>): KnowledgeMemoryA
     tenant_id: String(row.tenant_id),
     system_id: String(row.system_id),
     workspace_id: String(row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? row.workspace_id ?? ''),
     scope_id: String(row.scope_id),
     working_memory_id: Number(row.working_memory_id),
     fact: String(row.fact),
@@ -263,6 +277,61 @@ function mapKnowledgeMemoryAudit(row: Record<string, unknown>): KnowledgeMemoryA
     detail: row.detail != null ? String(row.detail) : null,
     related_knowledge_id: row.related_knowledge_id != null ? Number(row.related_knowledge_id) : null,
     created_knowledge_id: row.created_knowledge_id != null ? Number(row.created_knowledge_id) : null,
+    created_at: Number(row.created_at),
+  };
+}
+
+function mapKnowledgeCandidate(row: Record<string, unknown>): KnowledgeCandidate {
+  return {
+    id: Number(row.id),
+    tenant_id: String(row.tenant_id),
+    system_id: String(row.system_id),
+    workspace_id: String(row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? row.workspace_id ?? ''),
+    scope_id: String(row.scope_id),
+    working_memory_id: Number(row.working_memory_id),
+    fact: String(row.fact),
+    fact_type: row.fact_type as KnowledgeCandidate['fact_type'],
+    knowledge_class: row.knowledge_class as KnowledgeCandidate['knowledge_class'],
+    normalized_fact: String(row.normalized_fact),
+    slot_key: row.slot_key != null ? String(row.slot_key) : null,
+    confidence: row.confidence as KnowledgeCandidate['confidence'],
+    source_summary: Boolean(row.source_summary),
+    source_turns: Boolean(row.source_turns),
+    grounding_strength: row.grounding_strength as KnowledgeCandidate['grounding_strength'],
+    evidence_count: Number(row.evidence_count ?? 0),
+    trust_score: Number(row.trust_score ?? 0),
+    state: row.state as KnowledgeCandidate['state'],
+    created_at: Number(row.created_at),
+    promoted_knowledge_id:
+      row.promoted_knowledge_id != null ? Number(row.promoted_knowledge_id) : null,
+  };
+}
+
+function mapKnowledgeEvidenceRow(row: Record<string, unknown>): KnowledgeEvidence {
+  return {
+    id: Number(row.id),
+    tenant_id: String(row.tenant_id),
+    system_id: String(row.system_id),
+    workspace_id: String(row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? row.workspace_id ?? ''),
+    scope_id: String(row.scope_id),
+    knowledge_memory_id: row.knowledge_memory_id != null ? Number(row.knowledge_memory_id) : null,
+    knowledge_candidate_id:
+      row.knowledge_candidate_id != null ? Number(row.knowledge_candidate_id) : null,
+    working_memory_id: row.working_memory_id != null ? Number(row.working_memory_id) : null,
+    turn_id: row.turn_id != null ? Number(row.turn_id) : null,
+    source_type: row.source_type as KnowledgeEvidence['source_type'],
+    support_polarity: row.support_polarity as KnowledgeEvidence['support_polarity'],
+    speaker_role:
+      row.speaker_role != null ? (row.speaker_role as KnowledgeEvidence['speaker_role']) : null,
+    actor: row.actor != null ? String(row.actor) : null,
+    excerpt: String(row.excerpt),
+    start_offset: row.start_offset != null ? Number(row.start_offset) : null,
+    end_offset: row.end_offset != null ? Number(row.end_offset) : null,
+    is_explicit: Boolean(row.is_explicit),
+    explicitness_score: Number(row.explicitness_score ?? 0),
+    outcome: row.outcome != null ? (row.outcome as KnowledgeEvidence['outcome']) : null,
     created_at: Number(row.created_at),
   };
 }
@@ -543,29 +612,7 @@ export function createPostgresAdapter(
           input.created_at ?? now(),
         ],
       );
-      return {
-        ...rows[0],
-        id: Number(rows[0].id),
-        tenant_id: String(rows[0].tenant_id),
-        system_id: String(rows[0].system_id),
-        workspace_id: String(rows[0].workspace_id ?? ''),
-        scope_id: String(rows[0].scope_id),
-        working_memory_id: Number(rows[0].working_memory_id),
-        fact: String(rows[0].fact),
-        fact_type: rows[0].fact_type as KnowledgeCandidate['fact_type'],
-        knowledge_class: rows[0].knowledge_class as KnowledgeCandidate['knowledge_class'],
-        normalized_fact: String(rows[0].normalized_fact),
-        slot_key: rows[0].slot_key != null ? String(rows[0].slot_key) : null,
-        confidence: rows[0].confidence as KnowledgeCandidate['confidence'],
-        source_summary: Boolean(rows[0].source_summary),
-        source_turns: Boolean(rows[0].source_turns),
-        grounding_strength: rows[0].grounding_strength as KnowledgeCandidate['grounding_strength'],
-        evidence_count: Number(rows[0].evidence_count ?? 0),
-        trust_score: Number(rows[0].trust_score ?? 0),
-        state: rows[0].state as KnowledgeCandidate['state'],
-        created_at: Number(rows[0].created_at),
-        promoted_knowledge_id: rows[0].promoted_knowledge_id != null ? Number(rows[0].promoted_knowledge_id) : null,
-      };
+      return mapKnowledgeCandidate(rows[0]);
     },
 
     async insertKnowledgeCandidates(inputs): Promise<KnowledgeCandidate[]> {
@@ -581,29 +628,7 @@ export function createPostgresAdapter(
     async getKnowledgeCandidateById(id): Promise<KnowledgeCandidate | null> {
       const { rows } = await pool.query('SELECT * FROM knowledge_candidate WHERE id = $1', [id]);
       if (!rows[0]) return null;
-      return {
-        ...rows[0],
-        id: Number(rows[0].id),
-        tenant_id: String(rows[0].tenant_id),
-        system_id: String(rows[0].system_id),
-        workspace_id: String(rows[0].workspace_id ?? ''),
-        scope_id: String(rows[0].scope_id),
-        working_memory_id: Number(rows[0].working_memory_id),
-        fact: String(rows[0].fact),
-        fact_type: rows[0].fact_type as KnowledgeCandidate['fact_type'],
-        knowledge_class: rows[0].knowledge_class as KnowledgeCandidate['knowledge_class'],
-        normalized_fact: String(rows[0].normalized_fact),
-        slot_key: rows[0].slot_key != null ? String(rows[0].slot_key) : null,
-        confidence: rows[0].confidence as KnowledgeCandidate['confidence'],
-        source_summary: Boolean(rows[0].source_summary),
-        source_turns: Boolean(rows[0].source_turns),
-        grounding_strength: rows[0].grounding_strength as KnowledgeCandidate['grounding_strength'],
-        evidence_count: Number(rows[0].evidence_count ?? 0),
-        trust_score: Number(rows[0].trust_score ?? 0),
-        state: rows[0].state as KnowledgeCandidate['state'],
-        created_at: Number(rows[0].created_at),
-        promoted_knowledge_id: rows[0].promoted_knowledge_id != null ? Number(rows[0].promoted_knowledge_id) : null,
-      };
+      return mapKnowledgeCandidate(rows[0]);
     },
 
     async listKnowledgeCandidates(scope, options): Promise<KnowledgeCandidate[]> {
@@ -612,28 +637,7 @@ export function createPostgresAdapter(
         scopeParams(scope),
       );
       return rows
-        .map((row) => ({
-          id: Number(row.id),
-          tenant_id: String(row.tenant_id),
-          system_id: String(row.system_id),
-          workspace_id: String(row.workspace_id ?? ''),
-          scope_id: String(row.scope_id),
-          working_memory_id: Number(row.working_memory_id),
-          fact: String(row.fact),
-          fact_type: row.fact_type as KnowledgeCandidate['fact_type'],
-          knowledge_class: row.knowledge_class as KnowledgeCandidate['knowledge_class'],
-          normalized_fact: String(row.normalized_fact),
-          slot_key: row.slot_key != null ? String(row.slot_key) : null,
-          confidence: row.confidence as KnowledgeCandidate['confidence'],
-          source_summary: Boolean(row.source_summary),
-          source_turns: Boolean(row.source_turns),
-          grounding_strength: row.grounding_strength as KnowledgeCandidate['grounding_strength'],
-          evidence_count: Number(row.evidence_count ?? 0),
-          trust_score: Number(row.trust_score ?? 0),
-          state: row.state as KnowledgeCandidate['state'],
-          created_at: Number(row.created_at),
-          promoted_knowledge_id: row.promoted_knowledge_id != null ? Number(row.promoted_knowledge_id) : null,
-        }))
+        .map(mapKnowledgeCandidate)
         .filter((item) => !options?.state || options.state.includes(item.state));
     },
 
@@ -655,29 +659,7 @@ export function createPostgresAdapter(
           input.outcome ?? null, input.created_at ?? now(),
         ],
       );
-      const row = rows[0];
-      return {
-        id: Number(row.id),
-        tenant_id: String(row.tenant_id),
-        system_id: String(row.system_id),
-        workspace_id: String(row.workspace_id ?? ''),
-        scope_id: String(row.scope_id),
-        knowledge_memory_id: row.knowledge_memory_id != null ? Number(row.knowledge_memory_id) : null,
-        knowledge_candidate_id: row.knowledge_candidate_id != null ? Number(row.knowledge_candidate_id) : null,
-        working_memory_id: row.working_memory_id != null ? Number(row.working_memory_id) : null,
-        turn_id: row.turn_id != null ? Number(row.turn_id) : null,
-        source_type: row.source_type as KnowledgeEvidence['source_type'],
-        support_polarity: row.support_polarity as KnowledgeEvidence['support_polarity'],
-        speaker_role: row.speaker_role != null ? (row.speaker_role as KnowledgeEvidence['speaker_role']) : null,
-        actor: row.actor != null ? String(row.actor) : null,
-        excerpt: String(row.excerpt),
-        start_offset: row.start_offset != null ? Number(row.start_offset) : null,
-        end_offset: row.end_offset != null ? Number(row.end_offset) : null,
-        is_explicit: Boolean(row.is_explicit),
-        explicitness_score: Number(row.explicitness_score ?? 0),
-        outcome: row.outcome != null ? (row.outcome as KnowledgeEvidence['outcome']) : null,
-        created_at: Number(row.created_at),
-      };
+      return mapKnowledgeEvidenceRow(rows[0]);
     },
 
     async insertKnowledgeEvidenceBatch(inputs): Promise<KnowledgeEvidence[]> {
@@ -695,28 +677,7 @@ export function createPostgresAdapter(
         'SELECT * FROM knowledge_evidence WHERE knowledge_memory_id = $1 ORDER BY created_at DESC, id DESC',
         [knowledgeId],
       );
-      return rows.map((row) => ({
-        id: Number(row.id),
-        tenant_id: String(row.tenant_id),
-        system_id: String(row.system_id),
-        workspace_id: String(row.workspace_id ?? ''),
-        scope_id: String(row.scope_id),
-        knowledge_memory_id: row.knowledge_memory_id != null ? Number(row.knowledge_memory_id) : null,
-        knowledge_candidate_id: row.knowledge_candidate_id != null ? Number(row.knowledge_candidate_id) : null,
-        working_memory_id: row.working_memory_id != null ? Number(row.working_memory_id) : null,
-        turn_id: row.turn_id != null ? Number(row.turn_id) : null,
-        source_type: row.source_type as KnowledgeEvidence['source_type'],
-        support_polarity: row.support_polarity as KnowledgeEvidence['support_polarity'],
-        speaker_role: row.speaker_role != null ? (row.speaker_role as KnowledgeEvidence['speaker_role']) : null,
-        actor: row.actor != null ? String(row.actor) : null,
-        excerpt: String(row.excerpt),
-        start_offset: row.start_offset != null ? Number(row.start_offset) : null,
-        end_offset: row.end_offset != null ? Number(row.end_offset) : null,
-        is_explicit: Boolean(row.is_explicit),
-        explicitness_score: Number(row.explicitness_score ?? 0),
-        outcome: row.outcome != null ? (row.outcome as KnowledgeEvidence['outcome']) : null,
-        created_at: Number(row.created_at),
-      }));
+      return rows.map(mapKnowledgeEvidenceRow);
     },
 
     async listKnowledgeEvidenceForCandidate(candidateId): Promise<KnowledgeEvidence[]> {
@@ -724,28 +685,7 @@ export function createPostgresAdapter(
         'SELECT * FROM knowledge_evidence WHERE knowledge_candidate_id = $1 ORDER BY created_at DESC, id DESC',
         [candidateId],
       );
-      return rows.map((row) => ({
-        id: Number(row.id),
-        tenant_id: String(row.tenant_id),
-        system_id: String(row.system_id),
-        workspace_id: String(row.workspace_id ?? ''),
-        scope_id: String(row.scope_id),
-        knowledge_memory_id: row.knowledge_memory_id != null ? Number(row.knowledge_memory_id) : null,
-        knowledge_candidate_id: row.knowledge_candidate_id != null ? Number(row.knowledge_candidate_id) : null,
-        working_memory_id: row.working_memory_id != null ? Number(row.working_memory_id) : null,
-        turn_id: row.turn_id != null ? Number(row.turn_id) : null,
-        source_type: row.source_type as KnowledgeEvidence['source_type'],
-        support_polarity: row.support_polarity as KnowledgeEvidence['support_polarity'],
-        speaker_role: row.speaker_role != null ? (row.speaker_role as KnowledgeEvidence['speaker_role']) : null,
-        actor: row.actor != null ? String(row.actor) : null,
-        excerpt: String(row.excerpt),
-        start_offset: row.start_offset != null ? Number(row.start_offset) : null,
-        end_offset: row.end_offset != null ? Number(row.end_offset) : null,
-        is_explicit: Boolean(row.is_explicit),
-        explicitness_score: Number(row.explicitness_score ?? 0),
-        outcome: row.outcome != null ? (row.outcome as KnowledgeEvidence['outcome']) : null,
-        created_at: Number(row.created_at),
-      }));
+      return rows.map(mapKnowledgeEvidenceRow);
     },
 
     async promoteKnowledgeCandidate(candidateId, input): Promise<KnowledgeMemory> {
@@ -801,7 +741,21 @@ export function createPostgresAdapter(
     async getActiveKnowledgeCrossScope(scope, level) {
       const params = wideScopeParams(scope, level);
       const { rows } = await pool.query(
-        `SELECT * FROM knowledge_memory WHERE ${wideScopeWhere(level)} AND superseded_by_id IS NULL AND retired_at IS NULL ORDER BY last_accessed_at DESC`,
+        `SELECT * FROM knowledge_memory WHERE ${wideScopeWhere(scope, level)} AND superseded_by_id IS NULL AND retired_at IS NULL ORDER BY last_accessed_at DESC`,
+        params,
+      );
+      return rows.map(mapKnowledgeMemory);
+    },
+
+    async getKnowledgeSince(scope, level, since) {
+      const params = [...wideScopeParams(scope, level), since];
+      const { rows } = await pool.query(
+        `SELECT * FROM knowledge_memory
+         WHERE ${wideScopeWhere(scope, level)}
+           AND created_at >= $${params.length}
+           AND superseded_by_id IS NULL
+           AND retired_at IS NULL
+         ORDER BY created_at ASC, id ASC`,
         params,
       );
       return rows.map(mapKnowledgeMemory);
@@ -855,7 +809,7 @@ export function createPostgresAdapter(
       const { rows } = await pool.query(
         `SELECT *, ts_rank(search_vector, plainto_tsquery('english', $${paramOffset + 1})) AS rank
          FROM knowledge_memory
-         WHERE ${wideScopeWhere(level)} ${activeClause}
+         WHERE ${wideScopeWhere(scope, level)} ${activeClause}
            AND search_vector @@ plainto_tsquery('english', $${paramOffset + 1})
          ORDER BY rank DESC
          LIMIT $${paramOffset + 2}`,
@@ -873,10 +827,10 @@ export function createPostgresAdapter(
     async insertKnowledgeMemoryAudit(input) {
       const n = normalizeScope(input);
       const { rows } = await pool.query(
-        `INSERT INTO knowledge_memory_audit (tenant_id, system_id, workspace_id, scope_id, working_memory_id, fact, fact_type, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated, confidence, confidence_score, verification_status, source_text, decision, detail, related_knowledge_id, created_knowledge_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+        `INSERT INTO knowledge_memory_audit (tenant_id, system_id, workspace_id, collaboration_id, scope_id, working_memory_id, fact, fact_type, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated, confidence, confidence_score, verification_status, source_text, decision, detail, related_knowledge_id, created_knowledge_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
          RETURNING *`,
-        [n.tenant_id, n.system_id, n.workspace_id, n.scope_id, input.working_memory_id,
+        [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.working_memory_id,
          input.fact, input.fact_type, input.fact_subject ?? null, input.fact_attribute ?? null,
          input.fact_value ?? null, input.normalized_fact ?? null, input.slot_key ?? null,
          input.is_negated ?? false, input.confidence, input.confidence_score ?? 0.5,
@@ -889,7 +843,20 @@ export function createPostgresAdapter(
     async getRecentKnowledgeMemoryAudits(scope, limit = 20) {
       const params = [...scopeParams(scope), limit];
       const { rows } = await pool.query(
-        `SELECT * FROM knowledge_memory_audit WHERE ${scopeWhere()} ORDER BY id DESC LIMIT $5`,
+        `SELECT * FROM knowledge_memory_audit WHERE ${scopeWhere()} ORDER BY id DESC LIMIT $6`,
+        params,
+      );
+      return rows.map(mapKnowledgeMemoryAudit);
+    },
+
+    async getKnowledgeMemoryAuditsForKnowledge(scope, knowledgeId, limit = 20) {
+      const params = [...scopeParams(scope), knowledgeId, knowledgeId, limit];
+      const { rows } = await pool.query(
+        `SELECT * FROM knowledge_memory_audit
+         WHERE ${scopeWhere()}
+           AND (created_knowledge_id = $6 OR related_knowledge_id = $7)
+         ORDER BY id DESC
+         LIMIT $8`,
         params,
       );
       return rows.map(mapKnowledgeMemoryAudit);
@@ -1000,12 +967,12 @@ export function createPostgresAdapter(
     async upsertContextMonitor(input) {
       const n = normalizeScope(input);
       const { rows } = await pool.query(
-        `INSERT INTO context_monitor (tenant_id, system_id, workspace_id, scope_id, compaction_state, active_turn_count, active_token_estimate, compaction_score, last_compaction_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-         ON CONFLICT (tenant_id, system_id, workspace_id, scope_id)
-         DO UPDATE SET compaction_state = $5, active_turn_count = $6, active_token_estimate = $7, compaction_score = $8, last_compaction_at = COALESCE($9, context_monitor.last_compaction_at), updated_at = $10
+        `INSERT INTO context_monitor (tenant_id, system_id, workspace_id, collaboration_id, scope_id, compaction_state, active_turn_count, active_token_estimate, compaction_score, last_compaction_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ON CONFLICT (tenant_id, system_id, workspace_id, collaboration_id, scope_id)
+         DO UPDATE SET compaction_state = $6, active_turn_count = $7, active_token_estimate = $8, compaction_score = $9, last_compaction_at = COALESCE($10, context_monitor.last_compaction_at), updated_at = $11
          RETURNING *`,
-        [n.tenant_id, n.system_id, n.workspace_id, n.scope_id,
+        [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id,
          input.compaction_state, input.active_turn_count, input.active_token_estimate,
          input.compaction_score, input.last_compaction_at ?? null, now()],
       );

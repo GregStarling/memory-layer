@@ -5,12 +5,18 @@ import type { EmbeddingAdapter, EmbeddingVector, SimilarEmbeddingResult } from '
 import type { Logger } from '../../contracts/observability.js';
 import { nowSeconds } from '../../core/validation.js';
 
-const SCOPE_WHERE = 'km.tenant_id = ? AND km.system_id = ? AND km.workspace_id = ? AND km.scope_id = ?';
+const SCOPE_WHERE =
+  'km.tenant_id = ? AND km.system_id = ? AND km.workspace_id = ? AND km.collaboration_id = ? AND km.scope_id = ?';
 
-function scopeWhereForLevel(level: ScopeLevel): string {
+function scopeWhereForLevel(scope: MemoryScope, level: ScopeLevel): string {
+  const normalized = normalizeScope(scope);
   if (level === 'tenant') return 'km.tenant_id = ?';
   if (level === 'system') return 'km.tenant_id = ? AND km.system_id = ?';
-  if (level === 'workspace') return 'km.tenant_id = ? AND km.system_id = ? AND km.workspace_id = ?';
+  if (level === 'workspace') {
+    return normalized.collaboration_id.length > 0
+      ? 'km.tenant_id = ? AND km.collaboration_id = ?'
+      : 'km.tenant_id = ? AND km.system_id = ? AND km.workspace_id = ?';
+  }
   return SCOPE_WHERE;
 }
 
@@ -128,7 +134,7 @@ export function createSQLiteEmbeddingAdapter(
           `SELECT ke.knowledge_memory_id, ke.vector
            FROM knowledge_embeddings ke
            JOIN knowledge_memory km ON km.id = ke.knowledge_memory_id
-           WHERE ${scopeWhereForLevel(level)} AND km.superseded_by_id IS NULL`,
+           WHERE ${scopeWhereForLevel(scope, level)} AND km.superseded_by_id IS NULL`,
         )
         .all(...scopeParamsForLevel(scope, level)) as Array<{
         knowledge_memory_id: number;

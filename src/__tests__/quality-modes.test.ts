@@ -142,7 +142,7 @@ describe('quality modes', () => {
       fact: { fact: 'Use smaller batches for the migration.', factType: 'decision', confidence: 'high' },
     });
     const modern = await buildExtractedMemory({
-      qualityMode: 'fast_adoption',
+      qualityMode: 'balanced_memory',
       turn: 'Use smaller batches for the migration.',
       summary: 'Use smaller batches for the migration.',
       fact: { fact: 'Use smaller batches for the migration.', factType: 'decision', confidence: 'high' },

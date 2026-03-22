@@ -7,11 +7,14 @@
 Run these before shipping:
 
 ```bash
+npm run eval:retrieval:enforce
 npm run eval:memory-quality:enforce
-npm run eval:memory-quality:delta
+npm run eval:memory-quality:delta:enforce
+npm run python:check
+npm run eval:platform-quality:enforce
 ```
 
-The enforced run must pass every threshold. The delta report shows how far the current system has moved from the recorded baseline in `evals/memory-quality/baseline.json`.
+The enforced memory-quality run must pass every threshold. The enforced delta report blocks regressions versus the recorded baseline in `evals/memory-quality/baseline.json`. The Python and platform checks prove that hosted HTTP, Node CLI inspection, and Python client surfaces still work against the same running system.
 
 ## Final Thresholds
 
@@ -47,3 +50,14 @@ The quick factory reports mode behavior separately from the aggregate score:
 - `high_fidelity_memory`: strictest safety and lifecycle posture.
 
 Mode reporting is descriptive. The release gate is still the main memory-quality suite.
+
+## Platform Proof
+
+`memory-layer` does not treat core-engine quality as sufficient proof on its own. The final gate also requires:
+
+- `npm run python:check`
+  Verifies the Python package can be installed in a clean virtualenv, built, linted, and tested.
+- `npm run eval:platform-quality:enforce`
+  Starts the hosted server, seeds real memory, verifies hosted inspection routes, verifies the Node inspection CLI, and verifies the Python CLI against the same live service.
+
+The release claim is only defensible when both the engine-quality gate and the platform-quality gate are green.

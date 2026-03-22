@@ -69,12 +69,18 @@ import {
 import { createSQLiteEmbeddingAdapter } from './embeddings.js';
 import { createSQLiteSchema } from './schema.js';
 
-const SCOPE_WHERE = 'tenant_id = ? AND system_id = ? AND workspace_id = ? AND scope_id = ?';
+const SCOPE_WHERE =
+  'tenant_id = ? AND system_id = ? AND workspace_id = ? AND collaboration_id = ? AND scope_id = ?';
 
-function scopeWhereForLevel(level: ScopeLevel): string {
+function scopeWhereForLevel(scope: Parameters<typeof normalizeScope>[0], level: ScopeLevel): string {
+  const normalized = normalizeScope(scope);
   if (level === 'tenant') return 'tenant_id = ?';
   if (level === 'system') return 'tenant_id = ? AND system_id = ?';
-  if (level === 'workspace') return 'tenant_id = ? AND system_id = ? AND workspace_id = ?';
+  if (level === 'workspace') {
+    return normalized.collaboration_id.length > 0
+      ? 'tenant_id = ? AND collaboration_id = ?'
+      : 'tenant_id = ? AND system_id = ? AND workspace_id = ?';
+  }
   return SCOPE_WHERE;
 }
 
@@ -83,7 +89,9 @@ function scopeParamsForLevel(scope: Parameters<typeof normalizeScope>[0], level:
   if (level === 'tenant') return [normalized.tenant_id];
   if (level === 'system') return [normalized.tenant_id, normalized.system_id];
   if (level === 'workspace') {
-    return [normalized.tenant_id, normalized.system_id, normalized.workspace_id];
+    return normalized.collaboration_id.length > 0
+      ? [normalized.tenant_id, normalized.collaboration_id]
+      : [normalized.tenant_id, normalized.system_id, normalized.workspace_id];
   }
   return [...scopeValues(normalized)];
 }
@@ -254,6 +262,23 @@ function createAdapterFromDatabase(
     return rows.map(rowToKnowledgeMemoryAudit);
   }
 
+  function getKnowledgeMemoryAuditsForKnowledge(
+    scope: Parameters<StorageAdapter['getKnowledgeMemoryAuditsForKnowledge']>[0],
+    knowledgeId: number,
+    limit = 10,
+  ): KnowledgeMemoryAudit[] {
+    const rows = db
+      .prepare(
+        `SELECT * FROM knowledge_memory_audit
+         WHERE ${SCOPE_WHERE}
+           AND (created_knowledge_id = ? OR related_knowledge_id = ?)
+         ORDER BY id DESC
+         LIMIT ?`,
+      )
+      .all(...scopeValues(scope), knowledgeId, knowledgeId, limit) as KnowledgeMemoryAuditRow[];
+    return rows.map(rowToKnowledgeMemoryAudit);
+  }
+
   function insertValidatedTurn(input: NewTurn): Turn {
     const scope = validateNewTurn(input);
     const tokenEstimate = input.token_estimate ?? estimateTokens(input.content);
@@ -261,14 +286,15 @@ function createAdapterFromDatabase(
     const result = db
       .prepare(
         `INSERT INTO turns
-          (session_id, tenant_id, system_id, workspace_id, scope_id, actor, role, content, priority, token_estimate, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (session_id, tenant_id, system_id, workspace_id, collaboration_id, scope_id, actor, role, content, priority, token_estimate, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.session_id,
         scope.tenant_id,
         scope.system_id,
         scope.workspace_id,
+        scope.collaboration_id,
         scope.scope_id,
         input.actor,
         input.role,
@@ -287,19 +313,21 @@ function createAdapterFromDatabase(
     const result = db
       .prepare(
         `INSERT INTO knowledge_memory
-          (tenant_id, system_id, workspace_id, scope_id, fact, fact_type, knowledge_state,
+          (tenant_id, system_id, workspace_id, collaboration_id, scope_id, fact, fact_type, knowledge_state,
            knowledge_class, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key,
            is_negated, source, confidence, confidence_score, grounding_strength, evidence_count,
            trust_score, verification_status, verification_notes, last_verified_at,
            next_reverification_at, last_confirmed_at, confirmation_count,
-           source_working_memory_id, source_turn_ids, successful_use_count, failed_use_count,
-           disputed_at, dispute_reason, contradiction_score, superseded_at, retired_at, created_at, last_accessed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           source_system_id, source_scope_id, source_collaboration_id, source_working_memory_id,
+           source_turn_ids, successful_use_count, failed_use_count, disputed_at, dispute_reason,
+           contradiction_score, superseded_at, retired_at, created_at, last_accessed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         scope.tenant_id,
         scope.system_id,
         scope.workspace_id,
+        scope.collaboration_id,
         scope.scope_id,
         input.fact,
         input.fact_type,
@@ -323,6 +351,9 @@ function createAdapterFromDatabase(
         input.next_reverification_at ?? null,
         input.last_confirmed_at ?? null,
         input.confirmation_count ?? 0,
+        input.source_system_id ?? scope.system_id,
+        input.source_scope_id ?? scope.scope_id,
+        input.source_collaboration_id ?? scope.collaboration_id,
         input.source_working_memory_id ?? null,
         serializeNumberArray(input.source_turn_ids ?? []),
         input.successful_use_count ?? 0,
@@ -470,15 +501,16 @@ function createAdapterFromDatabase(
       const result = db
         .prepare(
           `INSERT INTO working_memory
-            (session_id, tenant_id, system_id, workspace_id, scope_id, summary, key_entities, topic_tags,
+            (session_id, tenant_id, system_id, workspace_id, collaboration_id, scope_id, summary, key_entities, topic_tags,
              turn_id_start, turn_id_end, turn_count, compaction_trigger, created_at, expires_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           input.session_id,
           scope.tenant_id,
           scope.system_id,
           scope.workspace_id,
+          scope.collaboration_id,
           scope.scope_id,
           input.summary,
           serializeStringArray(input.key_entities),
@@ -570,15 +602,16 @@ function createAdapterFromDatabase(
       const result = db
         .prepare(
           `INSERT INTO knowledge_candidate
-            (tenant_id, system_id, workspace_id, scope_id, working_memory_id, fact, fact_type,
+            (tenant_id, system_id, workspace_id, collaboration_id, scope_id, working_memory_id, fact, fact_type,
              knowledge_class, normalized_fact, slot_key, confidence, source_summary, source_turns,
              grounding_strength, evidence_count, trust_score, state, promoted_knowledge_id, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           scope.tenant_id,
           scope.system_id,
           scope.workspace_id,
+          scope.collaboration_id,
           scope.scope_id,
           input.working_memory_id,
           input.fact,
@@ -624,15 +657,16 @@ function createAdapterFromDatabase(
       const result = db
         .prepare(
           `INSERT INTO knowledge_evidence
-            (tenant_id, system_id, workspace_id, scope_id, knowledge_memory_id, knowledge_candidate_id,
+            (tenant_id, system_id, workspace_id, collaboration_id, scope_id, knowledge_memory_id, knowledge_candidate_id,
              working_memory_id, turn_id, source_type, support_polarity, speaker_role, actor, excerpt,
              start_offset, end_offset, is_explicit, explicitness_score, outcome, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           scope.tenant_id,
           scope.system_id,
           scope.workspace_id,
+          scope.collaboration_id,
           scope.scope_id,
           input.knowledge_memory_id ?? null,
           input.knowledge_candidate_id ?? null,
@@ -728,10 +762,24 @@ function createAdapterFromDatabase(
       const rows = db
         .prepare(
           `SELECT * FROM knowledge_memory
-           WHERE ${scopeWhereForLevel(level)} AND superseded_by_id IS NULL AND retired_at IS NULL
+           WHERE ${scopeWhereForLevel(scope, level)} AND superseded_by_id IS NULL AND retired_at IS NULL
            ORDER BY last_accessed_at DESC`,
         )
         .all(...scopeParamsForLevel(scope, level)) as KnowledgeMemoryRow[];
+      return rows.map(rowToKnowledgeMemory);
+    },
+
+    getKnowledgeSince(scope, level, since): KnowledgeMemory[] {
+      const rows = db
+        .prepare(
+          `SELECT * FROM knowledge_memory
+           WHERE ${scopeWhereForLevel(scope, level)}
+             AND created_at >= ?
+             AND superseded_by_id IS NULL
+             AND retired_at IS NULL
+           ORDER BY created_at ASC, id ASC`,
+        )
+        .all(...scopeParamsForLevel(scope, level), since) as KnowledgeMemoryRow[];
       return rows.map(rowToKnowledgeMemory);
     },
 
@@ -858,7 +906,7 @@ function createAdapterFromDatabase(
            FROM knowledge_memory_fts
            JOIN knowledge_memory ON knowledge_memory_fts.rowid = knowledge_memory.id
            WHERE knowledge_memory_fts MATCH ?
-             AND ${scopeWhereForLevel(level)}
+             AND ${scopeWhereForLevel(scope, level)}
              AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))
            ORDER BY bm25(knowledge_memory_fts)
            LIMIT ?`,
@@ -890,7 +938,7 @@ function createAdapterFromDatabase(
             .prepare(
               `SELECT knowledge_memory.*
                FROM knowledge_memory
-               WHERE ${scopeWhereForLevel(level)}
+               WHERE ${scopeWhereForLevel(scope, level)}
                  AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))`,
             )
             .all(...scopeParamsForLevel(scope, level), resolved.activeOnly ? 1 : 0) as KnowledgeMemoryRow[];
@@ -919,7 +967,7 @@ function createAdapterFromDatabase(
             .prepare(
               `SELECT knowledge_memory.*
                FROM knowledge_memory
-               WHERE ${scopeWhereForLevel(level)}
+               WHERE ${scopeWhereForLevel(scope, level)}
                  AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))`,
             )
             .all(...scopeParamsForLevel(scope, level), resolved.activeOnly ? 1 : 0) as KnowledgeMemoryRow[];
@@ -960,16 +1008,17 @@ function createAdapterFromDatabase(
       const result = db
         .prepare(
           `INSERT INTO knowledge_memory_audit
-            (tenant_id, system_id, workspace_id, scope_id, working_memory_id, fact, fact_type,
+            (tenant_id, system_id, workspace_id, collaboration_id, scope_id, working_memory_id, fact, fact_type,
              fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated,
              confidence, confidence_score, verification_status, source_text, decision,
              created_knowledge_id, related_knowledge_id, detail, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           scope.tenant_id,
           scope.system_id,
           scope.workspace_id,
+          scope.collaboration_id,
           scope.scope_id,
           input.working_memory_id ?? null,
           input.fact,
@@ -997,6 +1046,8 @@ function createAdapterFromDatabase(
     },
 
     getRecentKnowledgeMemoryAudits,
+
+    getKnowledgeMemoryAuditsForKnowledge,
 
     updateKnowledgeMemory(id, patch): KnowledgeMemory | null {
       const assignments: string[] = [];
@@ -1035,15 +1086,16 @@ function createAdapterFromDatabase(
       const result = db
         .prepare(
           `INSERT INTO work_items
-            (session_id, tenant_id, system_id, workspace_id, scope_id, kind, title, detail, status,
+            (session_id, tenant_id, system_id, workspace_id, collaboration_id, scope_id, kind, title, detail, status,
              source_working_memory_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           input.session_id ?? null,
           scope.tenant_id,
           scope.system_id,
           scope.workspace_id,
+          scope.collaboration_id,
           scope.scope_id,
           input.kind,
           input.title,
@@ -1119,10 +1171,10 @@ function createAdapterFromDatabase(
       const updatedAt = nowSeconds();
       db.prepare(
         `INSERT INTO context_monitor
-          (tenant_id, system_id, workspace_id, scope_id, compaction_state, last_compaction_at,
+          (tenant_id, system_id, workspace_id, collaboration_id, scope_id, compaction_state, last_compaction_at,
            active_turn_count, active_token_estimate, compaction_score, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(tenant_id, system_id, workspace_id, scope_id) DO UPDATE SET
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(tenant_id, system_id, workspace_id, collaboration_id, scope_id) DO UPDATE SET
            compaction_state = excluded.compaction_state,
            last_compaction_at = excluded.last_compaction_at,
            active_turn_count = excluded.active_turn_count,
@@ -1133,6 +1185,7 @@ function createAdapterFromDatabase(
         scope.tenant_id,
         scope.system_id,
         scope.workspace_id,
+        scope.collaboration_id,
         scope.scope_id,
         input.compaction_state,
         input.last_compaction_at ?? null,
@@ -1153,17 +1206,18 @@ function createAdapterFromDatabase(
       const result = db
         .prepare(
           `INSERT INTO compaction_log
-            (session_id, tenant_id, system_id, workspace_id, scope_id, trigger_type,
+            (session_id, tenant_id, system_id, workspace_id, collaboration_id, scope_id, trigger_type,
              turn_id_start, turn_id_end, turns_compacted, tokens_compacted_estimate,
              working_memory_id, active_turn_count_before, active_turn_count_after,
              duration_ms, model_call_made, error, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           input.session_id,
           scope.tenant_id,
           scope.system_id,
           scope.workspace_id,
+          scope.collaboration_id,
           scope.scope_id,
           input.trigger_type,
           input.turn_id_start,

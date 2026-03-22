@@ -71,6 +71,7 @@ export interface StorageAdapter {
     options?: PaginationOptions,
   ): PaginatedResult<KnowledgeMemory>;
   getActiveKnowledgeCrossScope(scope: MemoryScope, level: ScopeLevel): KnowledgeMemory[];
+  getKnowledgeSince(scope: MemoryScope, level: ScopeLevel, since: number): KnowledgeMemory[];
   getKnowledgeByTimeRange(scope: MemoryScope, range: TimeRange): KnowledgeMemory[];
   searchKnowledge(
     scope: MemoryScope,
@@ -85,6 +86,11 @@ export interface StorageAdapter {
   ): SearchResult<KnowledgeMemory>[];
   insertKnowledgeMemoryAudit(input: NewKnowledgeMemoryAudit): KnowledgeMemoryAudit;
   getRecentKnowledgeMemoryAudits(scope: MemoryScope, limit?: number): KnowledgeMemoryAudit[];
+  getKnowledgeMemoryAuditsForKnowledge(
+    scope: MemoryScope,
+    knowledgeId: number,
+    limit?: number,
+  ): KnowledgeMemoryAudit[];
   updateKnowledgeMemory(
     id: number,
     patch: {

@@ -68,12 +68,16 @@ function parseJsonNumberArray(json: string): number[] {
 
 /** Identity — exists so all row types pass through a mapper consistently. */
 export function rowToTurn(row: Turn): Turn {
-  return row;
+  return {
+    ...row,
+    collaboration_id: row.collaboration_id ?? row.workspace_id,
+  };
 }
 
 export function rowToWorkingMemory(row: WorkingMemoryRow): WorkingMemory {
   return {
     ...row,
+    collaboration_id: row.collaboration_id ?? row.workspace_id,
     key_entities: parseJsonArray(row.key_entities),
     topic_tags: parseJsonArray(row.topic_tags),
   };
@@ -83,6 +87,9 @@ export function rowToWorkingMemory(row: WorkingMemoryRow): WorkingMemory {
 export function rowToKnowledgeMemory(row: KnowledgeMemoryRow): KnowledgeMemory {
   return {
     ...row,
+    collaboration_id: row.collaboration_id ?? row.workspace_id,
+    source_collaboration_id:
+      row.source_collaboration_id ?? row.collaboration_id ?? row.workspace_id ?? null,
     is_negated: row.is_negated === 1,
     source_turn_ids: parseJsonNumberArray(row.source_turn_ids),
   };
@@ -91,6 +98,7 @@ export function rowToKnowledgeMemory(row: KnowledgeMemoryRow): KnowledgeMemory {
 export function rowToKnowledgeCandidate(row: KnowledgeCandidateRow): KnowledgeCandidate {
   return {
     ...row,
+    collaboration_id: row.collaboration_id ?? row.workspace_id,
     source_summary: row.source_summary === 1,
     source_turns: row.source_turns === 1,
   };
@@ -99,6 +107,7 @@ export function rowToKnowledgeCandidate(row: KnowledgeCandidateRow): KnowledgeCa
 export function rowToKnowledgeEvidence(row: KnowledgeEvidenceRow): KnowledgeEvidence {
   return {
     ...row,
+    collaboration_id: row.collaboration_id ?? row.workspace_id,
     is_explicit: row.is_explicit === 1,
   };
 }
@@ -106,23 +115,31 @@ export function rowToKnowledgeEvidence(row: KnowledgeEvidenceRow): KnowledgeEvid
 export function rowToKnowledgeMemoryAudit(row: KnowledgeMemoryAuditRow): KnowledgeMemoryAudit {
   return {
     ...row,
+    collaboration_id: row.collaboration_id ?? row.workspace_id,
     is_negated: row.is_negated === 1,
   };
 }
 
 /** Identity — exists so all row types pass through a mapper consistently. */
 export function rowToContextMonitor(row: ContextMonitor): ContextMonitor {
-  return row;
+  return {
+    ...row,
+    collaboration_id: row.collaboration_id ?? row.workspace_id,
+  };
 }
 
 /** Identity — exists so all row types pass through a mapper consistently. */
 export function rowToWorkItem(row: WorkItem): WorkItem {
-  return row;
+  return {
+    ...row,
+    collaboration_id: row.collaboration_id ?? row.workspace_id,
+  };
 }
 
 export function rowToCompactionLog(row: CompactionLogRow): CompactionLog {
   return {
     ...row,
+    collaboration_id: row.collaboration_id ?? row.workspace_id,
     model_call_made: row.model_call_made === 1,
   };
 }

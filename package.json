@@ -88,19 +88,25 @@
     "benchmark:semantic": "npm run build && node benchmarks/semantic-benchmark.mjs",
     "benchmark:compaction": "npm run build && node benchmarks/compaction-benchmark.mjs",
     "eval:retrieval": "npm run build && node evals/retrieval-quality.mjs",
+    "eval:retrieval:enforce": "npm run build && node evals/retrieval-quality.mjs --enforce",
     "eval:scenarios": "npm run build && node evals/scenario-evals.mjs",
     "eval:gate": "npm run build && node evals/scenario-evals.mjs --enforce",
     "eval:memory-quality": "npm run build && node evals/memory-quality/index.mjs",
     "eval:memory-quality:enforce": "npm run build && node evals/memory-quality/index.mjs --enforce",
     "eval:memory-quality:delta": "npm run build && node scripts/report-memory-quality-delta.mjs",
+    "eval:memory-quality:delta:enforce": "npm run build && node scripts/report-memory-quality-delta.mjs --enforce",
+    "eval:platform-quality": "npm run build && node evals/platform-quality/index.mjs",
+    "eval:platform-quality:enforce": "npm run build && node evals/platform-quality/index.mjs --enforce",
+    "python:check": "cd clients/python && python3 -m venv .venv && .venv/bin/pip install -e '.[dev]' && .venv/bin/python -m build && .venv/bin/ruff check . && .venv/bin/pytest",
     "export:memory": "node scripts/export-memory.mjs",
     "import:memory": "node scripts/import-memory.mjs",
     "pack:check": "npm pack --dry-run",
-    "release:check": "npm run lint && npm run test:coverage && npm run eval:gate && npm run eval:memory-quality:enforce && npm run eval:memory-quality:delta && npm run pack:check",
-    "prepublishOnly": "npm run lint && npm test && npm run build && npm run pack:check"
+    "release:check": "npm run lint && npm run test:coverage && npm run eval:retrieval:enforce && npm run eval:gate && npm run eval:memory-quality:enforce && npm run eval:memory-quality:delta:enforce && npm run python:check && npm run eval:platform-quality:enforce && npm run pack:check",
+    "prepublishOnly": "npm run release:check"
   },
   "dependencies": {
-    "better-sqlite3": "^11.0.0"
+    "better-sqlite3": "^11.0.0",
+    "pg": "^8.20.0"
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": "*",
@@ -115,9 +121,9 @@
     }
   },
   "devDependencies": {
-    "@vitest/coverage-v8": "^2.1.9",
     "@types/better-sqlite3": "^7.6.8",
     "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^2.1.9",
     "typescript": "^5.5.0",
     "vitest": "^2.0.0"
   },

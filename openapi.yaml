@@ -41,8 +41,30 @@ components:
       in: query
       schema:
         type: string
+    ScopeCollaboration:
+      name: collaboration_id
+      in: query
+      schema:
+        type: string
     ScopeId:
       name: scope_id
+      in: query
+      schema:
+        type: string
+    ScopeLevel:
+      name: scope_level
+      in: query
+      schema:
+        type: string
+        enum: [scope, workspace, system, tenant]
+    Since:
+      name: since
+      in: query
+      schema:
+        type: string
+        format: date-time
+    EventTypes:
+      name: event_types
       in: query
       schema:
         type: string
@@ -62,6 +84,8 @@ components:
         system_id:
           type: string
         workspace_id:
+          type: string
+        collaboration_id:
           type: string
         scope_id:
           type: string
@@ -289,6 +313,7 @@ paths:
         - $ref: '#/components/parameters/ScopeTenant'
         - $ref: '#/components/parameters/ScopeSystem'
         - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
         - $ref: '#/components/parameters/ScopeId'
       responses:
         '200':
@@ -314,10 +339,44 @@ paths:
         - $ref: '#/components/parameters/ScopeTenant'
         - $ref: '#/components/parameters/ScopeSystem'
         - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
         - $ref: '#/components/parameters/ScopeId'
       responses:
         '200':
           description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+        '400':
+          description: Missing search query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/search/cross-scope:
+    get:
+      tags: [retrieval]
+      summary: Search knowledge across inherited or shared scopes
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - $ref: '#/components/parameters/ScopeLevel'
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Cross-scope search results
           content:
             application/json:
               schema:
@@ -428,6 +487,7 @@ paths:
         - $ref: '#/components/parameters/ScopeTenant'
         - $ref: '#/components/parameters/ScopeSystem'
         - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
         - $ref: '#/components/parameters/ScopeId'
       responses:
         '200':
@@ -436,6 +496,291 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
+  /v1/changes:
+    get:
+      tags: [observability]
+      summary: Poll for knowledge changes since a timestamp
+      parameters:
+        - $ref: '#/components/parameters/Since'
+        - $ref: '#/components/parameters/ScopeLevel'
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Matching knowledge changes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  changes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        fact:
+                          type: string
+                        fact_type:
+                          type: string
+                        knowledge_state:
+                          type: string
+                        scope_id:
+                          type: string
+                        collaboration_id:
+                          type: string
+                        created_at:
+                          type: integer
+        '400':
+          description: Invalid timestamp
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/inspect/knowledge:
+    get:
+      tags: [observability]
+      summary: Browse active knowledge for the current scope
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: cursor
+          in: query
+          schema:
+            type: integer
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Paginated knowledge inspection results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                  hasMore:
+                    type: boolean
+                  nextCursor:
+                    type: integer
+                    nullable: true
+  /v1/inspect/knowledge/{knowledgeId}:
+    get:
+      tags: [observability]
+      summary: Inspect one knowledge item with evidence and audits
+      parameters:
+        - name: knowledgeId
+          in: path
+          required: true
+          schema:
+            type: integer
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Full knowledge inspection payload
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  knowledge:
+                    type: object
+                  evidence:
+                    type: array
+                    items:
+                      type: object
+                  audits:
+                    type: array
+                    items:
+                      type: object
+        '404':
+          description: Knowledge not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/inspect/audits:
+    get:
+      tags: [observability]
+      summary: List recent knowledge audits or audits for one knowledge id
+      parameters:
+        - name: knowledge_id
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Matching audit rows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  audits:
+                    type: array
+                    items:
+                      type: object
+  /v1/inspect/monitor:
+    get:
+      tags: [observability]
+      summary: Inspect the current context monitor
+      parameters:
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Context monitor payload
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  monitor:
+                    type: object
+                    nullable: true
+  /v1/inspect/compactions:
+    get:
+      tags: [observability]
+      summary: List recent compaction logs
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Recent compaction logs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  logs:
+                    type: array
+                    items:
+                      type: object
+  /v1/inspect/reverification:
+    get:
+      tags: [observability]
+      summary: List knowledge currently due for reverification
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Due reverification items
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  due:
+                    type: array
+                    items:
+                      type: object
+  /v1/reverification/run:
+    post:
+      tags: [maintenance]
+      summary: Run batch reverification for due knowledge
+      security:
+        - bearerAuth: []
+        - adminKey: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                limit:
+                  type: integer
+      responses:
+        '200':
+          description: Reverification batch result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reverifiedKnowledgeIds:
+                    type: array
+                    items:
+                      type: integer
+                  demotedKnowledgeIds:
+                    type: array
+                    items:
+                      type: integer
+  /v1/reverification/{knowledgeId}:
+    post:
+      tags: [maintenance]
+      summary: Reverify one knowledge item immediately
+      security:
+        - bearerAuth: []
+        - adminKey: []
+      parameters:
+        - name: knowledgeId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Knowledge trust assessment
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  trust_score:
+                    type: number
+                  state:
+                    type: string
+                  decision:
+                    type: string
+                  reasons:
+                    type: array
+                    items:
+                      type: string
   /healthz:
     get:
       tags: [observability]
@@ -462,6 +807,14 @@ paths:
     get:
       tags: [observability]
       summary: Open an event stream for memory events
+      parameters:
+        - $ref: '#/components/parameters/EventTypes'
+        - $ref: '#/components/parameters/ScopeLevel'
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
       responses:
         '200':
           description: Server-sent event stream

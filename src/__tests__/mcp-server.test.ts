@@ -10,12 +10,13 @@ describe('MCP server handler', () => {
 
   it('lists all expected tools', () => {
     handler = createMcpServerHandler();
-    expect(handler.tools.length).toBe(9);
+    expect(handler.tools.length).toBe(10);
     const names = handler.tools.map((t) => t.name);
     expect(names).toContain('memory_store_turn');
     expect(names).toContain('memory_store_exchange');
     expect(names).toContain('memory_get_context');
     expect(names).toContain('memory_search');
+    expect(names).toContain('memory_search_cross_scope');
     expect(names).toContain('memory_learn_fact');
     expect(names).toContain('memory_track_work');
     expect(names).toContain('memory_force_compact');
@@ -109,6 +110,64 @@ describe('MCP server handler', () => {
 
     expect(JSON.parse(resultA.content[0].text).knowledge[0].fact).toContain('Thread A');
     expect(JSON.parse(resultB.content[0].text).knowledge[0].fact).toContain('Thread B');
+  });
+
+  it('supports cross-scope search tools', async () => {
+    handler = createMcpServerHandler();
+
+    await handler.callTool('memory_learn_fact', {
+      fact: 'Shared workspace memory',
+      factType: 'reference',
+      scope: {
+        tenant_id: 'acme',
+        system_id: 'assistant',
+        workspace_id: 'shared',
+        scope_id: 'thread-a',
+      },
+    });
+
+    const result = await handler.callTool('memory_search_cross_scope', {
+      query: 'shared workspace',
+      scopeLevel: 'workspace',
+      scope: {
+        tenant_id: 'acme',
+        system_id: 'assistant',
+        workspace_id: 'shared',
+        scope_id: 'thread-b',
+      },
+    });
+
+    expect(JSON.parse(result.content[0].text).knowledge[0].fact).toContain('Shared workspace memory');
+  });
+
+  it('shares collaboration memory across systems through MCP tools', async () => {
+    handler = createMcpServerHandler();
+
+    await handler.callTool('memory_learn_fact', {
+      fact: 'Rollback playbook lives with the release captain',
+      factType: 'reference',
+      scope: {
+        tenant_id: 'acme',
+        system_id: 'planner',
+        workspace_id: 'factory',
+        collaboration_id: 'release-42',
+        scope_id: 'run-a',
+      },
+    });
+
+    const result = await handler.callTool('memory_search_cross_scope', {
+      query: 'release captain',
+      scopeLevel: 'workspace',
+      scope: {
+        tenant_id: 'acme',
+        system_id: 'executor',
+        workspace_id: 'factory',
+        collaboration_id: 'release-42',
+        scope_id: 'run-b',
+      },
+    });
+
+    expect(JSON.parse(result.content[0].text).knowledge[0].fact).toContain('release captain');
   });
 
   it('returns error for unknown tools', async () => {

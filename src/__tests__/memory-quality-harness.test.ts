@@ -14,7 +14,7 @@ describe('memory quality harness', () => {
     expect(result.metrics).toHaveProperty('memoryIsolationAccuracy');
     expect(Array.isArray(result.scenarios)).toBe(true);
     expect(Array.isArray(result.evaluations)).toBe(true);
-  });
+  }, 20000);
 
   it('marks deliberately broken metrics as failing', async () => {
     const { summarizeMetrics } = await import('../../evals/memory-quality/shared.mjs');

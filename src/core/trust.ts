@@ -147,6 +147,7 @@ export function assessKnowledgeReverification(input: {
     tenant_id: input.knowledge.tenant_id,
     system_id: input.knowledge.system_id,
     workspace_id: input.knowledge.workspace_id,
+    collaboration_id: input.knowledge.collaboration_id,
     scope_id: input.knowledge.scope_id,
     working_memory_id: input.knowledge.source_working_memory_id ?? 0,
     fact: input.knowledge.fact,

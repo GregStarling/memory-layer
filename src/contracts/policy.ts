@@ -149,7 +149,7 @@ export const DEFAULT_CONTEXT_POLICY: Required<ContextPolicy> = {
   mode: 'chat',
   tokenBudget: Number.MAX_SAFE_INTEGER,
   lexicalWeight: 1,
-  semanticWeight: 1,
+  semanticWeight: 1.2,
   recencyWeight: 1,
   importanceWeight: 0.25,
   trustWeight: 1.3,

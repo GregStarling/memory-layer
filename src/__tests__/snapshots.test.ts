@@ -62,6 +62,7 @@ describe('stable snapshots', () => {
         "memory_store_exchange",
         "memory_get_context",
         "memory_search",
+        "memory_search_cross_scope",
         "memory_learn_fact",
         "memory_track_work",
         "memory_force_compact",

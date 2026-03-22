@@ -49,23 +49,29 @@ export function getEvidenceDensityScore(knowledge: KnowledgeMemory): number {
 }
 
 export function getScopeRelationScore(current: MemoryScope, candidate: KnowledgeMemory): number {
+  const currentWorkspaceId = current.workspace_id ?? 'default';
+  const currentCollaborationId = current.collaboration_id ?? '';
   if (
     candidate.tenant_id === current.tenant_id &&
     candidate.system_id === current.system_id &&
-    candidate.workspace_id === (current.workspace_id ?? 'default') &&
+    candidate.workspace_id === currentWorkspaceId &&
+    candidate.collaboration_id === currentCollaborationId &&
     candidate.scope_id === current.scope_id
   ) {
     return 1;
   }
   if (
     candidate.tenant_id === current.tenant_id &&
-    candidate.system_id === current.system_id &&
-    candidate.workspace_id === (current.workspace_id ?? 'default')
+    currentCollaborationId.length > 0 &&
+    candidate.collaboration_id === currentCollaborationId
   ) {
-    return 0.5;
+    return 0.65;
   }
   if (candidate.tenant_id === current.tenant_id && candidate.system_id === current.system_id) {
-    return 0.2;
+    return 0.3;
+  }
+  if (candidate.tenant_id === current.tenant_id) {
+    return 0.1;
   }
   return 0;
 }

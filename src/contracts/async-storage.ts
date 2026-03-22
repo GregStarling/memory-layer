@@ -89,6 +89,7 @@ export interface AsyncStorageAdapter {
     scope: MemoryScope,
     level: ScopeLevel,
   ): Promise<KnowledgeMemory[]>;
+  getKnowledgeSince(scope: MemoryScope, level: ScopeLevel, since: number): Promise<KnowledgeMemory[]>;
   getKnowledgeByTimeRange(scope: MemoryScope, range: TimeRange): Promise<KnowledgeMemory[]>;
   searchKnowledge(
     scope: MemoryScope,
@@ -104,6 +105,11 @@ export interface AsyncStorageAdapter {
   insertKnowledgeMemoryAudit(input: NewKnowledgeMemoryAudit): Promise<KnowledgeMemoryAudit>;
   getRecentKnowledgeMemoryAudits(
     scope: MemoryScope,
+    limit?: number,
+  ): Promise<KnowledgeMemoryAudit[]>;
+  getKnowledgeMemoryAuditsForKnowledge(
+    scope: MemoryScope,
+    knowledgeId: number,
     limit?: number,
   ): Promise<KnowledgeMemoryAudit[]>;
   updateKnowledgeMemory(

@@ -1,8 +1,16 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
-import { createMemory, type CreateMemoryOptions } from '../core/quick.js';
+import {
+  createMemoryWithAsyncAdapter,
+  type CreateMemoryOptions,
+} from '../core/quick.js';
 import type { MemoryManager } from '../core/manager.js';
-import { normalizeScope, type MemoryScope } from '../contracts/identity.js';
+import { normalizeScope, type MemoryScope, type ScopeLevel } from '../contracts/identity.js';
+import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
+import type { EmbeddingAdapter } from '../contracts/embedding.js';
+import type { MemoryEvent, MemoryEventType } from '../contracts/observability.js';
 import type { FactType, FactConfidence } from '../contracts/types.js';
+import { createSQLiteAdapterWithEmbeddings } from '../adapters/sqlite/index.js';
+import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 export interface HttpServerConfig {
   /** Port to listen on. Defaults to 3100. */
   port?: number;
@@ -28,6 +36,14 @@ export interface HttpServerConfig {
   bodyLimitBytes?: number;
   /** Optional redaction hook for stored turns/facts/work items. */
   redactText?: CreateMemoryOptions['redactText'];
+  /** Optional Postgres connection string for hosted deployments. */
+  databaseUrl?: string;
+  /** Quality mode applied to hosted managers. */
+  qualityMode?: CreateMemoryOptions['qualityMode'];
+  /** Legacy quality tier mapping. */
+  qualityTier?: CreateMemoryOptions['qualityTier'];
+  /** Cross-scope retrieval level for hosted managers. */
+  crossScopeLevel?: ScopeLevel;
 }
 
 function writeJson(res: ServerResponse, status: number, data: unknown): void {
@@ -88,6 +104,12 @@ function parseQuery(url: string): Record<string, string> {
   return params;
 }
 
+function parseOptionalInteger(value: string | undefined): number | undefined {
+  if (value == null || value === '') return undefined;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? parsed : undefined;
+}
+
 function resolveRequestScope(
   fallbackScope: string | MemoryScope | undefined,
   req: IncomingMessage,
@@ -104,6 +126,7 @@ function resolveRequestScope(
     tenant_id: req.headers['x-memory-tenant'],
     system_id: req.headers['x-memory-system'],
     workspace_id: req.headers['x-memory-workspace'],
+    collaboration_id: req.headers['x-memory-collaboration'],
     scope_id: req.headers['x-memory-scope'],
   };
   if (headerScope.tenant_id && headerScope.system_id && headerScope.scope_id) {
@@ -111,6 +134,9 @@ function resolveRequestScope(
       tenant_id: String(headerScope.tenant_id),
       system_id: String(headerScope.system_id),
       workspace_id: headerScope.workspace_id ? String(headerScope.workspace_id) : undefined,
+      collaboration_id: headerScope.collaboration_id
+        ? String(headerScope.collaboration_id)
+        : undefined,
       scope_id: String(headerScope.scope_id),
     };
   }
@@ -120,11 +146,28 @@ function resolveRequestScope(
       tenant_id: query.tenant_id,
       system_id: query.system_id,
       workspace_id: query.workspace_id,
+      collaboration_id: query.collaboration_id,
       scope_id: query.scope_id,
     };
   }
 
   return fallbackScope ?? 'default';
+}
+
+function matchesEventScope(event: MemoryEvent, scope: MemoryScope, level: ScopeLevel): boolean {
+  const left = normalizeScope(event.scope);
+  const right = normalizeScope(scope);
+  if (left.tenant_id !== right.tenant_id) return false;
+  if (level === 'tenant') return true;
+  if (level === 'workspace' && left.collaboration_id && right.collaboration_id) {
+    return left.collaboration_id === right.collaboration_id;
+  }
+  if (left.system_id !== right.system_id) return false;
+  if (level === 'system') return true;
+  if (level === 'workspace') {
+    return left.workspace_id === right.workspace_id;
+  }
+  return left.workspace_id === right.workspace_id && left.scope_id === right.scope_id;
 }
 
 /**
@@ -140,6 +183,8 @@ function resolveRequestScope(
  * - POST /v1/compact        - Force compaction
  * - GET  /v1/health         - Get health report
  * - POST /v1/maintenance    - Run maintenance
+ * - GET  /v1/inspect/*      - Inspect knowledge, audits, monitor, and compactions
+ * - POST /v1/reverification - Run reverification workflows
  * - GET  /v1/events         - SSE stream of memory events
  */
 export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
@@ -154,9 +199,79 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
   const enableCors = config.cors ?? true;
   const bodyLimitBytes = config.bodyLimitBytes ?? 1_048_576;
   const managers = new Map<string, MemoryManager>();
+  const databaseUrl = config.databaseUrl ?? process.env.MEMORY_DATABASE_URL;
 
-  // SSE clients
-  const sseClients = new Set<ServerResponse>();
+  const adapterResources: {
+    asyncAdapter: AsyncStorageAdapter;
+    embeddingAdapter?: EmbeddingAdapter;
+    close: () => Promise<void>;
+  } = databaseUrl
+    ? await (async () => {
+        const moduleName = 'pg';
+        const pgModule = await import(moduleName).catch(() => {
+          throw new Error(
+            'memory-layer: hosted Postgres mode requires the "pg" package. Install it with: npm install pg',
+          );
+        });
+        const { createPostgresAdapter } = await import('../adapters/postgres/index.js');
+        const Pool = pgModule.Pool ?? pgModule.default?.Pool;
+        const pool = new Pool({ connectionString: databaseUrl });
+        return {
+          asyncAdapter: createPostgresAdapter(pool),
+          close: async () => {
+            await pool.end();
+          },
+        };
+      })()
+    : (() => {
+        const sqlite = createSQLiteAdapterWithEmbeddings(config.dbPath ?? ':memory:');
+        return {
+          asyncAdapter: wrapSyncAdapter(sqlite),
+          embeddingAdapter: sqlite.embeddings,
+          close: async () => {
+            sqlite.close();
+          },
+        };
+      })();
+
+  const sseClients = new Set<{
+    response: ServerResponse;
+    scope?: MemoryScope;
+    scopeLevel?: ScopeLevel;
+    eventTypes?: Set<MemoryEventType>;
+  }>();
+
+  function createHostedManager(scopeInput: string | MemoryScope): MemoryManager {
+    const baseOptions: CreateMemoryOptions = {
+      adapter: 'sqlite',
+      path: config.dbPath ?? ':memory:',
+      scope: scopeInput,
+      summarizer: config.summarizer ?? 'extractive',
+      extractor: config.extractor ?? 'regex',
+      preset: config.preset,
+      redactText: config.redactText,
+      qualityMode: config.qualityMode,
+      qualityTier: config.qualityTier,
+      crossScopeLevel: config.crossScopeLevel,
+      onEvent: (event) => {
+        if (sseClients.size === 0) return;
+        const data = `data: ${JSON.stringify(event)}\n\n`;
+        for (const client of sseClients) {
+          if (client.eventTypes && !client.eventTypes.has(event.type)) continue;
+          if (client.scope && client.scopeLevel) {
+            if (!matchesEventScope(event, client.scope, client.scopeLevel)) continue;
+          }
+          client.response.write(data);
+        }
+      },
+    };
+
+    return createMemoryWithAsyncAdapter({
+      ...baseOptions,
+      asyncAdapter: adapterResources.asyncAdapter,
+      embeddingAdapter: adapterResources.embeddingAdapter,
+    });
+  }
 
   function getManager(scopeInput: string | MemoryScope): MemoryManager {
     const key =
@@ -168,23 +283,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       return existing;
     }
 
-    const manager = createMemory({
-      adapter: 'sqlite',
-      path: config.dbPath ?? ':memory:',
-      scope: scopeInput,
-      summarizer: config.summarizer ?? 'extractive',
-      extractor: config.extractor ?? 'regex',
-      preset: config.preset,
-      redactText: config.redactText,
-      onEvent: (event) => {
-        if (sseClients.size > 0) {
-          const data = `data: ${JSON.stringify(event)}\n\n`;
-          for (const client of sseClients) {
-            client.write(data);
-          }
-        }
-      },
-    });
+    const manager = createHostedManager(scopeInput);
     managers.set(key, manager);
     return manager;
   }
@@ -196,7 +295,10 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
     if (enableCors) {
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        'Content-Type, Authorization, x-admin-key, x-memory-tenant, x-memory-system, x-memory-workspace, x-memory-collaboration, x-memory-scope, Last-Event-ID',
+      );
     }
 
     if (req.method === 'OPTIONS') {
@@ -306,6 +408,112 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         return;
       }
 
+      // GET /v1/search/cross-scope
+      if (path === '/v1/search/cross-scope' && req.method === 'GET') {
+        if (!query.q) {
+          writeError(res, 400, 'Missing required query parameter: q');
+          return;
+        }
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const scopeLevel = (query.scope_level as ScopeLevel | undefined) ?? 'workspace';
+        const results = await requestManager.searchCrossScope(
+          query.q,
+          scopeLevel,
+          query.limit ? { limit: Number(query.limit) } : undefined,
+        );
+        writeJson(res, 200, {
+          knowledge: results.knowledge.map((r) => ({
+            id: r.item.id,
+            fact: r.item.fact,
+            fact_type: r.item.fact_type,
+            scope_id: r.item.scope_id,
+            collaboration_id: r.item.collaboration_id,
+            rank: r.rank,
+          })),
+        });
+        return;
+      }
+
+      // GET /v1/inspect/knowledge
+      if (path === '/v1/inspect/knowledge' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const limit = parseOptionalInteger(query.limit);
+        const cursor = parseOptionalInteger(query.cursor);
+        if ((query.limit && limit == null) || (query.cursor && cursor == null)) {
+          writeError(res, 400, 'Invalid pagination parameters');
+          return;
+        }
+        const knowledge = await requestManager.listKnowledge({
+          limit,
+          cursor,
+        });
+        writeJson(res, 200, knowledge);
+        return;
+      }
+
+      const knowledgeInspectMatch = path.match(/^\/v1\/inspect\/knowledge\/(\d+)$/);
+      if (knowledgeInspectMatch && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const detail = await requestManager.inspectKnowledge(Number(knowledgeInspectMatch[1]));
+        if (!detail.knowledge) {
+          writeError(res, 404, 'Knowledge not found');
+          return;
+        }
+        writeJson(res, 200, detail);
+        return;
+      }
+
+      // GET /v1/inspect/audits
+      if (path === '/v1/inspect/audits' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const knowledgeId = parseOptionalInteger(query.knowledge_id);
+        const limit = parseOptionalInteger(query.limit);
+        if ((query.knowledge_id && knowledgeId == null) || (query.limit && limit == null)) {
+          writeError(res, 400, 'Invalid audit inspection parameters');
+          return;
+        }
+        const audits = await requestManager.getKnowledgeAudits({
+          knowledgeId,
+          limit,
+        });
+        writeJson(res, 200, { audits });
+        return;
+      }
+
+      // GET /v1/inspect/monitor
+      if (path === '/v1/inspect/monitor' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const monitor = await requestManager.getContextMonitor();
+        writeJson(res, 200, { monitor });
+        return;
+      }
+
+      // GET /v1/inspect/compactions
+      if (path === '/v1/inspect/compactions' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const limit = parseOptionalInteger(query.limit);
+        if (query.limit && limit == null) {
+          writeError(res, 400, 'Invalid compaction inspection parameters');
+          return;
+        }
+        const logs = await requestManager.getRecentCompactionLogs(limit);
+        writeJson(res, 200, { logs });
+        return;
+      }
+
+      // GET /v1/inspect/reverification
+      if (path === '/v1/inspect/reverification' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const limit = parseOptionalInteger(query.limit);
+        if (query.limit && limit == null) {
+          writeError(res, 400, 'Invalid reverification inspection parameters');
+          return;
+        }
+        const due = await requestManager.getDueReverification({ limit });
+        writeJson(res, 200, { due });
+        return;
+      }
+
       // POST /v1/facts
       if (path === '/v1/facts' && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
@@ -385,6 +593,58 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         return;
       }
 
+      const reverificationMatch = path.match(/^\/v1\/reverification\/(\d+)$/);
+      if (reverificationMatch && req.method === 'POST') {
+        if (adminApiKey && req.headers['x-admin-key'] !== adminApiKey) {
+          writeError(res, 403, 'Admin key required');
+          return;
+        }
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const result = await requestManager.reverifyKnowledge(Number(reverificationMatch[1]));
+        writeJson(res, 200, result);
+        return;
+      }
+
+      // POST /v1/reverification/run
+      if (path === '/v1/reverification/run' && req.method === 'POST') {
+        if (adminApiKey && req.headers['x-admin-key'] !== adminApiKey) {
+          writeError(res, 403, 'Admin key required');
+          return;
+        }
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const limit =
+          typeof body.limit === 'number' && Number.isInteger(body.limit) ? body.limit : undefined;
+        const report = await requestManager.runReverification({ limit });
+        writeJson(res, 200, report);
+        return;
+      }
+
+      // GET /v1/changes
+      if (path === '/v1/changes' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const sinceValue = query.since ? new Date(query.since) : new Date(0);
+        if (Number.isNaN(sinceValue.valueOf())) {
+          writeError(res, 400, 'Invalid since parameter');
+          return;
+        }
+        const changes = await requestManager.pollForChanges(sinceValue, {
+          scopeLevel: (query.scope_level as ScopeLevel | undefined) ?? 'scope',
+        });
+        writeJson(res, 200, {
+          changes: changes.map((knowledge) => ({
+            id: knowledge.id,
+            fact: knowledge.fact,
+            fact_type: knowledge.fact_type,
+            knowledge_state: knowledge.knowledge_state,
+            scope_id: knowledge.scope_id,
+            collaboration_id: knowledge.collaboration_id,
+            created_at: knowledge.created_at,
+          })),
+        });
+        return;
+      }
+
       // GET /v1/events (SSE)
       if (path === '/v1/events' && req.method === 'GET') {
         res.writeHead(200, {
@@ -393,9 +653,26 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           Connection: 'keep-alive',
         });
         res.write('data: {"type":"connected"}\n\n');
-        sseClients.add(res);
+        const scope = resolveRequestScope(config.scope, req, query);
+        sseClients.add({
+          response: res,
+          scope: typeof scope === 'string' ? undefined : scope,
+          scopeLevel: (query.scope_level as ScopeLevel | undefined) ?? 'scope',
+          eventTypes: query.event_types
+            ? new Set(
+                query.event_types
+                  .split(',')
+                  .map((value) => value.trim())
+                  .filter(Boolean) as MemoryEventType[],
+              )
+            : undefined,
+        });
         req.on('close', () => {
-          sseClients.delete(res);
+          for (const client of sseClients) {
+            if (client.response === res) {
+              sseClients.delete(client);
+            }
+          }
         });
         return;
       }
@@ -417,7 +694,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         manager,
         async close() {
           for (const client of sseClients) {
-            client.end();
+            client.response.end();
           }
           sseClients.clear();
           server.close();
@@ -425,6 +702,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
             await cachedManager.close();
           }
           managers.clear();
+          await adapterResources.close();
         },
       });
     });

@@ -35,15 +35,15 @@ def agent_loop():
     # Search for relevant knowledge
     results = client.search("framework")
     print(f"\nSearch results for 'framework':")
-    for k in results.get("knowledge", []):
+    for k in results.knowledge:
         print(f"  - {k['fact']} (type: {k['fact_type']}, rank: {k['rank']:.2f})")
 
     # Get full context
     context = client.get_context(query="authentication setup")
     print(f"\nContext:")
-    print(f"  Active turns: {context['activeTurnCount']}")
-    print(f"  Token estimate: {context['tokenEstimate']}")
-    print(f"  Knowledge items: {len(context['relevantKnowledge'])}")
+    print(f"  Active turns: {context.active_turn_count}")
+    print(f"  Token estimate: {context.token_estimate}")
+    print(f"  Knowledge items: {len(context.relevant_knowledge)}")
 
     # Check health
     health = client.health()

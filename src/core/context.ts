@@ -410,6 +410,8 @@ export async function buildMemoryContext(
       ? temporalKnowledge.filter(
           (item) =>
             item.scope_id === normalizedScope.scope_id ||
+            (normalizedScope.collaboration_id.length > 0 &&
+              item.collaboration_id === normalizedScope.collaboration_id) ||
             getLineageScore(normalizedScope.scope_id, item.scope_id) >= 0.5,
         )
       : temporalKnowledge;

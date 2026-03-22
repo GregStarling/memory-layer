@@ -64,6 +64,7 @@ function matchesScope(item: MemoryScope, scope: MemoryScope): boolean {
     left.tenant_id === right.tenant_id &&
     left.system_id === right.system_id &&
     left.workspace_id === right.workspace_id &&
+    left.collaboration_id === right.collaboration_id &&
     left.scope_id === right.scope_id
   );
 }
@@ -73,9 +74,18 @@ function matchesLevel(item: MemoryScope, scope: MemoryScope, level: ScopeLevel):
   const right = normalizeScope(scope);
   if (left.tenant_id !== right.tenant_id) return false;
   if (level === 'tenant') return true;
+  const explicitCollaboration =
+    left.collaboration_id.length > 0 && right.collaboration_id.length > 0;
+  if (level === 'workspace' && explicitCollaboration) {
+    return left.collaboration_id === right.collaboration_id;
+  }
   if (left.system_id !== right.system_id) return false;
   if (level === 'system') return true;
-  if (left.workspace_id !== right.workspace_id) return false;
+  if (explicitCollaboration) {
+    if (left.collaboration_id !== right.collaboration_id) return false;
+  } else if (left.workspace_id !== right.workspace_id) {
+    return false;
+  }
   if (level === 'workspace') return true;
   return left.scope_id === right.scope_id;
 }
@@ -346,6 +356,9 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         next_reverification_at: input.next_reverification_at ?? null,
         last_confirmed_at: input.last_confirmed_at ?? null,
         confirmation_count: input.confirmation_count ?? 0,
+        source_system_id: input.source_system_id ?? scope.system_id,
+        source_scope_id: input.source_scope_id ?? scope.scope_id,
+        source_collaboration_id: input.source_collaboration_id ?? scope.collaboration_id,
         source_working_memory_id: input.source_working_memory_id ?? null,
         source_turn_ids: input.source_turn_ids ?? [],
         successful_use_count: input.successful_use_count ?? 0,
@@ -489,6 +502,16 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       );
     },
 
+    getKnowledgeSince(scope, level, since) {
+      return state.knowledgeMemory.filter(
+        (item) =>
+          matchesLevel(item, scope, level) &&
+          item.created_at >= since &&
+          item.superseded_by_id === null &&
+          item.retired_at === null,
+      );
+    },
+
     getKnowledgeByTimeRange(scope, range) {
       return state.knowledgeMemory.filter(
         (item) => matchesScope(item, scope) && inRange(item.created_at, range),
@@ -579,6 +602,17 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     getRecentKnowledgeMemoryAudits(scope, limit = 10) {
       return state.knowledgeAudits
         .filter((item) => matchesScope(item, scope))
+        .sort((a, b) => b.id - a.id)
+        .slice(0, limit);
+    },
+
+    getKnowledgeMemoryAuditsForKnowledge(scope, knowledgeId, limit = 10) {
+      return state.knowledgeAudits
+        .filter(
+          (item) =>
+            matchesScope(item, scope) &&
+            (item.created_knowledge_id === knowledgeId || item.related_knowledge_id === knowledgeId),
+        )
         .sort((a, b) => b.id - a.id)
         .slice(0, limit);
     },

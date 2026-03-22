@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   classifyFactRelation,
   createCompositeExtractor,
+  createEnhancedRegexExtractor,
   createRegexExtractor,
   getContradictionKey,
   normalizeExtractedFact,
@@ -78,6 +79,53 @@ describe('extractors', () => {
     );
     expect(facts.some((fact) => fact.factType === 'reference')).toBe(true);
     expect(facts.some((fact) => fact.factType === 'entity')).toBe(true);
+  });
+
+  it('extracts causal, comparative, and failure-derived facts', async () => {
+    const extractor = createRegexExtractor();
+    const facts = await extractor(
+      [
+        'Because Docker slowed local feedback loops, we chose SQLite for development.',
+        'TypeScript is better than JavaScript for this memory layer.',
+        "Aggressive caching didn't work for deploys.",
+      ].join(' '),
+      [],
+      [],
+    );
+
+    expect(facts.some((fact) => fact.factType === 'decision')).toBe(true);
+    expect(
+      facts.some(
+        (fact) =>
+          fact.factType === 'preference' &&
+          fact.fact.toLowerCase().includes('typescript'),
+      ),
+    ).toBe(true);
+    expect(facts.some((fact) => fact.factType === 'constraint')).toBe(true);
+  });
+
+  it('surfaces implicit preferences and repeated domain usage in enhanced mode', async () => {
+    const extractor = createEnhancedRegexExtractor();
+    const facts = await extractor(
+      'We went with React for the dashboard and ended up using React for the admin shell. React made the system easier to ship.',
+      [],
+      [],
+    );
+
+    expect(
+      facts.some(
+        (fact) =>
+          fact.factType === 'preference' &&
+          fact.fact.toLowerCase().includes('react'),
+      ),
+    ).toBe(true);
+    expect(
+      facts.some(
+        (fact) =>
+          fact.factType === 'entity' &&
+          fact.fact.toLowerCase().includes('react'),
+      ),
+    ).toBe(true);
   });
 
   it('creates distinct contradiction keys for unrelated preferences', () => {

@@ -35,8 +35,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install --upgrade pip build
-      - run: python -m build
+      - run: python -m pip install --upgrade pip
+      - run: python -m venv .venv
+        working-directory: clients/python
+      - run: .venv/bin/pip install -e '.[dev]'
+        working-directory: clients/python
+      - run: .venv/bin/ruff check .
+        working-directory: clients/python
+      - run: .venv/bin/pytest
+        working-directory: clients/python
+      - run: .venv/bin/python -m build
         working-directory: clients/python
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:

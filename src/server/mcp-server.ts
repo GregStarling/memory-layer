@@ -1,7 +1,14 @@
-import { createMemory, type CreateMemoryOptions } from '../core/quick.js';
+import {
+  createMemoryWithAsyncAdapter,
+  type CreateMemoryOptions,
+} from '../core/quick.js';
 import type { MemoryManager } from '../core/manager.js';
-import { normalizeScope, type MemoryScope } from '../contracts/identity.js';
+import { normalizeScope, type MemoryScope, type ScopeLevel } from '../contracts/identity.js';
+import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
+import type { EmbeddingAdapter } from '../contracts/embedding.js';
 import type { FactType, FactConfidence } from '../contracts/types.js';
+import { createSQLiteAdapterWithEmbeddings } from '../adapters/sqlite/index.js';
+import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 
 export interface McpServerConfig {
   /** Database path. Defaults to ':memory:'. */
@@ -14,6 +21,14 @@ export interface McpServerConfig {
   extractor?: CreateMemoryOptions['extractor'];
   /** Preset: 'ai_ide' | 'chat_agent' | 'autonomous_agent'. */
   preset?: CreateMemoryOptions['preset'];
+  /** Optional Postgres connection string for hosted deployments. */
+  databaseUrl?: string;
+  /** Quality mode applied to hosted managers. */
+  qualityMode?: CreateMemoryOptions['qualityMode'];
+  /** Legacy quality tier mapping. */
+  qualityTier?: CreateMemoryOptions['qualityTier'];
+  /** Cross-scope retrieval level for hosted managers. */
+  crossScopeLevel?: ScopeLevel;
 }
 
 interface McpTool {
@@ -74,6 +89,23 @@ const TOOLS: McpTool[] = [
       type: 'object',
       properties: {
         query: { type: 'string', description: 'Search query' },
+        limit: { type: 'number', description: 'Max results (default: 10)' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'memory_search_cross_scope',
+    description: 'Search durable knowledge across collaboration, system, or tenant boundaries.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query' },
+        scopeLevel: {
+          type: 'string',
+          enum: ['workspace', 'system', 'tenant'],
+          description: 'Cross-scope level (default: workspace)',
+        },
         limit: { type: 'number', description: 'Max results (default: 10)' },
       },
       required: ['query'],
@@ -173,31 +205,75 @@ function resolveScopeInput(
  */
 export function createMcpServerHandler(config: McpServerConfig = {}) {
   const managers = new Map<string, MemoryManager>();
+  let adapterPromise: Promise<{
+    asyncAdapter: AsyncStorageAdapter;
+    embeddingAdapter?: EmbeddingAdapter;
+  }> | null = null;
 
-  function getManager(scopeInput: string | MemoryScope): MemoryManager {
+  async function getAsyncAdapter(): Promise<{
+    asyncAdapter: AsyncStorageAdapter;
+    embeddingAdapter?: EmbeddingAdapter;
+  }> {
+    if (!adapterPromise) {
+      adapterPromise = (async () => {
+        if (!config.databaseUrl && !process.env.MEMORY_DATABASE_URL) {
+          const sqlite = createSQLiteAdapterWithEmbeddings(config.dbPath ?? ':memory:');
+          return {
+            asyncAdapter: wrapSyncAdapter(sqlite),
+            embeddingAdapter: sqlite.embeddings,
+          };
+        }
+        const moduleName = 'pg';
+        const pgModule = await import(moduleName).catch(() => {
+          throw new Error(
+            'memory-layer: hosted Postgres mode requires the "pg" package. Install it with: npm install pg',
+          );
+        });
+        const { createPostgresAdapter } = await import('../adapters/postgres/index.js');
+        const Pool = pgModule.Pool ?? pgModule.default?.Pool;
+        const pool = new Pool({
+          connectionString: config.databaseUrl ?? process.env.MEMORY_DATABASE_URL,
+        });
+        return {
+          asyncAdapter: createPostgresAdapter(pool),
+        };
+      })();
+    }
+    return adapterPromise;
+  }
+
+  async function getManager(scopeInput: string | MemoryScope): Promise<MemoryManager> {
     const key =
       typeof scopeInput === 'string'
         ? `scope:${scopeInput}`
         : JSON.stringify(normalizeScope(scopeInput));
     const existing = managers.get(key);
     if (existing) return existing;
-    const manager = createMemory({
+    const baseOptions: CreateMemoryOptions = {
       adapter: 'sqlite',
       path: config.dbPath ?? ':memory:',
       scope: scopeInput,
       summarizer: config.summarizer ?? 'extractive',
       extractor: config.extractor ?? 'regex',
       preset: config.preset,
+      qualityMode: config.qualityMode,
+      qualityTier: config.qualityTier,
+      crossScopeLevel: config.crossScopeLevel,
+    };
+    const adapterContext = await getAsyncAdapter();
+    const manager = createMemoryWithAsyncAdapter({
+      ...baseOptions,
+      asyncAdapter: adapterContext.asyncAdapter,
+      embeddingAdapter: adapterContext.embeddingAdapter,
     });
     managers.set(key, manager);
     return manager;
   }
-
-  const manager = getManager(config.scope ?? 'default');
+  const managerPromise = getManager(config.scope ?? 'default');
 
   async function callTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
     try {
-      const requestManager = getManager(resolveScopeInput(config.scope, args));
+      const requestManager = await getManager(resolveScopeInput(config.scope, args));
       switch (name) {
         case 'memory_store_turn': {
           const turn = await requestManager.processTurn(
@@ -267,6 +343,23 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
             })),
           });
         }
+        case 'memory_search_cross_scope': {
+          const results = await requestManager.searchCrossScope(
+            String(args.query),
+            (args.scopeLevel as ScopeLevel | undefined) ?? 'workspace',
+            args.limit ? { limit: Number(args.limit) } : undefined,
+          );
+          return jsonResult({
+            knowledge: results.knowledge.map((r) => ({
+              id: r.item.id,
+              fact: r.item.fact,
+              fact_type: r.item.fact_type,
+              scope_id: r.item.scope_id,
+              collaboration_id: r.item.collaboration_id,
+              rank: r.rank,
+            })),
+          });
+        }
         case 'memory_learn_fact': {
           const fact = await requestManager.learnFact(
             String(args.fact),
@@ -320,12 +413,14 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
   return {
     tools: TOOLS,
     callTool,
-    manager,
+    manager: undefined,
     async close() {
+      const manager = await managerPromise;
       for (const cachedManager of managers.values()) {
         await cachedManager.close();
       }
       managers.clear();
+      await manager.close();
     },
   };
 }

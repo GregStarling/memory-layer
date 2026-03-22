@@ -10,7 +10,9 @@ export { buildMemoryContext } from './core/context.js';
 export { createMemoryEventEmitter } from './core/events.js';
 export { runMaintenance } from './core/maintenance.js';
 export { createMemory } from './core/quick.js';
+export { createMemoryWithAsyncAdapter } from './core/quick.js';
 export { createMemoryRuntime } from './core/runtime.js';
+export { createMemorySync } from './core/sync.js';
 export { createCircuitBreaker } from './core/circuit-breaker.js';
 export {
   formatBootstrapForPrompt,
@@ -166,7 +168,7 @@ export type {
   MemoryManager,
   MemoryManagerConfig,
 } from './core/manager.js';
-export type { CreateMemoryOptions } from './core/quick.js';
+export type { CreateMemoryOptions, CreateMemoryAsyncOptions } from './core/quick.js';
 export type { MemoryQualityMode, MemoryQualityTier } from './core/quick.js';
 export type {
   ClaudeMemoryManagerOptions,

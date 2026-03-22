@@ -1,8 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createMemory } from '../core/quick.js';
 
 describe('createMemory quick factory', () => {
+  afterEach(() => {
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.VOYAGE_API_KEY;
+    vi.unstubAllGlobals();
+  });
+
   it('works with zero config', async () => {
     const memory = createMemory();
     await memory.processTurn('user', 'Remember that local-first matters.');
@@ -59,6 +65,35 @@ describe('createMemory quick factory', () => {
     await memory.processTurn('assistant', 'two');
     const bootstrap = await memory.getSessionBootstrap();
     expect(bootstrap.workingMemory?.summary).toBe('provider summary');
+    await memory.close();
+  });
+
+  it('auto-detects provider embedding credentials when available', async () => {
+    process.env.VOYAGE_API_KEY = 'voyage-test-key';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        async json() {
+          return {
+            data: [{ embedding: [1, 0, 0] }],
+          };
+        },
+      })),
+    );
+
+    const memory = createMemory({
+      adapter: 'sqlite',
+      path: ':memory:',
+      autoCompact: false,
+      autoExtract: false,
+    });
+
+    await memory.learnFact('The project relies on PostgreSQL for analytics', 'reference');
+    const context = await memory.getContext('analytics postgres');
+
+    expect(context.relevantKnowledge.some((item) => item.fact.includes('PostgreSQL'))).toBe(true);
+    expect(fetch).toHaveBeenCalled();
     await memory.close();
   });
 });

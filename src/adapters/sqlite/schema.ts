@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-export const CURRENT_SCHEMA_VERSION = 8;
+export const CURRENT_SCHEMA_VERSION = 9;
 
 export function createSQLiteSchema(database: Database.Database): void {
   database.pragma('journal_mode = WAL');
@@ -13,6 +13,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id         TEXT    NOT NULL,
       system_id         TEXT    NOT NULL,
       workspace_id      TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id  TEXT    NOT NULL DEFAULT 'default',
       scope_id          TEXT    NOT NULL,
       actor             TEXT    NOT NULL,
       role              TEXT    NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
@@ -26,7 +27,7 @@ export function createSQLiteSchema(database: Database.Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
-    CREATE INDEX IF NOT EXISTS idx_turns_scope ON turns(tenant_id, system_id, workspace_id, scope_id);
+    CREATE INDEX IF NOT EXISTS idx_turns_scope ON turns(tenant_id, system_id, workspace_id, collaboration_id, scope_id);
     CREATE INDEX IF NOT EXISTS idx_turns_archived ON turns(archived_at);
     CREATE INDEX IF NOT EXISTS idx_turns_created ON turns(created_at);
 
@@ -53,6 +54,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id                TEXT    NOT NULL,
       system_id                TEXT    NOT NULL,
       workspace_id             TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id         TEXT    NOT NULL DEFAULT 'default',
       scope_id                 TEXT    NOT NULL,
       summary                  TEXT    NOT NULL,
       key_entities             TEXT    NOT NULL DEFAULT '[]',
@@ -68,13 +70,14 @@ export function createSQLiteSchema(database: Database.Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_wm_session ON working_memory(session_id);
-    CREATE INDEX IF NOT EXISTS idx_wm_scope ON working_memory(tenant_id, system_id, workspace_id, scope_id);
+    CREATE INDEX IF NOT EXISTS idx_wm_scope ON working_memory(tenant_id, system_id, workspace_id, collaboration_id, scope_id);
 
     CREATE TABLE IF NOT EXISTS knowledge_memory (
       id                       INTEGER PRIMARY KEY AUTOINCREMENT,
       tenant_id                TEXT    NOT NULL,
       system_id                TEXT    NOT NULL,
       workspace_id             TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id         TEXT    NOT NULL DEFAULT 'default',
       scope_id                 TEXT    NOT NULL,
       fact                     TEXT    NOT NULL,
       fact_type                TEXT    NOT NULL,
@@ -98,6 +101,9 @@ export function createSQLiteSchema(database: Database.Database): void {
       next_reverification_at   INTEGER,
       last_confirmed_at        INTEGER,
       confirmation_count       INTEGER NOT NULL DEFAULT 0,
+      source_system_id         TEXT,
+      source_scope_id          TEXT,
+      source_collaboration_id  TEXT,
       source_working_memory_id INTEGER REFERENCES working_memory(id),
       source_turn_ids          TEXT    NOT NULL DEFAULT '[]',
       successful_use_count     INTEGER NOT NULL DEFAULT 0,
@@ -114,12 +120,12 @@ export function createSQLiteSchema(database: Database.Database): void {
       schema_version           INTEGER NOT NULL DEFAULT 1
     );
 
-    CREATE INDEX IF NOT EXISTS idx_km_scope ON knowledge_memory(tenant_id, system_id, workspace_id, scope_id);
+    CREATE INDEX IF NOT EXISTS idx_km_scope ON knowledge_memory(tenant_id, system_id, workspace_id, collaboration_id, scope_id);
     CREATE INDEX IF NOT EXISTS idx_km_superseded ON knowledge_memory(superseded_by_id);
-    CREATE INDEX IF NOT EXISTS idx_km_slot ON knowledge_memory(tenant_id, system_id, workspace_id, scope_id, slot_key);
+    CREATE INDEX IF NOT EXISTS idx_km_slot ON knowledge_memory(tenant_id, system_id, workspace_id, collaboration_id, scope_id, slot_key);
     CREATE INDEX IF NOT EXISTS idx_km_access ON knowledge_memory(access_count);
     CREATE INDEX IF NOT EXISTS idx_km_last_accessed ON knowledge_memory(last_accessed_at);
-    CREATE INDEX IF NOT EXISTS idx_km_state_trust_class ON knowledge_memory(tenant_id, system_id, workspace_id, scope_id, knowledge_state, trust_score DESC, knowledge_class);
+    CREATE INDEX IF NOT EXISTS idx_km_state_trust_class ON knowledge_memory(tenant_id, collaboration_id, knowledge_state, trust_score DESC, knowledge_class);
 
     CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_memory_fts USING fts5(
       fact, content=knowledge_memory, content_rowid=id
@@ -143,6 +149,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id            TEXT    NOT NULL,
       system_id            TEXT    NOT NULL,
       workspace_id         TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id     TEXT    NOT NULL DEFAULT 'default',
       scope_id             TEXT    NOT NULL,
       working_memory_id    INTEGER REFERENCES working_memory(id),
       fact                 TEXT    NOT NULL,
@@ -164,13 +171,14 @@ export function createSQLiteSchema(database: Database.Database): void {
       created_at           INTEGER NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_kma_scope ON knowledge_memory_audit(tenant_id, system_id, workspace_id, scope_id, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_kma_scope ON knowledge_memory_audit(tenant_id, system_id, workspace_id, collaboration_id, scope_id, id DESC);
 
     CREATE TABLE IF NOT EXISTS knowledge_candidate (
       id                   INTEGER PRIMARY KEY AUTOINCREMENT,
       tenant_id            TEXT    NOT NULL,
       system_id            TEXT    NOT NULL,
       workspace_id         TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id     TEXT    NOT NULL DEFAULT 'default',
       scope_id             TEXT    NOT NULL,
       working_memory_id    INTEGER NOT NULL REFERENCES working_memory(id) ON DELETE CASCADE,
       fact                 TEXT    NOT NULL,
@@ -190,13 +198,14 @@ export function createSQLiteSchema(database: Database.Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_kc_scope_state_created
-      ON knowledge_candidate(tenant_id, system_id, workspace_id, scope_id, state, created_at DESC);
+      ON knowledge_candidate(tenant_id, system_id, workspace_id, collaboration_id, scope_id, state, created_at DESC);
 
     CREATE TABLE IF NOT EXISTS knowledge_evidence (
       id                   INTEGER PRIMARY KEY AUTOINCREMENT,
       tenant_id            TEXT    NOT NULL,
       system_id            TEXT    NOT NULL,
       workspace_id         TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id     TEXT    NOT NULL DEFAULT 'default',
       scope_id             TEXT    NOT NULL,
       knowledge_memory_id  INTEGER REFERENCES knowledge_memory(id) ON DELETE CASCADE,
       knowledge_candidate_id INTEGER REFERENCES knowledge_candidate(id) ON DELETE CASCADE,
@@ -226,6 +235,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id             TEXT    NOT NULL,
       system_id             TEXT    NOT NULL,
       workspace_id          TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id      TEXT    NOT NULL DEFAULT 'default',
       scope_id              TEXT    NOT NULL,
       compaction_state      TEXT    NOT NULL DEFAULT 'idle',
       last_compaction_at    INTEGER,
@@ -233,7 +243,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       active_token_estimate INTEGER NOT NULL DEFAULT 0,
       compaction_score      INTEGER NOT NULL DEFAULT 0,
       updated_at            INTEGER NOT NULL,
-      UNIQUE(tenant_id, system_id, workspace_id, scope_id)
+      UNIQUE(tenant_id, system_id, workspace_id, collaboration_id, scope_id)
     );
 
     CREATE TABLE IF NOT EXISTS compaction_log (
@@ -242,6 +252,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id                 TEXT    NOT NULL,
       system_id                 TEXT    NOT NULL,
       workspace_id              TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id          TEXT    NOT NULL DEFAULT 'default',
       scope_id                  TEXT    NOT NULL,
       trigger_type              TEXT    NOT NULL,
       turn_id_start             INTEGER NOT NULL,
@@ -257,7 +268,10 @@ export function createSQLiteSchema(database: Database.Database): void {
       created_at                INTEGER NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_cl_scope ON compaction_log(tenant_id, system_id, workspace_id, scope_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_context_monitor_scope_unique
+      ON context_monitor(tenant_id, system_id, workspace_id, collaboration_id, scope_id);
+
+    CREATE INDEX IF NOT EXISTS idx_cl_scope ON compaction_log(tenant_id, system_id, workspace_id, collaboration_id, scope_id);
 
     CREATE TABLE IF NOT EXISTS work_items (
       id                     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -265,6 +279,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id              TEXT    NOT NULL,
       system_id              TEXT    NOT NULL,
       workspace_id           TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id       TEXT    NOT NULL DEFAULT 'default',
       scope_id               TEXT    NOT NULL,
       kind                   TEXT    NOT NULL,
       title                  TEXT    NOT NULL,
@@ -275,7 +290,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       updated_at             INTEGER NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_work_items_scope ON work_items(tenant_id, system_id, workspace_id, scope_id, status);
+    CREATE INDEX IF NOT EXISTS idx_work_items_scope ON work_items(tenant_id, system_id, workspace_id, collaboration_id, scope_id, status);
 
     CREATE TABLE IF NOT EXISTS schema_meta (
       id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -285,6 +300,7 @@ export function createSQLiteSchema(database: Database.Database): void {
   `);
 
   const knowledgeMemoryAlterStatements = [
+    "ALTER TABLE knowledge_memory ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT 'default'",
     "ALTER TABLE knowledge_memory ADD COLUMN knowledge_state TEXT NOT NULL DEFAULT 'trusted'",
     "ALTER TABLE knowledge_memory ADD COLUMN knowledge_class TEXT NOT NULL DEFAULT 'project_fact'",
     'ALTER TABLE knowledge_memory ADD COLUMN fact_subject TEXT',
@@ -303,6 +319,9 @@ export function createSQLiteSchema(database: Database.Database): void {
     'ALTER TABLE knowledge_memory ADD COLUMN next_reverification_at INTEGER',
     'ALTER TABLE knowledge_memory ADD COLUMN last_confirmed_at INTEGER',
     'ALTER TABLE knowledge_memory ADD COLUMN confirmation_count INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE knowledge_memory ADD COLUMN source_system_id TEXT',
+    'ALTER TABLE knowledge_memory ADD COLUMN source_scope_id TEXT',
+    'ALTER TABLE knowledge_memory ADD COLUMN source_collaboration_id TEXT',
     "ALTER TABLE knowledge_memory ADD COLUMN source_turn_ids TEXT NOT NULL DEFAULT '[]'",
     'ALTER TABLE knowledge_memory ADD COLUMN successful_use_count INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE knowledge_memory ADD COLUMN failed_use_count INTEGER NOT NULL DEFAULT 0',
@@ -333,6 +352,45 @@ export function createSQLiteSchema(database: Database.Database): void {
     database.exec('ALTER TABLE turns ADD COLUMN priority REAL NOT NULL DEFAULT 1.0');
   } catch {
     // Column already exists on upgraded databases.
+  }
+
+  const collaborationAlterStatements = [
+    "ALTER TABLE turns ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT 'default'",
+    "ALTER TABLE working_memory ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT 'default'",
+    "ALTER TABLE knowledge_memory_audit ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT 'default'",
+    "ALTER TABLE knowledge_candidate ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT 'default'",
+    "ALTER TABLE knowledge_evidence ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT 'default'",
+    "ALTER TABLE context_monitor ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT 'default'",
+    "ALTER TABLE compaction_log ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT 'default'",
+    "ALTER TABLE work_items ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT 'default'",
+  ];
+
+  for (const statement of collaborationAlterStatements) {
+    try {
+      database.exec(statement);
+    } catch {
+      // Column already exists on upgraded databases.
+    }
+  }
+
+  const collaborationBackfills = [
+    'UPDATE turns SET collaboration_id = "" WHERE collaboration_id IS NULL OR collaboration_id = "default"',
+    'UPDATE working_memory SET collaboration_id = "" WHERE collaboration_id IS NULL OR collaboration_id = "default"',
+    'UPDATE knowledge_memory SET collaboration_id = "" WHERE collaboration_id IS NULL OR collaboration_id = "default"',
+    'UPDATE knowledge_memory_audit SET collaboration_id = "" WHERE collaboration_id IS NULL OR collaboration_id = "default"',
+    'UPDATE knowledge_candidate SET collaboration_id = "" WHERE collaboration_id IS NULL OR collaboration_id = "default"',
+    'UPDATE knowledge_evidence SET collaboration_id = "" WHERE collaboration_id IS NULL OR collaboration_id = "default"',
+    'UPDATE context_monitor SET collaboration_id = "" WHERE collaboration_id IS NULL OR collaboration_id = "default"',
+    'UPDATE compaction_log SET collaboration_id = "" WHERE collaboration_id IS NULL OR collaboration_id = "default"',
+    'UPDATE work_items SET collaboration_id = "" WHERE collaboration_id IS NULL OR collaboration_id = "default"',
+  ];
+
+  for (const statement of collaborationBackfills) {
+    try {
+      database.exec(statement);
+    } catch {
+      // Best-effort backfill for upgraded databases.
+    }
   }
 
   database

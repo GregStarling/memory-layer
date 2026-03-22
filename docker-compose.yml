@@ -18,5 +18,21 @@ services:
       timeout: 5s
       retries: 5
 
+  memory-layer:
+    build:
+      context: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MEMORY_TRANSPORT: http
+      MEMORY_PORT: 3100
+      MEMORY_DATABASE_URL: postgres://memory:memory@postgres:5432/memory_layer
+      MEMORY_SCOPE: hosted
+      MEMORY_QUALITY_MODE: high_fidelity_memory
+      MEMORY_CROSS_SCOPE_LEVEL: workspace
+    ports:
+      - '3100:3100'
+
 volumes:
   pgdata:

@@ -58,6 +58,106 @@ describe('HTTP server', () => {
     expect(results.knowledge.length).toBeGreaterThan(0);
   });
 
+  it('supports hosted cross-scope search and change polling', async () => {
+    const base = await setup(13110);
+
+    const since = new Date().toISOString();
+    await fetch(`${base}/v1/facts`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-memory-tenant': 'acme',
+        'x-memory-system': 'assistant',
+        'x-memory-workspace': 'shared',
+        'x-memory-scope': 'thread-a',
+      },
+      body: JSON.stringify({
+        fact: 'Shared deployment memory',
+        factType: 'reference',
+      }),
+    });
+
+    const crossScope = await fetch(
+      `${base}/v1/search/cross-scope?q=shared%20deployment&scope_level=workspace&tenant_id=acme&system_id=assistant&workspace_id=shared&scope_id=thread-b`,
+    ).then((res) => res.json());
+    expect(crossScope.knowledge[0].fact).toContain('Shared deployment memory');
+
+    const changes = await fetch(
+      `${base}/v1/changes?since=${encodeURIComponent(
+        since,
+      )}&scope_level=workspace&tenant_id=acme&system_id=assistant&workspace_id=shared&scope_id=thread-b`,
+    ).then((res) => res.json());
+    expect(changes.changes[0].fact).toContain('Shared deployment memory');
+  });
+
+  it('shares hosted workspace memory across systems inside a collaboration', async () => {
+    const base = await setup(13111);
+
+    await fetch(`${base}/v1/facts`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-memory-tenant': 'acme',
+        'x-memory-system': 'planner',
+        'x-memory-workspace': 'factory',
+        'x-memory-collaboration': 'incident-123',
+        'x-memory-scope': 'run-a',
+      },
+      body: JSON.stringify({
+        fact: 'Deployment rollback requires cache flush',
+        factType: 'reference',
+      }),
+    });
+
+    const crossScope = await fetch(
+      `${base}/v1/search/cross-scope?q=cache%20flush&scope_level=workspace&tenant_id=acme&system_id=executor&workspace_id=factory&collaboration_id=incident-123&scope_id=run-b`,
+    ).then((res) => res.json());
+
+    expect(crossScope.knowledge[0].fact).toContain('cache flush');
+  });
+
+  it('exposes inspection endpoints and reverification controls', async () => {
+    const base = await setup(13112);
+
+    const learned = await fetch(`${base}/v1/facts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fact: 'Primary deployment checklist lives in docs/runbooks/deploy.md',
+        factType: 'reference',
+      }),
+    }).then((res) => res.json());
+
+    const knowledgeList = await fetch(`${base}/v1/inspect/knowledge?limit=10`).then((res) => res.json());
+    expect(knowledgeList.items[0].id).toBe(learned.knowledgeId);
+
+    const knowledgeDetail = await fetch(
+      `${base}/v1/inspect/knowledge/${learned.knowledgeId}`,
+    ).then((res) => res.json());
+    expect(knowledgeDetail.knowledge.fact).toContain('deploy.md');
+    expect(Array.isArray(knowledgeDetail.evidence)).toBe(true);
+    expect(Array.isArray(knowledgeDetail.audits)).toBe(true);
+
+    const audits = await fetch(
+      `${base}/v1/inspect/audits?knowledge_id=${learned.knowledgeId}&limit=5`,
+    ).then((res) => res.json());
+    expect(Array.isArray(audits.audits)).toBe(true);
+
+    const monitor = await fetch(`${base}/v1/inspect/monitor`).then((res) => res.json());
+    expect(Object.hasOwn(monitor, 'monitor')).toBe(true);
+
+    const due = await fetch(`${base}/v1/inspect/reverification?limit=5`).then((res) => res.json());
+    expect(Array.isArray(due.due)).toBe(true);
+
+    const run = await fetch(`${base}/v1/reverification/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limit: 5 }),
+    }).then((res) => res.json());
+    expect(Array.isArray(run.reverifiedKnowledgeIds)).toBe(true);
+    expect(Array.isArray(run.demotedKnowledgeIds)).toBe(true);
+  });
+
   it('returns 404 for unknown routes', async () => {
     const base = await setup(13103);
     const res = await fetch(`${base}/v1/nonexistent`);

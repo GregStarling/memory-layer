@@ -49,8 +49,14 @@ const DOMAIN_GROUPS: DomainGroups = {
   theme: ['dark', 'light'],
   editor: ['vim', 'neovim', 'emacs', 'vscode', 'cursor'],
   language: ['typescript', 'javascript', 'python', 'rust', 'go', 'java'],
-  database: ['sqlite', 'postgres', 'postgresql', 'mysql'],
-  deployment: ['local', 'cloud', 'hosted', 'onprem', 'on-prem'],
+  database: ['sqlite', 'postgres', 'postgresql', 'mysql', 'mongodb', 'redis', 'dynamodb'],
+  deployment: ['local', 'cloud', 'hosted', 'onprem', 'on-prem', 'staging', 'production', 'deploy'],
+  framework: ['react', 'nextjs', 'next', 'vue', 'svelte', 'express', 'fastify', 'django', 'flask'],
+  testing: ['vitest', 'jest', 'pytest', 'playwright', 'cypress'],
+  packaging: ['npm', 'pnpm', 'yarn', 'docker', 'container'],
+  style: ['tailwind', 'eslint', 'prettier', 'biome'],
+  version_control: ['git', 'github', 'gitlab'],
+  os: ['linux', 'macos', 'windows', 'ubuntu'],
 };
 
 function uniqFacts(facts: ExtractedFact[]): ExtractedFact[] {
@@ -301,6 +307,91 @@ function extractMatches(
   return matches;
 }
 
+function countDomainMatches(
+  source: string,
+  domainGroups: DomainGroups,
+): Array<{ group: string; term: string; count: number }> {
+  const tokens = normalizeFactText(source)
+    .split(/[^a-z0-9]+/g)
+    .filter((token) => token.length > 0 && !STOP_WORDS.has(token));
+  const counts = new Map<string, number>();
+  tokens.forEach((token) => {
+    counts.set(token, (counts.get(token) ?? 0) + 1);
+  });
+
+  const matches: Array<{ group: string; term: string; count: number }> = [];
+  for (const [group, terms] of Object.entries(domainGroups)) {
+    for (const term of terms) {
+      const count = counts.get(term);
+      if (count) {
+        matches.push({ group, term, count });
+      }
+    }
+  }
+  return matches;
+}
+
+function extractImplicitPreferenceFacts(
+  source: string,
+  domainGroups: DomainGroups,
+): ExtractedFact[] {
+  const patterns = [
+    /\b(?:we|the team|the project|the system)\s+(?:went with|ended up using|settled on)\s+([^.?!;]+)/gi,
+    /\b([a-z0-9_-]+)\s+is better than\s+([a-z0-9_-]+)(?:\s+for\s+([^.?!;]+))?/gi,
+  ];
+  const facts: ExtractedFact[] = [];
+
+  for (const match of source.matchAll(patterns[0])) {
+    const value = normalizeFactValue(match[1]);
+    if (!value) continue;
+    facts.push({
+      fact: `The system prefers ${value}`,
+      factType: 'preference',
+      confidence: 'medium',
+      sourceText: match[0],
+      domainGroups,
+    });
+  }
+
+  for (const match of source.matchAll(patterns[1])) {
+    const preferred = normalizeFactValue(match[1]);
+    const compared = normalizeFactValue(match[2]);
+    if (!preferred || !compared) continue;
+    const context = match[3] ? ` for ${normalizeFactValue(match[3])}` : '';
+    facts.push({
+      fact: `The system prefers ${preferred} over ${compared}${context}`,
+      factType: 'preference',
+      confidence: 'medium',
+      sourceText: match[0],
+      domainGroups,
+    });
+  }
+
+  return facts;
+}
+
+function extractDomainFrequencyFacts(
+  source: string,
+  domainGroups: DomainGroups,
+): ExtractedFact[] {
+  const facts: ExtractedFact[] = [];
+  const seen = new Set<string>();
+  for (const match of countDomainMatches(source, domainGroups)) {
+    if (match.count < 3) continue;
+    const key = `${match.group}:${match.term}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    facts.push({
+      fact: `The system uses ${match.term}`,
+      factType: 'entity',
+      confidence: 'medium',
+      sourceText: match.term,
+      domainGroups,
+    });
+  }
+  return facts;
+}
+
 export function createCompositeExtractor(primary: Extractor, fallback: Extractor): Extractor {
   return async (summary, keyEntities, topicTags) => {
     const [primaryFacts, fallbackFacts] = await Promise.all([
@@ -311,10 +402,9 @@ export function createCompositeExtractor(primary: Extractor, fallback: Extractor
   };
 }
 
-export function createRegexExtractor(options?: { domainGroups?: DomainGroups }): Extractor {
-  const mergedDomainGroups = mergeDomainGroups(options?.domainGroups);
-  return async (summary, keyEntities) => {
-    const combined = summary.replace(/\n+/g, ' ');
+function createBaseRegexExtractor(mergedDomainGroups: DomainGroups): Extractor {
+  return async (summary, keyEntities, topicTags) => {
+    const combined = [summary, ...topicTags].join(' ').replace(/\n+/g, ' ');
     const facts: ExtractedFact[] = [
       ...extractMatches(
         combined,
@@ -324,19 +414,19 @@ export function createRegexExtractor(options?: { domainGroups?: DomainGroups }):
       ),
       ...extractMatches(
         combined,
-        /\b(?:the user |we )?(?:decided|chose|selected)\s+[^.?!;]+/gi,
+        /\b(?:the user |we )?(?:decided|chose|selected|switched from [^.?!;]+ to|after trying)\s+[^.?!;]+/gi,
         'decision',
         'high',
       ),
       ...extractMatches(
         combined,
-        /\b(?:the user |the system |the project |we )?(?:must not|should not|cannot|can't|must|requires?|avoid|never)\s+[^.?!;]+/gi,
+        /\b(?:the user |the system |the project |we )?(?:must not|should not|cannot|can't|must|requires?|avoid|never|failed when|broke with|didn't work)\s+[^.?!;]+/gi,
         'constraint',
         'high',
       ),
       ...extractMatches(
         combined,
-        /\b(?:the (?:system|project) )?(?:is|are|using|running|built with)\s+[^.?!;]+/gi,
+        /\b(?:the (?:system|project) )?(?:is|are|using|running|built with|set [^.?!;]+ to|configured [^.?!;]+ as)\s+[^.?!;]+/gi,
         'reference',
         'medium',
       ),
@@ -360,4 +450,32 @@ export function createRegexExtractor(options?: { domainGroups?: DomainGroups }):
       domainGroups: fact.domainGroups ?? mergedDomainGroups,
     }));
   };
+}
+
+export function createEnhancedRegexExtractor(options?: { domainGroups?: DomainGroups }): Extractor {
+  const mergedDomainGroups = mergeDomainGroups(options?.domainGroups);
+  const baseExtractor = createBaseRegexExtractor(mergedDomainGroups);
+  return async (summary, keyEntities, topicTags) => {
+    const baseFacts = await baseExtractor(summary, keyEntities, topicTags);
+    const combined = [summary, ...topicTags].join(' ').replace(/\n+/g, ' ');
+    const enhancedFacts = [
+      ...extractImplicitPreferenceFacts(combined, mergedDomainGroups),
+      ...extractDomainFrequencyFacts(combined, mergedDomainGroups),
+    ];
+
+    return uniqFacts([...baseFacts, ...enhancedFacts]).map((fact) => ({
+      ...fact,
+      domainGroups: fact.domainGroups ?? mergedDomainGroups,
+    }));
+  };
+}
+
+export function createRegexExtractor(options?: {
+  domainGroups?: DomainGroups;
+  legacy?: boolean;
+}): Extractor {
+  const mergedDomainGroups = mergeDomainGroups(options?.domainGroups);
+  return options?.legacy
+    ? createBaseRegexExtractor(mergedDomainGroups)
+    : createEnhancedRegexExtractor({ domainGroups: mergedDomainGroups });
 }

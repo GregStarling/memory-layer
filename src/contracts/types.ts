@@ -231,6 +231,9 @@ export interface KnowledgeMemory extends NormalizedMemoryScope {
   next_reverification_at: number | null;
   last_confirmed_at: number | null;
   confirmation_count: number;
+  source_system_id: string | null;
+  source_scope_id: string | null;
+  source_collaboration_id: string | null;
   source_working_memory_id: number | null;
   source_turn_ids: number[];
   successful_use_count: number;
@@ -270,6 +273,9 @@ export interface NewKnowledgeMemory extends MemoryScope {
   next_reverification_at?: number | null;
   last_confirmed_at?: number | null;
   confirmation_count?: number;
+  source_system_id?: string | null;
+  source_scope_id?: string | null;
+  source_collaboration_id?: string | null;
   source_working_memory_id?: number | null;
   source_turn_ids?: number[];
   successful_use_count?: number;

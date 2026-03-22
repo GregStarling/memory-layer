@@ -15,12 +15,16 @@ import {
 import type { StorageAdapter } from '../contracts/storage.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type {
+  CompactionLog,
+  ContextMonitor,
   FactConfidence,
   FactType,
   KnowledgeEvidence,
   KnowledgeMemory,
   KnowledgeMemoryAudit,
   KnowledgeTrustAssessment,
+  PaginationOptions,
+  PaginatedResult,
   SearchOptions,
   SearchResult,
   TimeRange,
@@ -113,6 +117,7 @@ export interface MemoryManager {
     level: ScopeLevel,
     options?: SearchOptions,
   ): Promise<{ knowledge: SearchResult<KnowledgeMemory>[] }>;
+  pollForChanges(since: Date, options?: { scopeLevel?: ScopeLevel }): Promise<KnowledgeMemory[]>;
   forceCompact(): Promise<CompactionResult | null>;
   learnFact(fact: string, factType: FactType, confidence?: FactConfidence): Promise<KnowledgeMemory>;
   trackWorkItem(
@@ -126,6 +131,11 @@ export interface MemoryManager {
     evidence: KnowledgeEvidence[];
     audits: KnowledgeMemoryAudit[];
   }>;
+  listKnowledge(options?: PaginationOptions): Promise<PaginatedResult<KnowledgeMemory>>;
+  getKnowledgeAudits(options?: { knowledgeId?: number; limit?: number }): Promise<KnowledgeMemoryAudit[]>;
+  getContextMonitor(): Promise<ContextMonitor | null>;
+  getRecentCompactionLogs(limit?: number): Promise<CompactionLog[]>;
+  getDueReverification(options?: { limit?: number }): Promise<KnowledgeMemory[]>;
   reverifyKnowledge(id: number): Promise<KnowledgeTrustAssessment>;
   runReverification(options?: { limit?: number }): Promise<{
     reverifiedKnowledgeIds: number[];
@@ -182,6 +192,26 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       },
     });
   };
+
+  function emitKnowledgeChange(
+    action: 'learned' | 'promoted' | 'reverified' | 'demoted' | 'retired',
+    knowledge: KnowledgeMemory,
+  ): void {
+    emitMemoryEvent('knowledge_change', knowledge, { logger: config.logger, onEvent }, 0, {
+      action,
+      knowledgeId: knowledge.id,
+      fact: knowledge.fact,
+      factType: knowledge.fact_type,
+      knowledgeState: knowledge.knowledge_state,
+      scope: {
+        tenant_id: knowledge.tenant_id,
+        system_id: knowledge.system_id,
+        workspace_id: knowledge.workspace_id,
+        collaboration_id: knowledge.collaboration_id,
+        scope_id: knowledge.scope_id,
+      },
+    });
+  }
 
   async function withFailurePolicy<T>(
     kind: 'summarizer' | 'extractor',
@@ -438,6 +468,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         () => [] as KnowledgeMemory[],
       );
       await maybeEmbedKnowledge(extracted);
+        extracted.forEach((knowledge) => emitKnowledgeChange('promoted', knowledge));
     }
 
     return result;
@@ -591,6 +622,14 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       };
     },
 
+    async pollForChanges(since, options) {
+      return asyncAdapter.getKnowledgeSince(
+        config.scope,
+        options?.scopeLevel ?? config.crossScopeLevel ?? 'scope',
+        Math.floor(since.valueOf() / 1000),
+      );
+    },
+
     async forceCompact() {
       if (deferredSoftCompaction) {
         config.logger?.info('memory.compaction.flushing_deferred');
@@ -632,6 +671,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         knowledgeMemoryId: knowledge.id,
         factType,
       });
+      emitKnowledgeChange('learned', knowledge);
       return knowledge;
     },
 
@@ -655,10 +695,45 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         return { knowledge: null, evidence: [], audits: [] };
       }
       const evidence = await asyncAdapter.listKnowledgeEvidenceForKnowledge(id);
-      const audits = (await asyncAdapter.getRecentKnowledgeMemoryAudits(config.scope, 50)).filter(
-        (audit) => audit.created_knowledge_id === id || audit.related_knowledge_id === id,
+      const audits = await asyncAdapter.getKnowledgeMemoryAuditsForKnowledge(
+        config.scope,
+        id,
+        50,
       );
       return { knowledge, evidence, audits };
+    },
+
+    async listKnowledge(options) {
+      return asyncAdapter.getActiveKnowledgeMemoryPaginated(config.scope, options);
+    },
+
+    async getKnowledgeAudits(options) {
+      if (options?.knowledgeId != null) {
+        return asyncAdapter.getKnowledgeMemoryAuditsForKnowledge(
+          config.scope,
+          options.knowledgeId,
+          options.limit ?? 20,
+        );
+      }
+      return asyncAdapter.getRecentKnowledgeMemoryAudits(config.scope, options?.limit ?? 20);
+    },
+
+    async getContextMonitor() {
+      return asyncAdapter.getContextMonitor(config.scope);
+    },
+
+    async getRecentCompactionLogs(limit) {
+      return asyncAdapter.getRecentCompactionLogs(config.scope, limit ?? 10);
+    },
+
+    async getDueReverification(options) {
+      const now = Math.floor(Date.now() / 1000);
+      const maintenancePolicy = resolveMaintenancePolicy(config.maintenancePolicy);
+      const activeKnowledge = await asyncAdapter.getActiveKnowledgeMemory(config.scope);
+      return getDueReverificationKnowledge(activeKnowledge, maintenancePolicy, now).slice(
+        0,
+        options?.limit ?? activeKnowledge.length,
+      );
     },
 
     async reverifyKnowledge(id) {
@@ -695,7 +770,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         },
         maintenancePolicy,
       );
-      await asyncAdapter.updateKnowledgeMemory(id, {
+      const updated = await asyncAdapter.updateKnowledgeMemory(id, {
         knowledge_state: assessment.state,
         knowledge_class:
           failureCount > successCount &&
@@ -730,6 +805,9 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         successful_use_count: knowledge.successful_use_count + successCount,
         failed_use_count: knowledge.failed_use_count + failureCount,
       });
+      if (updated) {
+        emitKnowledgeChange(assessment.state === 'trusted' ? 'reverified' : 'demoted', updated);
+      }
       return assessment;
     },
 
@@ -782,6 +860,14 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       report.demotedKnowledgeIds.push(...reverification.demotedKnowledgeIds);
       report.reverifiedKnowledgeIds = [...new Set(report.reverifiedKnowledgeIds)];
       report.demotedKnowledgeIds = [...new Set(report.demotedKnowledgeIds)];
+      for (const retiredId of report.retiredKnowledgeIds) {
+        const retired = await asyncAdapter.getKnowledgeMemoryById(retiredId);
+        if (retired) emitKnowledgeChange('retired', retired);
+      }
+      for (const demotedId of report.demotedKnowledgeIds) {
+        const demoted = await asyncAdapter.getKnowledgeMemoryById(demotedId);
+        if (demoted) emitKnowledgeChange('demoted', demoted);
+      }
       emitMemoryEvent('manager', config.scope, { logger: config.logger, onEvent }, 0, {
         action: 'run_maintenance',
         expiredWorkingMemoryCount: report.expiredWorkingMemoryIds.length,

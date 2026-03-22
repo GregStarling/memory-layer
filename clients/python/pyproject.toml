@@ -24,6 +24,18 @@ classifiers = [
 ]
 keywords = ["ai", "memory", "agent", "retrieval"]
 
+[project.optional-dependencies]
+dev = [
+    "build>=1.2.0,<2.0.0",
+    "pytest>=8.3.0,<9.0.0",
+    "pytest-asyncio>=0.24.0,<1.0.0",
+    "pytest-httpx>=0.35.0,<1.0.0",
+    "ruff>=0.7.0,<1.0.0",
+]
+
+[project.scripts]
+memory-layer-client = "memory_layer_client.cli:main"
+
 [project.urls]
 Repository = "https://github.com/your-org/memory-layer"
 Documentation = "https://github.com/your-org/memory-layer/tree/main/clients/python"

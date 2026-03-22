@@ -89,6 +89,8 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
       Promise.resolve(adapter.getActiveKnowledgeMemoryPaginated(scope, options)),
     getActiveKnowledgeCrossScope: (scope, level) =>
       Promise.resolve(adapter.getActiveKnowledgeCrossScope(scope, level)),
+    getKnowledgeSince: (scope, level, since) =>
+      Promise.resolve(adapter.getKnowledgeSince(scope, level, since)),
     getKnowledgeByTimeRange: (scope, range) =>
       Promise.resolve(adapter.getKnowledgeByTimeRange(scope, range)),
     searchKnowledge: (scope, query, options) =>
@@ -99,6 +101,8 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
       Promise.resolve(adapter.insertKnowledgeMemoryAudit(input)),
     getRecentKnowledgeMemoryAudits: (scope, limit) =>
       Promise.resolve(adapter.getRecentKnowledgeMemoryAudits(scope, limit)),
+    getKnowledgeMemoryAuditsForKnowledge: (scope, knowledgeId, limit) =>
+      Promise.resolve(adapter.getKnowledgeMemoryAuditsForKnowledge(scope, knowledgeId, limit)),
     updateKnowledgeMemory: (id, patch) => Promise.resolve(adapter.updateKnowledgeMemory(id, patch)),
     touchKnowledgeMemory: (id) => Promise.resolve(adapter.touchKnowledgeMemory(id)),
     retireKnowledgeMemory: (id, retiredAt) =>

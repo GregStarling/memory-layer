@@ -12,6 +12,7 @@ class MemoryScope:
     system_id: str
     scope_id: str
     workspace_id: Optional[str] = None
+    collaboration_id: Optional[str] = None
 
     def to_dict(self) -> dict[str, str]:
         data = {
@@ -21,7 +22,21 @@ class MemoryScope:
         }
         if self.workspace_id:
             data["workspace_id"] = self.workspace_id
+        if self.collaboration_id:
+            data["collaboration_id"] = self.collaboration_id
         return data
+
+    def to_headers(self) -> dict[str, str]:
+        headers = {
+            "x-memory-tenant": self.tenant_id,
+            "x-memory-system": self.system_id,
+            "x-memory-scope": self.scope_id,
+        }
+        if self.workspace_id:
+            headers["x-memory-workspace"] = self.workspace_id
+        if self.collaboration_id:
+            headers["x-memory-collaboration"] = self.collaboration_id
+        return headers
 
 
 @dataclass(slots=True)
@@ -82,6 +97,114 @@ class SearchResponse:
         return cls(
             turns=list(payload.get("turns", [])),
             knowledge=list(payload.get("knowledge", [])),
+        )
+
+
+@dataclass(slots=True)
+class KnowledgeListResponse:
+    items: list[dict[str, Any]]
+    has_more: bool
+    next_cursor: Optional[int]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "KnowledgeListResponse":
+        next_cursor = payload.get("nextCursor")
+        return cls(
+            items=list(payload.get("items", [])),
+            has_more=bool(payload.get("hasMore")),
+            next_cursor=int(next_cursor) if next_cursor is not None else None,
+        )
+
+
+@dataclass(slots=True)
+class KnowledgeInspectionResponse:
+    knowledge: Optional[dict[str, Any]]
+    evidence: list[dict[str, Any]]
+    audits: list[dict[str, Any]]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "KnowledgeInspectionResponse":
+        knowledge = payload.get("knowledge")
+        return cls(
+          knowledge=dict(knowledge) if isinstance(knowledge, dict) else None,
+          evidence=list(payload.get("evidence", [])),
+          audits=list(payload.get("audits", [])),
+        )
+
+
+@dataclass(slots=True)
+class AuditListResponse:
+    audits: list[dict[str, Any]]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "AuditListResponse":
+        return cls(audits=list(payload.get("audits", [])))
+
+
+@dataclass(slots=True)
+class MonitorResponse:
+    monitor: Optional[dict[str, Any]]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "MonitorResponse":
+        monitor = payload.get("monitor")
+        return cls(monitor=dict(monitor) if isinstance(monitor, dict) else None)
+
+
+@dataclass(slots=True)
+class CompactionLogListResponse:
+    logs: list[dict[str, Any]]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "CompactionLogListResponse":
+        return cls(logs=list(payload.get("logs", [])))
+
+
+@dataclass(slots=True)
+class ChangeListResponse:
+    changes: list[dict[str, Any]]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ChangeListResponse":
+        return cls(changes=list(payload.get("changes", [])))
+
+
+@dataclass(slots=True)
+class DueReverificationResponse:
+    due: list[dict[str, Any]]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "DueReverificationResponse":
+        return cls(due=list(payload.get("due", [])))
+
+
+@dataclass(slots=True)
+class ReverificationResponse:
+    reverified_knowledge_ids: list[int]
+    demoted_knowledge_ids: list[int]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ReverificationResponse":
+        return cls(
+            reverified_knowledge_ids=[int(item) for item in payload.get("reverifiedKnowledgeIds", [])],
+            demoted_knowledge_ids=[int(item) for item in payload.get("demotedKnowledgeIds", [])],
+        )
+
+
+@dataclass(slots=True)
+class TrustAssessmentResponse:
+    trust_score: float
+    state: str
+    decision: str
+    reasons: list[str]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "TrustAssessmentResponse":
+        return cls(
+            trust_score=float(payload["trust_score"]),
+            state=str(payload["state"]),
+            decision=str(payload["decision"]),
+            reasons=[str(item) for item in payload.get("reasons", [])],
         )
 
 

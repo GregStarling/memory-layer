@@ -8,9 +8,12 @@ import type {
   MonitorPolicy,
 } from '../contracts/policy.js';
 import type { StorageAdapter } from '../contracts/storage.js';
+import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import { createInMemoryAdapter } from '../adapters/memory/index.js';
 import { createSQLiteAdapter, createSQLiteAdapterWithEmbeddings } from '../adapters/sqlite/index.js';
 import { createLocalEmbeddingGenerator } from '../embeddings/local.js';
+import { createOpenAIEmbeddingGenerator } from '../embeddings/openai.js';
+import { createVoyageEmbeddingGenerator } from '../embeddings/voyage.js';
 import { createRegexExtractor, type Extractor } from './extractor.js';
 import {
   createMemoryManager,
@@ -73,6 +76,10 @@ export interface CreateMemoryOptions {
   crossScopeLevel?: MemoryManagerConfig['crossScopeLevel'];
   failurePolicy?: MemoryManagerConfig['failurePolicy'];
   tokenEstimator?: TokenEstimator;
+}
+
+export interface CreateMemoryAsyncOptions extends CreateMemoryOptions {
+  asyncAdapter: AsyncStorageAdapter;
 }
 
 interface QualityModeConfig {
@@ -152,13 +159,17 @@ function resolveQualityMode(options: CreateMemoryOptions): MemoryQualityMode {
   if (options.qualityMode) return options.qualityMode;
   switch (options.qualityTier) {
     case 'offline_default':
-      return 'fast_adoption';
+      return 'balanced_memory';
     case 'provider_backed':
       return 'high_fidelity_memory';
     case 'local_semantic':
     default:
       return 'balanced_memory';
   }
+}
+
+function hasProviderEmbeddingEnv(): boolean {
+  return Boolean(process.env.OPENAI_API_KEY || process.env.VOYAGE_API_KEY);
 }
 
 function resolveScope(scope?: string | MemoryScope): MemoryScope {
@@ -187,7 +198,13 @@ function resolveAdapter(
   qualityTier?: MemoryQualityTier,
 ): { adapter: StorageAdapter; embeddingAdapter?: EmbeddingAdapter } {
   if (!adapter || adapter === 'sqlite') {
-    if (!qualityTier || qualityTier === 'offline_default' || qualityTier === 'local_semantic') {
+    if (
+      !qualityTier ||
+      qualityTier === 'offline_default' ||
+      qualityTier === 'local_semantic' ||
+      qualityTier === 'provider_backed' ||
+      hasProviderEmbeddingEnv()
+    ) {
       const sqlite = createSQLiteAdapterWithEmbeddings(path, { logger, onEvent });
       return { adapter: sqlite, embeddingAdapter: sqlite.embeddings };
     }
@@ -248,6 +265,12 @@ function resolveEmbeddingGenerator(
   if (!embeddingAdapter) {
     return undefined;
   }
+  if (process.env.OPENAI_API_KEY) {
+    return createOpenAIEmbeddingGenerator();
+  }
+  if (process.env.VOYAGE_API_KEY) {
+    return createVoyageEmbeddingGenerator();
+  }
   if (embedding === 'local' || qualityTier === 'offline_default' || qualityTier === 'local_semantic') {
     return createLocalEmbeddingGenerator();
   }
@@ -255,17 +278,29 @@ function resolveEmbeddingGenerator(
 }
 
 export function createMemory(options: CreateMemoryOptions = {}): MemoryManager {
+  return createMemoryInternal(options);
+}
+
+export function createMemoryWithAsyncAdapter(options: CreateMemoryAsyncOptions): MemoryManager {
+  return createMemoryInternal(options);
+}
+
+function createMemoryInternal(
+  options: CreateMemoryOptions & { asyncAdapter?: AsyncStorageAdapter },
+): MemoryManager {
   const scope = resolveScope(options.scope);
   const preset = resolveMemoryManagerPreset(options.preset);
   const qualityMode = resolveQualityMode(options);
   const qualityConfig = QUALITY_MODE_CONFIG[qualityMode];
-  const resolvedAdapter = resolveAdapter(
-    options.adapter,
-    options.path ?? ':memory:',
-    options.logger,
-    options.onEvent,
-    options.qualityTier,
-  );
+  const resolvedAdapter = options.asyncAdapter
+    ? { adapter: undefined, embeddingAdapter: options.embeddingAdapter }
+    : resolveAdapter(
+        options.adapter,
+        options.path ?? ':memory:',
+        options.logger,
+        options.onEvent,
+        options.qualityTier,
+      );
   const summarizer = resolveSummarizer(options.summarizer, options.summarizerOptions);
   const extractor = resolveExtractor(options.extractor, options.extractorOptions);
   const embeddingAdapter = options.embeddingAdapter ?? resolvedAdapter.embeddingAdapter;
@@ -276,7 +311,9 @@ export function createMemory(options: CreateMemoryOptions = {}): MemoryManager {
   );
 
   return createMemoryManager({
-    adapter: resolvedAdapter.adapter,
+    ...(options.asyncAdapter
+      ? { asyncAdapter: options.asyncAdapter }
+      : { adapter: resolvedAdapter.adapter }),
     scope,
     sessionId: options.sessionId ?? createSessionId(scope),
     summarizer,

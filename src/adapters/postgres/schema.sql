@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS turns (
   tenant_id TEXT NOT NULL,
   system_id TEXT NOT NULL,
   workspace_id TEXT NOT NULL DEFAULT '',
+  collaboration_id TEXT NOT NULL DEFAULT '',
   scope_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
   actor TEXT NOT NULL DEFAULT 'user',
@@ -23,7 +24,7 @@ CREATE TABLE IF NOT EXISTS turns (
   created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
 );
 
-CREATE INDEX IF NOT EXISTS idx_turns_scope ON turns (tenant_id, system_id, workspace_id, scope_id);
+CREATE INDEX IF NOT EXISTS idx_turns_scope ON turns (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns (session_id);
 CREATE INDEX IF NOT EXISTS idx_turns_status ON turns (status);
 CREATE INDEX IF NOT EXISTS idx_turns_created ON turns (created_at);
@@ -33,6 +34,7 @@ CREATE TABLE IF NOT EXISTS working_memory (
   tenant_id TEXT NOT NULL,
   system_id TEXT NOT NULL,
   workspace_id TEXT NOT NULL DEFAULT '',
+  collaboration_id TEXT NOT NULL DEFAULT '',
   scope_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
   summary TEXT NOT NULL,
@@ -48,7 +50,7 @@ CREATE TABLE IF NOT EXISTS working_memory (
   created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
 );
 
-CREATE INDEX IF NOT EXISTS idx_wm_scope ON working_memory (tenant_id, system_id, workspace_id, scope_id);
+CREATE INDEX IF NOT EXISTS idx_wm_scope ON working_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
 CREATE INDEX IF NOT EXISTS idx_wm_session ON working_memory (session_id);
 CREATE INDEX IF NOT EXISTS idx_wm_status ON working_memory (status);
 
@@ -57,6 +59,7 @@ CREATE TABLE IF NOT EXISTS knowledge_memory (
   tenant_id TEXT NOT NULL,
   system_id TEXT NOT NULL,
   workspace_id TEXT NOT NULL DEFAULT '',
+  collaboration_id TEXT NOT NULL DEFAULT '',
   scope_id TEXT NOT NULL,
   fact TEXT NOT NULL,
   fact_type TEXT NOT NULL CHECK (fact_type IN ('preference', 'entity', 'decision', 'constraint', 'reference')),
@@ -68,6 +71,9 @@ CREATE TABLE IF NOT EXISTS knowledge_memory (
   is_negated BOOLEAN NOT NULL DEFAULT FALSE,
   source TEXT NOT NULL CHECK (source IN ('user_stated', 'promoted_from_working', 'manual')),
   confidence TEXT NOT NULL DEFAULT 'medium' CHECK (confidence IN ('high', 'medium')),
+  source_system_id TEXT,
+  source_scope_id TEXT,
+  source_collaboration_id TEXT,
   source_working_memory_id INTEGER,
   superseded_by_id INTEGER,
   retired_at INTEGER,
@@ -76,7 +82,7 @@ CREATE TABLE IF NOT EXISTS knowledge_memory (
   created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
 );
 
-CREATE INDEX IF NOT EXISTS idx_km_scope ON knowledge_memory (tenant_id, system_id, workspace_id, scope_id);
+CREATE INDEX IF NOT EXISTS idx_km_scope ON knowledge_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
 CREATE INDEX IF NOT EXISTS idx_km_active ON knowledge_memory (superseded_by_id, retired_at);
 CREATE INDEX IF NOT EXISTS idx_km_fact_type ON knowledge_memory (fact_type);
 CREATE INDEX IF NOT EXISTS idx_km_slot_key ON knowledge_memory (slot_key);
@@ -104,6 +110,7 @@ CREATE TABLE IF NOT EXISTS knowledge_memory_audit (
   tenant_id TEXT NOT NULL,
   system_id TEXT NOT NULL,
   workspace_id TEXT NOT NULL DEFAULT '',
+  collaboration_id TEXT NOT NULL DEFAULT '',
   scope_id TEXT NOT NULL,
   working_memory_id INTEGER NOT NULL,
   fact TEXT NOT NULL,
@@ -123,13 +130,14 @@ CREATE TABLE IF NOT EXISTS knowledge_memory_audit (
   created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
 );
 
-CREATE INDEX IF NOT EXISTS idx_kma_scope ON knowledge_memory_audit (tenant_id, system_id, workspace_id, scope_id);
+CREATE INDEX IF NOT EXISTS idx_kma_scope ON knowledge_memory_audit (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
 
 CREATE TABLE IF NOT EXISTS work_items (
   id SERIAL PRIMARY KEY,
   tenant_id TEXT NOT NULL,
   system_id TEXT NOT NULL,
   workspace_id TEXT NOT NULL DEFAULT '',
+  collaboration_id TEXT NOT NULL DEFAULT '',
   scope_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
   title TEXT NOT NULL,
@@ -140,13 +148,14 @@ CREATE TABLE IF NOT EXISTS work_items (
   updated_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
 );
 
-CREATE INDEX IF NOT EXISTS idx_wi_scope ON work_items (tenant_id, system_id, workspace_id, scope_id);
+CREATE INDEX IF NOT EXISTS idx_wi_scope ON work_items (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
 
 CREATE TABLE IF NOT EXISTS context_monitor (
   id SERIAL PRIMARY KEY,
   tenant_id TEXT NOT NULL,
   system_id TEXT NOT NULL,
   workspace_id TEXT NOT NULL DEFAULT '',
+  collaboration_id TEXT NOT NULL DEFAULT '',
   scope_id TEXT NOT NULL,
   compaction_state TEXT NOT NULL DEFAULT 'idle',
   active_turn_count INTEGER NOT NULL DEFAULT 0,
@@ -154,7 +163,7 @@ CREATE TABLE IF NOT EXISTS context_monitor (
   compaction_score REAL NOT NULL DEFAULT 0,
   last_compaction_at INTEGER,
   updated_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER),
-  UNIQUE (tenant_id, system_id, workspace_id, scope_id)
+  UNIQUE (tenant_id, system_id, workspace_id, collaboration_id, scope_id)
 );
 
 CREATE TABLE IF NOT EXISTS compaction_log (
@@ -162,6 +171,7 @@ CREATE TABLE IF NOT EXISTS compaction_log (
   tenant_id TEXT NOT NULL,
   system_id TEXT NOT NULL,
   workspace_id TEXT NOT NULL DEFAULT '',
+  collaboration_id TEXT NOT NULL DEFAULT '',
   scope_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
   trigger_type TEXT NOT NULL,
@@ -177,7 +187,7 @@ CREATE TABLE IF NOT EXISTS compaction_log (
   created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
 );
 
-CREATE INDEX IF NOT EXISTS idx_cl_scope ON compaction_log (tenant_id, system_id, workspace_id, scope_id);
+CREATE INDEX IF NOT EXISTS idx_cl_scope ON compaction_log (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
 
 -- pgvector extension for semantic search (optional)
 -- Run: CREATE EXTENSION IF NOT EXISTS vector;
@@ -187,12 +197,13 @@ CREATE TABLE IF NOT EXISTS knowledge_embeddings (
   tenant_id TEXT NOT NULL,
   system_id TEXT NOT NULL,
   workspace_id TEXT NOT NULL DEFAULT '',
+  collaboration_id TEXT NOT NULL DEFAULT '',
   scope_id TEXT NOT NULL,
   embedding vector,
   created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
 );
 
-CREATE INDEX IF NOT EXISTS idx_ke_scope ON knowledge_embeddings (tenant_id, system_id, workspace_id, scope_id);
+CREATE INDEX IF NOT EXISTS idx_ke_scope ON knowledge_embeddings (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
 
 -- Full-text search on turns
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS search_vector TSVECTOR;

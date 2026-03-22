@@ -18,6 +18,7 @@ export type MemoryEventType =
   | 'compaction'
   | 'promotion'
   | 'extraction'
+  | 'knowledge_change'
   | 'search'
   | 'context_assembly'
   | 'semantic_search'
