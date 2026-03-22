@@ -29,6 +29,8 @@ export interface BeforeModelCallInput {
   relevanceQuery?: string;
   format?: FormatOptions;
   asOf?: number;
+  includeProvisionalKnowledge?: boolean;
+  includeDisputedKnowledge?: boolean;
 }
 
 export interface BeforeModelCallResult {
@@ -104,19 +106,31 @@ export function createMemoryRuntime(
 
     async beforeModelCall(input) {
       const resolved = resolveRuntimeInput(input);
+      const resolvedFormat = {
+        ...(options.format ?? {}),
+        ...(resolved.format ?? {}),
+        includeProvisionalKnowledge:
+          resolved.includeProvisionalKnowledge ??
+          resolved.format?.includeProvisionalKnowledge ??
+          options.format?.includeProvisionalKnowledge,
+        includeDisputedKnowledge:
+          resolved.includeDisputedKnowledge ??
+          resolved.format?.includeDisputedKnowledge ??
+          options.format?.includeDisputedKnowledge,
+      };
       const [bootstrapPayload, context] = await Promise.all([
-        getBootstrapPayload(resolved.relevanceQuery ?? resolved.input, resolved.format),
+        getBootstrapPayload(resolved.relevanceQuery ?? resolved.input, resolvedFormat),
         resolved.asOf != null
           ? manager.getContextAt(resolved.asOf, resolved.relevanceQuery ?? resolved.input)
           : manager.getContext(resolved.relevanceQuery ?? resolved.input),
       ]);
-      const contextPrompt = formatContextForPrompt(context, resolved.format ?? options.format);
+      const contextPrompt = formatContextForPrompt(context, resolvedFormat);
       return {
         bootstrap: bootstrapPayload.bootstrap,
         context,
         bootstrapPrompt: bootstrapPayload.bootstrapPrompt,
         prompt: [bootstrapPayload.bootstrapPrompt, contextPrompt].join('\n\n'),
-        messages: formatContextAsMessages(context, resolved.format ?? options.format),
+        messages: formatContextAsMessages(context, resolvedFormat),
       };
     },
 

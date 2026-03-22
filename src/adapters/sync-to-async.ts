@@ -67,6 +67,21 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
     insertKnowledgeMemory: (input) => Promise.resolve(adapter.insertKnowledgeMemory(input)),
     insertKnowledgeMemories: (inputs) =>
       Promise.resolve(adapter.insertKnowledgeMemories(inputs)),
+    insertKnowledgeCandidate: (input) => Promise.resolve(adapter.insertKnowledgeCandidate(input)),
+    insertKnowledgeCandidates: (inputs) =>
+      Promise.resolve(adapter.insertKnowledgeCandidates(inputs)),
+    getKnowledgeCandidateById: (id) => Promise.resolve(adapter.getKnowledgeCandidateById(id)),
+    listKnowledgeCandidates: (scope, options) =>
+      Promise.resolve(adapter.listKnowledgeCandidates(scope, options)),
+    insertKnowledgeEvidence: (input) => Promise.resolve(adapter.insertKnowledgeEvidence(input)),
+    insertKnowledgeEvidenceBatch: (inputs) =>
+      Promise.resolve(adapter.insertKnowledgeEvidenceBatch(inputs)),
+    listKnowledgeEvidenceForKnowledge: (knowledgeId) =>
+      Promise.resolve(adapter.listKnowledgeEvidenceForKnowledge(knowledgeId)),
+    listKnowledgeEvidenceForCandidate: (candidateId) =>
+      Promise.resolve(adapter.listKnowledgeEvidenceForCandidate(candidateId)),
+    promoteKnowledgeCandidate: (candidateId, input) =>
+      Promise.resolve(adapter.promoteKnowledgeCandidate(candidateId, input)),
     getKnowledgeMemoryById: (id) => Promise.resolve(adapter.getKnowledgeMemoryById(id)),
     getActiveKnowledgeMemory: (scope) =>
       Promise.resolve(adapter.getActiveKnowledgeMemory(scope)),
@@ -84,6 +99,7 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
       Promise.resolve(adapter.insertKnowledgeMemoryAudit(input)),
     getRecentKnowledgeMemoryAudits: (scope, limit) =>
       Promise.resolve(adapter.getRecentKnowledgeMemoryAudits(scope, limit)),
+    updateKnowledgeMemory: (id, patch) => Promise.resolve(adapter.updateKnowledgeMemory(id, patch)),
     touchKnowledgeMemory: (id) => Promise.resolve(adapter.touchKnowledgeMemory(id)),
     retireKnowledgeMemory: (id, retiredAt) =>
       Promise.resolve(adapter.retireKnowledgeMemory(id, retiredAt)),

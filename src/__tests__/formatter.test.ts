@@ -17,6 +17,8 @@ function makeContext(): MemoryContext {
       scope_id: 'thread-1',
       fact: 'The project uses sqlite',
       fact_type: 'reference' as const,
+      knowledge_state: 'trusted' as const,
+      knowledge_class: 'project_fact' as const,
       fact_subject: 'project',
       fact_attribute: 'reference',
       fact_value: 'sqlite',
@@ -26,11 +28,22 @@ function makeContext(): MemoryContext {
       source: 'manual' as const,
       confidence: 'high' as const,
       confidence_score: 0.92,
+      grounding_strength: 'strong' as const,
+      evidence_count: 2,
+      trust_score: 0.92,
       verification_status: 'verified' as const,
       verification_notes: 'Confirmed by repeated usage',
+      last_verified_at: 1,
       source_working_memory_id: null,
       source_turn_ids: [1, 2],
+      successful_use_count: 0,
+      failed_use_count: 0,
+      disputed_at: null,
+      dispute_reason: null,
+      contradiction_score: 0,
+      superseded_at: null,
       superseded_by_id: null,
+      retired_at: null,
       created_at: 1,
       last_accessed_at: 1,
       access_count: 1,
@@ -42,6 +55,10 @@ function makeContext(): MemoryContext {
     mode: 'coding',
     activeTurns: [],
     workingMemory: null,
+    trustedCoreMemory: relevantKnowledge,
+    taskRelevantKnowledge: [],
+    provisionalKnowledge: [],
+    disputedKnowledge: [],
     relevantKnowledge,
     durableKnowledge: relevantKnowledge,
     recentSummaries: [],
@@ -57,7 +74,7 @@ function makeContext(): MemoryContext {
 describe('formatter helpers', () => {
   it('formats context into prompt text', () => {
     const text = formatContextForPrompt(makeContext());
-    expect(text).toContain('Current Objective');
+    expect(text).toContain('Trusted Core Memory');
     expect(text).toContain('Ship the memory layer');
   });
 
@@ -84,5 +101,6 @@ describe('formatter helpers', () => {
     const text = formatContextForPrompt(makeContext(), { includeTrustMetadata: true });
     expect(text).toContain('confidence=high');
     expect(text).toContain('status=verified');
+    expect(text).toContain('state=trusted');
   });
 });

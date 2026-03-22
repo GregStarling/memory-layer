@@ -9,9 +9,13 @@ import type { StorageAdapter } from '../../contracts/storage.js';
 import type {
   CompactionLog,
   ContextMonitor,
+  KnowledgeCandidate,
+  KnowledgeEvidence,
   KnowledgeMemory,
   KnowledgeMemoryAudit,
   NewCompactionLog,
+  NewKnowledgeCandidate,
+  NewKnowledgeEvidence,
   NewKnowledgeMemoryAudit,
   NewKnowledgeMemory,
   NewWorkItem,
@@ -28,11 +32,14 @@ import type {
 } from '../../contracts/types.js';
 import { estimateTokens } from '../../core/tokens.js';
 import { emitMemoryEvent, type TelemetryOptions } from '../../core/telemetry.js';
+import { matchesKnowledgeSearchOptions } from '../../core/retrieval.js';
 import {
   assertArchiveInput,
   nowSeconds,
   validateContextMonitorUpsert,
   validateNewCompactionLog,
+  validateNewKnowledgeCandidate,
+  validateNewKnowledgeEvidence,
   validateNewKnowledgeMemoryAudit,
   validateNewKnowledgeMemory,
   validateNewWorkItem,
@@ -43,6 +50,8 @@ import {
 import {
   rowToCompactionLog,
   rowToContextMonitor,
+  rowToKnowledgeCandidate,
+  rowToKnowledgeEvidence,
   rowToKnowledgeMemory,
   rowToKnowledgeMemoryAudit,
   rowToTurn,
@@ -51,6 +60,8 @@ import {
   serializeNumberArray,
   serializeStringArray,
   type CompactionLogRow,
+  type KnowledgeCandidateRow,
+  type KnowledgeEvidenceRow,
   type KnowledgeMemoryAuditRow,
   type KnowledgeMemoryRow,
   type WorkingMemoryRow,
@@ -103,10 +114,44 @@ function normalizeRank(rawRank: number | null): number {
   return 1 / (1 + safe);
 }
 
+function tokenizeSearch(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .filter((token) => token.length > 0);
+}
+
+function scoreSearchText(query: string, text: string): number {
+  const queryTokens = new Set(tokenizeSearch(query));
+  const textTokens = new Set(tokenizeSearch(text));
+  if (queryTokens.size === 0 || textTokens.size === 0) return 0;
+  let matches = 0;
+  for (const token of queryTokens) {
+    if (textTokens.has(token)) matches += 1;
+  }
+  if (matches === 0) return 0;
+  return matches / queryTokens.size + (text.toLowerCase().includes(query.toLowerCase()) ? 0.25 : 0);
+}
+
+function toSafeFtsQuery(query: string): string {
+  return query
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .filter((token) => token.length > 0)
+    .join(' ');
+}
+
 function resolveSearchOptions(options?: SearchOptions): Required<SearchOptions> {
   return {
     limit: options?.limit ?? 10,
     activeOnly: options?.activeOnly ?? true,
+    includeProvisional: options?.includeProvisional ?? false,
+    includeDisputed: options?.includeDisputed ?? false,
+    minimumTrustScore: options?.minimumTrustScore ?? 0,
+    knowledgeStates: options?.knowledgeStates ?? [],
+    knowledgeClasses: options?.knowledgeClasses ?? [],
+    preferLocalTrusted: options?.preferLocalTrusted ?? false,
+    preferLineageMemory: options?.preferLineageMemory ?? false,
   };
 }
 
@@ -173,6 +218,13 @@ function createAdapterFromDatabase(
     return row ? rowToKnowledgeMemory(row) : null;
   }
 
+  function getKnowledgeCandidateById(id: number): KnowledgeCandidate | null {
+    const row = db
+      .prepare('SELECT * FROM knowledge_candidate WHERE id = ?')
+      .get(id) as KnowledgeCandidateRow | undefined;
+    return row ? rowToKnowledgeCandidate(row) : null;
+  }
+
   function getContextMonitor(scope: Parameters<StorageAdapter['getContextMonitor']>[0]): ContextMonitor | null {
     const row = db
       .prepare(`SELECT * FROM context_monitor WHERE ${SCOPE_WHERE}`)
@@ -235,11 +287,14 @@ function createAdapterFromDatabase(
     const result = db
       .prepare(
         `INSERT INTO knowledge_memory
-          (tenant_id, system_id, workspace_id, scope_id, fact, fact_type, fact_subject,
-           fact_attribute, fact_value, normalized_fact, slot_key, is_negated, source, confidence,
-           confidence_score, verification_status, verification_notes, source_working_memory_id,
-           source_turn_ids, retired_at, created_at, last_accessed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (tenant_id, system_id, workspace_id, scope_id, fact, fact_type, knowledge_state,
+           knowledge_class, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key,
+           is_negated, source, confidence, confidence_score, grounding_strength, evidence_count,
+           trust_score, verification_status, verification_notes, last_verified_at,
+           next_reverification_at, last_confirmed_at, confirmation_count,
+           source_working_memory_id, source_turn_ids, successful_use_count, failed_use_count,
+           disputed_at, dispute_reason, contradiction_score, superseded_at, retired_at, created_at, last_accessed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         scope.tenant_id,
@@ -248,6 +303,8 @@ function createAdapterFromDatabase(
         scope.scope_id,
         input.fact,
         input.fact_type,
+        input.knowledge_state ?? 'trusted',
+        input.knowledge_class ?? 'project_fact',
         input.fact_subject ?? null,
         input.fact_attribute ?? null,
         input.fact_value ?? null,
@@ -257,10 +314,23 @@ function createAdapterFromDatabase(
         input.source,
         input.confidence,
         input.confidence_score ?? 0.5,
+        input.grounding_strength ?? 'moderate',
+        input.evidence_count ?? Math.max(1, (input.source_turn_ids ?? []).length),
+        input.trust_score ?? (input.confidence_score ?? 0.5),
         input.verification_status ?? 'unverified',
         input.verification_notes ?? null,
+        input.last_verified_at ?? null,
+        input.next_reverification_at ?? null,
+        input.last_confirmed_at ?? null,
+        input.confirmation_count ?? 0,
         input.source_working_memory_id ?? null,
         serializeNumberArray(input.source_turn_ids ?? []),
+        input.successful_use_count ?? 0,
+        input.failed_use_count ?? 0,
+        input.disputed_at ?? null,
+        input.dispute_reason ?? null,
+        input.contradiction_score ?? 0,
+        input.superseded_at ?? null,
         input.retired_at ?? null,
         createdAt,
         createdAt,
@@ -494,6 +564,128 @@ function createAdapterFromDatabase(
       return db.transaction(() => inputs.map((input) => insertValidatedKnowledgeMemory(input)))();
     },
 
+    insertKnowledgeCandidate(input): KnowledgeCandidate {
+      const scope = validateNewKnowledgeCandidate(input);
+      const createdAt = input.created_at ?? nowSeconds();
+      const result = db
+        .prepare(
+          `INSERT INTO knowledge_candidate
+            (tenant_id, system_id, workspace_id, scope_id, working_memory_id, fact, fact_type,
+             knowledge_class, normalized_fact, slot_key, confidence, source_summary, source_turns,
+             grounding_strength, evidence_count, trust_score, state, promoted_knowledge_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          scope.tenant_id,
+          scope.system_id,
+          scope.workspace_id,
+          scope.scope_id,
+          input.working_memory_id,
+          input.fact,
+          input.fact_type,
+          input.knowledge_class,
+          input.normalized_fact,
+          input.slot_key ?? null,
+          input.confidence,
+          input.source_summary ? 1 : 0,
+          input.source_turns === false ? 0 : 1,
+          input.grounding_strength ?? 'weak',
+          input.evidence_count ?? 0,
+          input.trust_score ?? 0,
+          input.state ?? 'candidate',
+          input.promoted_knowledge_id ?? null,
+          createdAt,
+        );
+      return getKnowledgeCandidateById(Number(result.lastInsertRowid))!;
+    },
+
+    insertKnowledgeCandidates(inputs): KnowledgeCandidate[] {
+      return db.transaction(() => inputs.map((input) => this.insertKnowledgeCandidate(input)))();
+    },
+
+    getKnowledgeCandidateById,
+
+    listKnowledgeCandidates(scope, options): KnowledgeCandidate[] {
+      const rows = db
+        .prepare(
+          `SELECT * FROM knowledge_candidate
+           WHERE ${SCOPE_WHERE}
+           ORDER BY created_at DESC, id DESC`,
+        )
+        .all(...scopeValues(scope)) as KnowledgeCandidateRow[];
+      return rows
+        .map(rowToKnowledgeCandidate)
+        .filter((item) => !options?.state || options.state.includes(item.state));
+    },
+
+    insertKnowledgeEvidence(input): KnowledgeEvidence {
+      const scope = validateNewKnowledgeEvidence(input);
+      const createdAt = input.created_at ?? nowSeconds();
+      const result = db
+        .prepare(
+          `INSERT INTO knowledge_evidence
+            (tenant_id, system_id, workspace_id, scope_id, knowledge_memory_id, knowledge_candidate_id,
+             working_memory_id, turn_id, source_type, support_polarity, speaker_role, actor, excerpt,
+             start_offset, end_offset, is_explicit, explicitness_score, outcome, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          scope.tenant_id,
+          scope.system_id,
+          scope.workspace_id,
+          scope.scope_id,
+          input.knowledge_memory_id ?? null,
+          input.knowledge_candidate_id ?? null,
+          input.working_memory_id ?? null,
+          input.turn_id ?? null,
+          input.source_type,
+          input.support_polarity,
+          input.speaker_role ?? null,
+          input.actor ?? null,
+          input.excerpt,
+          input.start_offset ?? null,
+          input.end_offset ?? null,
+          input.is_explicit ? 1 : 0,
+          input.explicitness_score ?? 0,
+          input.outcome ?? null,
+          createdAt,
+        );
+      const row = db
+        .prepare('SELECT * FROM knowledge_evidence WHERE id = ?')
+        .get(Number(result.lastInsertRowid)) as KnowledgeEvidenceRow | undefined;
+      return rowToKnowledgeEvidence(row!);
+    },
+
+    insertKnowledgeEvidenceBatch(inputs): KnowledgeEvidence[] {
+      return db.transaction(() => inputs.map((input) => this.insertKnowledgeEvidence(input)))();
+    },
+
+    listKnowledgeEvidenceForKnowledge(knowledgeId): KnowledgeEvidence[] {
+      const rows = db
+        .prepare(
+          'SELECT * FROM knowledge_evidence WHERE knowledge_memory_id = ? ORDER BY created_at DESC, id DESC',
+        )
+        .all(knowledgeId) as KnowledgeEvidenceRow[];
+      return rows.map(rowToKnowledgeEvidence);
+    },
+
+    listKnowledgeEvidenceForCandidate(candidateId): KnowledgeEvidence[] {
+      const rows = db
+        .prepare(
+          'SELECT * FROM knowledge_evidence WHERE knowledge_candidate_id = ? ORDER BY created_at DESC, id DESC',
+        )
+        .all(candidateId) as KnowledgeEvidenceRow[];
+      return rows.map(rowToKnowledgeEvidence);
+    },
+
+    promoteKnowledgeCandidate(candidateId, input): KnowledgeMemory {
+      const knowledge = insertValidatedKnowledgeMemory(input);
+      db.prepare(
+        'UPDATE knowledge_candidate SET promoted_knowledge_id = ?, state = ? WHERE id = ?',
+      ).run(knowledge.id, 'provisional', candidateId);
+      return knowledge;
+    },
+
     getKnowledgeMemoryById,
 
     getActiveKnowledgeMemory(scope): KnowledgeMemory[] {
@@ -559,22 +751,59 @@ function createAdapterFromDatabase(
       const startedAt = Date.now();
       const resolved = resolveSearchOptions(options);
       try {
-        const rows = db
-          .prepare(
-            `SELECT knowledge_memory.*, bm25(knowledge_memory_fts) AS raw_rank
-             FROM knowledge_memory_fts
-             JOIN knowledge_memory ON knowledge_memory_fts.rowid = knowledge_memory.id
-             WHERE knowledge_memory_fts MATCH ?
-               AND ${SCOPE_WHERE}
-               AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))
-             ORDER BY bm25(knowledge_memory_fts)
-             LIMIT ?`,
-          )
-          .all(query, ...scopeValues(scope), resolved.activeOnly ? 1 : 0, resolved.limit) as RankedKnowledgeRow[];
-        const results = rows.map((row) => ({
-          item: rowToKnowledgeMemory(row),
-          rank: normalizeRank(row.raw_rank),
-        }));
+        const statement = db.prepare(
+          `SELECT knowledge_memory.*, bm25(knowledge_memory_fts) AS raw_rank
+           FROM knowledge_memory_fts
+           JOIN knowledge_memory ON knowledge_memory_fts.rowid = knowledge_memory.id
+           WHERE knowledge_memory_fts MATCH ?
+             AND ${SCOPE_WHERE}
+             AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))
+           ORDER BY bm25(knowledge_memory_fts)
+           LIMIT ?`,
+        );
+        let rows = statement.all(
+          query,
+          ...scopeValues(scope),
+          resolved.activeOnly ? 1 : 0,
+          resolved.limit,
+        ) as RankedKnowledgeRow[];
+        const safeQuery = toSafeFtsQuery(query);
+        if (rows.length === 0 && safeQuery.length > 0 && safeQuery !== query && !/["']/.test(query)) {
+          rows = statement.all(
+            safeQuery,
+            ...scopeValues(scope),
+            resolved.activeOnly ? 1 : 0,
+            resolved.limit,
+          ) as RankedKnowledgeRow[];
+        }
+        let results = rows
+          .map((row) => ({
+            item: rowToKnowledgeMemory(row),
+            rank: normalizeRank(row.raw_rank),
+          }))
+          .filter((result) => matchesKnowledgeSearchOptions(result.item, resolved))
+          .slice(0, resolved.limit);
+        if (results.length === 0 && !/["']/.test(query)) {
+          const fallbackRows = db
+            .prepare(
+              `SELECT knowledge_memory.*
+               FROM knowledge_memory
+               WHERE ${SCOPE_WHERE}
+                 AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))`,
+            )
+            .all(...scopeValues(scope), resolved.activeOnly ? 1 : 0) as KnowledgeMemoryRow[];
+          results = fallbackRows
+            .map((row) => {
+              const item = rowToKnowledgeMemory(row);
+              return {
+                item,
+                rank: scoreSearchText(query, item.fact),
+              };
+            })
+            .filter((result) => result.rank > 0 && matchesKnowledgeSearchOptions(result.item, resolved))
+            .sort((a, b) => b.rank - a.rank || b.item.last_accessed_at - a.item.last_accessed_at)
+            .slice(0, resolved.limit);
+        }
         emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
           entity: 'knowledge',
           query,
@@ -582,6 +811,34 @@ function createAdapterFromDatabase(
         });
         return results;
       } catch {
+        if (!/["']/.test(query)) {
+          const fallbackRows = db
+            .prepare(
+              `SELECT knowledge_memory.*
+               FROM knowledge_memory
+               WHERE ${SCOPE_WHERE}
+                 AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))`,
+            )
+            .all(...scopeValues(scope), resolved.activeOnly ? 1 : 0) as KnowledgeMemoryRow[];
+          const fallbackResults = fallbackRows
+            .map((row) => {
+              const item = rowToKnowledgeMemory(row);
+              return {
+                item,
+                rank: scoreSearchText(query, item.fact),
+              };
+            })
+            .filter((result) => result.rank > 0 && matchesKnowledgeSearchOptions(result.item, resolved))
+            .sort((a, b) => b.rank - a.rank || b.item.last_accessed_at - a.item.last_accessed_at)
+            .slice(0, resolved.limit);
+          emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
+            entity: 'knowledge',
+            query,
+            resultCount: fallbackResults.length,
+            fallbackQuery: true,
+          });
+          return fallbackResults;
+        }
         emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
           entity: 'knowledge',
           query,
@@ -596,27 +853,59 @@ function createAdapterFromDatabase(
       const startedAt = Date.now();
       const resolved = resolveSearchOptions(options);
       try {
-        const rows = db
-          .prepare(
-            `SELECT knowledge_memory.*, bm25(knowledge_memory_fts) AS raw_rank
-             FROM knowledge_memory_fts
-             JOIN knowledge_memory ON knowledge_memory_fts.rowid = knowledge_memory.id
-             WHERE knowledge_memory_fts MATCH ?
-               AND ${scopeWhereForLevel(level)}
-               AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))
-             ORDER BY bm25(knowledge_memory_fts)
-             LIMIT ?`,
-          )
-          .all(
-            query,
+        const statement = db.prepare(
+          `SELECT knowledge_memory.*, bm25(knowledge_memory_fts) AS raw_rank
+           FROM knowledge_memory_fts
+           JOIN knowledge_memory ON knowledge_memory_fts.rowid = knowledge_memory.id
+           WHERE knowledge_memory_fts MATCH ?
+             AND ${scopeWhereForLevel(level)}
+             AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))
+           ORDER BY bm25(knowledge_memory_fts)
+           LIMIT ?`,
+        );
+        let rows = statement.all(
+          query,
+          ...scopeParamsForLevel(scope, level),
+          resolved.activeOnly ? 1 : 0,
+          resolved.limit,
+        ) as RankedKnowledgeRow[];
+        const safeQuery = toSafeFtsQuery(query);
+        if (rows.length === 0 && safeQuery.length > 0 && safeQuery !== query && !/["']/.test(query)) {
+          rows = statement.all(
+            safeQuery,
             ...scopeParamsForLevel(scope, level),
             resolved.activeOnly ? 1 : 0,
             resolved.limit,
           ) as RankedKnowledgeRow[];
-        const results = rows.map((row) => ({
-          item: rowToKnowledgeMemory(row),
-          rank: normalizeRank(row.raw_rank),
-        }));
+        }
+        let results = rows
+          .map((row) => ({
+            item: rowToKnowledgeMemory(row),
+            rank: normalizeRank(row.raw_rank),
+          }))
+          .filter((result) => matchesKnowledgeSearchOptions(result.item, resolved))
+          .slice(0, resolved.limit);
+        if (results.length === 0 && !/["']/.test(query)) {
+          const fallbackRows = db
+            .prepare(
+              `SELECT knowledge_memory.*
+               FROM knowledge_memory
+               WHERE ${scopeWhereForLevel(level)}
+                 AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))`,
+            )
+            .all(...scopeParamsForLevel(scope, level), resolved.activeOnly ? 1 : 0) as KnowledgeMemoryRow[];
+          results = fallbackRows
+            .map((row) => {
+              const item = rowToKnowledgeMemory(row);
+              return {
+                item,
+                rank: scoreSearchText(query, item.fact),
+              };
+            })
+            .filter((result) => result.rank > 0 && matchesKnowledgeSearchOptions(result.item, resolved))
+            .sort((a, b) => b.rank - a.rank || b.item.last_accessed_at - a.item.last_accessed_at)
+            .slice(0, resolved.limit);
+        }
         emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
           entity: 'knowledge',
           query,
@@ -625,6 +914,35 @@ function createAdapterFromDatabase(
         });
         return results;
       } catch {
+        if (!/["']/.test(query)) {
+          const fallbackRows = db
+            .prepare(
+              `SELECT knowledge_memory.*
+               FROM knowledge_memory
+               WHERE ${scopeWhereForLevel(level)}
+                 AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))`,
+            )
+            .all(...scopeParamsForLevel(scope, level), resolved.activeOnly ? 1 : 0) as KnowledgeMemoryRow[];
+          const fallbackResults = fallbackRows
+            .map((row) => {
+              const item = rowToKnowledgeMemory(row);
+              return {
+                item,
+                rank: scoreSearchText(query, item.fact),
+              };
+            })
+            .filter((result) => result.rank > 0 && matchesKnowledgeSearchOptions(result.item, resolved))
+            .sort((a, b) => b.rank - a.rank || b.item.last_accessed_at - a.item.last_accessed_at)
+            .slice(0, resolved.limit);
+          emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
+            entity: 'knowledge',
+            query,
+            resultCount: fallbackResults.length,
+            scopeLevel: level,
+            fallbackQuery: true,
+          });
+          return fallbackResults;
+        }
         emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
           entity: 'knowledge',
           query,
@@ -679,6 +997,37 @@ function createAdapterFromDatabase(
     },
 
     getRecentKnowledgeMemoryAudits,
+
+    updateKnowledgeMemory(id, patch): KnowledgeMemory | null {
+      const assignments: string[] = [];
+      const values: unknown[] = [];
+      const push = (column: string, value: unknown) => {
+        assignments.push(`${column} = ?`);
+        values.push(value);
+      };
+      if (patch.knowledge_state !== undefined) push('knowledge_state', patch.knowledge_state);
+      if (patch.knowledge_class !== undefined) push('knowledge_class', patch.knowledge_class);
+      if (patch.trust_score !== undefined) push('trust_score', patch.trust_score);
+      if (patch.verification_status !== undefined) push('verification_status', patch.verification_status);
+      if (patch.verification_notes !== undefined) push('verification_notes', patch.verification_notes);
+      if (patch.last_verified_at !== undefined) push('last_verified_at', patch.last_verified_at);
+      if (patch.next_reverification_at !== undefined) {
+        push('next_reverification_at', patch.next_reverification_at);
+      }
+      if (patch.last_confirmed_at !== undefined) push('last_confirmed_at', patch.last_confirmed_at);
+      if (patch.confirmation_count !== undefined) push('confirmation_count', patch.confirmation_count);
+      if (patch.disputed_at !== undefined) push('disputed_at', patch.disputed_at);
+      if (patch.dispute_reason !== undefined) push('dispute_reason', patch.dispute_reason);
+      if (patch.contradiction_score !== undefined) push('contradiction_score', patch.contradiction_score);
+      if (patch.superseded_at !== undefined) push('superseded_at', patch.superseded_at);
+      if (patch.successful_use_count !== undefined) push('successful_use_count', patch.successful_use_count);
+      if (patch.failed_use_count !== undefined) push('failed_use_count', patch.failed_use_count);
+      if (assignments.length === 0) {
+        return getKnowledgeMemoryById(id);
+      }
+      db.prepare(`UPDATE knowledge_memory SET ${assignments.join(', ')} WHERE id = ?`).run(...values, id);
+      return getKnowledgeMemoryById(id);
+    },
 
     insertWorkItem(input: NewWorkItem): WorkItem {
       const scope = validateNewWorkItem(input);
@@ -758,7 +1107,11 @@ function createAdapterFromDatabase(
     },
 
     supersedeKnowledgeMemory(oldId: number, newId: number): void {
-      db.prepare('UPDATE knowledge_memory SET superseded_by_id = ? WHERE id = ?').run(newId, oldId);
+      db.prepare(
+        `UPDATE knowledge_memory
+         SET superseded_by_id = ?, superseded_at = ?, knowledge_state = 'superseded'
+         WHERE id = ?`,
+      ).run(newId, nowSeconds(), oldId);
     },
 
     upsertContextMonitor(input) {

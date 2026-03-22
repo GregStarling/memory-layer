@@ -5,6 +5,7 @@ import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 import {
   commitCompaction,
   compactTurns,
+  extractKnowledge,
   promoteToKnowledge,
 } from '../core/orchestrator.js';
 import { createSessionId } from '../core/tokens.js';
@@ -137,5 +138,155 @@ describe('orchestrator workflows', () => {
         modelCallMade: false,
       }),
     ).rejects.toThrow('simulated archive failure');
+  });
+
+  it('does not promote summary-only facts without raw-turn evidence', async () => {
+    const memoryScope = scope();
+    const sessionId = createSessionId(memoryScope);
+    const turnOne = adapter.insertTurn({
+      ...memoryScope,
+      session_id: sessionId,
+      actor: 'user-1',
+      role: 'user',
+      content: 'Please avoid Docker-first deployment defaults.',
+    });
+    const turnTwo = adapter.insertTurn({
+      ...memoryScope,
+      session_id: sessionId,
+      actor: 'assistant-1',
+      role: 'assistant',
+      content: 'Acknowledged. I will avoid Docker-first deployment defaults.',
+    });
+    const workingMemory = adapter.insertWorkingMemory({
+      ...memoryScope,
+      session_id: sessionId,
+      summary: 'The user wants a Docker-first deployment strategy.',
+      key_entities: ['Docker'],
+      topic_tags: ['deployment'],
+      turn_id_start: turnOne.id,
+      turn_id_end: turnTwo.id,
+      turn_count: 2,
+      compaction_trigger: 'manual',
+    });
+    const created = await extractKnowledge(
+      asyncAdapter,
+      workingMemory.id,
+      memoryScope,
+      async () => [
+        {
+          fact: 'The user wants a Docker-first deployment strategy.',
+          factType: 'constraint',
+          confidence: 'high',
+        },
+      ],
+    );
+
+    const candidates = adapter.listKnowledgeCandidates(memoryScope);
+    expect(created.some((item) => item.fact.includes('Docker-first deployment strategy'))).toBe(false);
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(
+      candidates.some((item) => item.fact.includes('Docker-first deployment strategy') && item.source_turns === false),
+    ).toBe(true);
+    expect(
+      adapter
+        .getActiveKnowledgeMemory(memoryScope)
+        .some((item) => item.fact.includes('Docker-first deployment strategy')),
+    ).toBe(false);
+  });
+
+  it('promotes grounded facts and persists evidence', async () => {
+    const memoryScope = scope();
+    const sessionId = createSessionId(memoryScope);
+    const turnOne = adapter.insertTurn({
+      ...memoryScope,
+      session_id: sessionId,
+      actor: 'user-1',
+      role: 'user',
+      content: 'Use smaller batches for the migration.',
+    });
+    const turnTwo = adapter.insertTurn({
+      ...memoryScope,
+      session_id: sessionId,
+      actor: 'assistant-1',
+      role: 'assistant',
+      content: 'I will use smaller batches for the migration.',
+    });
+    const workingMemory = adapter.insertWorkingMemory({
+      ...memoryScope,
+      session_id: sessionId,
+      summary: 'Use smaller batches for the migration.',
+      key_entities: ['migration'],
+      topic_tags: ['strategy'],
+      turn_id_start: turnOne.id,
+      turn_id_end: turnTwo.id,
+      turn_count: 2,
+      compaction_trigger: 'manual',
+    });
+    const created = await extractKnowledge(
+      asyncAdapter,
+      workingMemory.id,
+      memoryScope,
+      async () => [
+        {
+          fact: 'Use smaller batches for the migration.',
+          factType: 'decision',
+          confidence: 'high',
+        },
+      ],
+    );
+
+    const candidates = adapter.listKnowledgeCandidates(memoryScope);
+    const knowledge = created[0];
+    expect(created).toHaveLength(1);
+    expect(knowledge?.knowledge_state).toBe('trusted');
+    expect(knowledge?.evidence_count).toBeGreaterThan(0);
+    expect(candidates[0]?.promoted_knowledge_id).toBe(knowledge?.id);
+    expect(adapter.listKnowledgeEvidenceForCandidate(candidates[0]!.id)).toHaveLength(2);
+    expect(adapter.listKnowledgeEvidenceForKnowledge(knowledge!.id)).toHaveLength(2);
+  });
+
+  it('recovers protected facts from raw turns when the summary omits them', async () => {
+    const memoryScope = scope();
+    const sessionId = createSessionId(memoryScope);
+    const turnOne = adapter.insertTurn({
+      ...memoryScope,
+      session_id: sessionId,
+      actor: 'user-1',
+      role: 'user',
+      content: 'Critical constraint: the system must remain local-first.',
+    });
+    const turnTwo = adapter.insertTurn({
+      ...memoryScope,
+      session_id: sessionId,
+      actor: 'assistant-1',
+      role: 'assistant',
+      content: 'Acknowledged.',
+    });
+    const workingMemory = adapter.insertWorkingMemory({
+      ...memoryScope,
+      session_id: sessionId,
+      summary: 'The project uses green UI styling.',
+      key_entities: ['UI'],
+      topic_tags: ['ui'],
+      turn_id_start: turnOne.id,
+      turn_id_end: turnTwo.id,
+      turn_count: 2,
+      compaction_trigger: 'manual',
+    });
+
+    const created = await extractKnowledge(
+      asyncAdapter,
+      workingMemory.id,
+      memoryScope,
+      async () => [
+        {
+          fact: 'The project uses green UI styling.',
+          factType: 'reference',
+          confidence: 'medium',
+        },
+      ],
+    );
+
+    expect(created.some((fact) => fact.fact.toLowerCase().includes('local-first'))).toBe(true);
   });
 });

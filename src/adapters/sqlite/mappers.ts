@@ -1,6 +1,8 @@
 import type {
   CompactionLog,
   ContextMonitor,
+  KnowledgeCandidate,
+  KnowledgeEvidence,
   KnowledgeMemory,
   KnowledgeMemoryAudit,
   Turn,
@@ -20,6 +22,15 @@ interface CompactionLogRow extends Omit<CompactionLog, 'model_call_made'> {
 interface KnowledgeMemoryRow extends Omit<KnowledgeMemory, 'is_negated' | 'source_turn_ids'> {
   is_negated: number;
   source_turn_ids: string;
+}
+
+interface KnowledgeCandidateRow extends Omit<KnowledgeCandidate, 'source_summary' | 'source_turns'> {
+  source_summary: number;
+  source_turns: number;
+}
+
+interface KnowledgeEvidenceRow extends Omit<KnowledgeEvidence, 'is_explicit'> {
+  is_explicit: number;
 }
 
 interface KnowledgeMemoryAuditRow
@@ -77,6 +88,21 @@ export function rowToKnowledgeMemory(row: KnowledgeMemoryRow): KnowledgeMemory {
   };
 }
 
+export function rowToKnowledgeCandidate(row: KnowledgeCandidateRow): KnowledgeCandidate {
+  return {
+    ...row,
+    source_summary: row.source_summary === 1,
+    source_turns: row.source_turns === 1,
+  };
+}
+
+export function rowToKnowledgeEvidence(row: KnowledgeEvidenceRow): KnowledgeEvidence {
+  return {
+    ...row,
+    is_explicit: row.is_explicit === 1,
+  };
+}
+
 export function rowToKnowledgeMemoryAudit(row: KnowledgeMemoryAuditRow): KnowledgeMemoryAudit {
   return {
     ...row,
@@ -102,3 +128,4 @@ export function rowToCompactionLog(row: CompactionLogRow): CompactionLog {
 }
 
 export type { CompactionLogRow, KnowledgeMemoryAuditRow, KnowledgeMemoryRow, WorkingMemoryRow };
+export type { KnowledgeCandidateRow, KnowledgeEvidenceRow };

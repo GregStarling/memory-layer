@@ -96,12 +96,24 @@ export type {
   FactType,
   FactSource,
   FactConfidence,
+  KnowledgeState,
+  KnowledgeClass,
+  EvidenceSourceType,
+  SupportPolarity,
+  GroundingStrength,
+  KnowledgeDecision,
   VerificationStatus,
   CompactionState,
   Turn,
   NewTurn,
   WorkingMemory,
   NewWorkingMemory,
+  KnowledgeCandidate,
+  NewKnowledgeCandidate,
+  KnowledgeEvidence,
+  NewKnowledgeEvidence,
+  KnowledgeTrustAssessment,
+  KnowledgeConflict,
   KnowledgeMemory,
   NewKnowledgeMemory,
   ContextMonitor,
@@ -155,7 +167,7 @@ export type {
   MemoryManagerConfig,
 } from './core/manager.js';
 export type { CreateMemoryOptions } from './core/quick.js';
-export type { MemoryQualityTier } from './core/quick.js';
+export type { MemoryQualityMode, MemoryQualityTier } from './core/quick.js';
 export type {
   ClaudeMemoryManagerOptions,
   OpenAIMemoryManagerOptions,

@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 8;
 
 export function createSQLiteSchema(database: Database.Database): void {
   database.pragma('journal_mode = WAL');
@@ -78,6 +78,8 @@ export function createSQLiteSchema(database: Database.Database): void {
       scope_id                 TEXT    NOT NULL,
       fact                     TEXT    NOT NULL,
       fact_type                TEXT    NOT NULL,
+      knowledge_state          TEXT    NOT NULL DEFAULT 'trusted',
+      knowledge_class          TEXT    NOT NULL DEFAULT 'project_fact',
       fact_subject             TEXT,
       fact_attribute           TEXT,
       fact_value               TEXT,
@@ -87,10 +89,23 @@ export function createSQLiteSchema(database: Database.Database): void {
       source                   TEXT    NOT NULL,
       confidence               TEXT    NOT NULL DEFAULT 'high',
       confidence_score         REAL    NOT NULL DEFAULT 0.5,
+      grounding_strength       TEXT    NOT NULL DEFAULT 'moderate',
+      evidence_count           INTEGER NOT NULL DEFAULT 0,
+      trust_score              REAL    NOT NULL DEFAULT 0.7,
       verification_status      TEXT    NOT NULL DEFAULT 'unverified',
       verification_notes       TEXT,
+      last_verified_at         INTEGER,
+      next_reverification_at   INTEGER,
+      last_confirmed_at        INTEGER,
+      confirmation_count       INTEGER NOT NULL DEFAULT 0,
       source_working_memory_id INTEGER REFERENCES working_memory(id),
       source_turn_ids          TEXT    NOT NULL DEFAULT '[]',
+      successful_use_count     INTEGER NOT NULL DEFAULT 0,
+      failed_use_count         INTEGER NOT NULL DEFAULT 0,
+      disputed_at             INTEGER,
+      dispute_reason          TEXT,
+      contradiction_score     REAL    NOT NULL DEFAULT 0,
+      superseded_at           INTEGER,
       superseded_by_id         INTEGER REFERENCES knowledge_memory(id),
       retired_at               INTEGER,
       created_at               INTEGER NOT NULL,
@@ -104,6 +119,7 @@ export function createSQLiteSchema(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_km_slot ON knowledge_memory(tenant_id, system_id, workspace_id, scope_id, slot_key);
     CREATE INDEX IF NOT EXISTS idx_km_access ON knowledge_memory(access_count);
     CREATE INDEX IF NOT EXISTS idx_km_last_accessed ON knowledge_memory(last_accessed_at);
+    CREATE INDEX IF NOT EXISTS idx_km_state_trust_class ON knowledge_memory(tenant_id, system_id, workspace_id, scope_id, knowledge_state, trust_score DESC, knowledge_class);
 
     CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_memory_fts USING fts5(
       fact, content=knowledge_memory, content_rowid=id
@@ -149,6 +165,61 @@ export function createSQLiteSchema(database: Database.Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_kma_scope ON knowledge_memory_audit(tenant_id, system_id, workspace_id, scope_id, id DESC);
+
+    CREATE TABLE IF NOT EXISTS knowledge_candidate (
+      id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id            TEXT    NOT NULL,
+      system_id            TEXT    NOT NULL,
+      workspace_id         TEXT    NOT NULL DEFAULT 'default',
+      scope_id             TEXT    NOT NULL,
+      working_memory_id    INTEGER NOT NULL REFERENCES working_memory(id) ON DELETE CASCADE,
+      fact                 TEXT    NOT NULL,
+      fact_type            TEXT    NOT NULL,
+      knowledge_class      TEXT    NOT NULL,
+      normalized_fact      TEXT    NOT NULL,
+      slot_key             TEXT,
+      confidence           TEXT    NOT NULL,
+      source_summary       INTEGER NOT NULL DEFAULT 0,
+      source_turns         INTEGER NOT NULL DEFAULT 1,
+      grounding_strength   TEXT    NOT NULL DEFAULT 'weak',
+      evidence_count       INTEGER NOT NULL DEFAULT 0,
+      trust_score          REAL    NOT NULL DEFAULT 0,
+      state                TEXT    NOT NULL DEFAULT 'candidate',
+      promoted_knowledge_id INTEGER REFERENCES knowledge_memory(id) ON DELETE SET NULL,
+      created_at           INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_kc_scope_state_created
+      ON knowledge_candidate(tenant_id, system_id, workspace_id, scope_id, state, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS knowledge_evidence (
+      id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id            TEXT    NOT NULL,
+      system_id            TEXT    NOT NULL,
+      workspace_id         TEXT    NOT NULL DEFAULT 'default',
+      scope_id             TEXT    NOT NULL,
+      knowledge_memory_id  INTEGER REFERENCES knowledge_memory(id) ON DELETE CASCADE,
+      knowledge_candidate_id INTEGER REFERENCES knowledge_candidate(id) ON DELETE CASCADE,
+      working_memory_id    INTEGER REFERENCES working_memory(id) ON DELETE CASCADE,
+      turn_id              INTEGER REFERENCES turns(id) ON DELETE CASCADE,
+      source_type          TEXT    NOT NULL,
+      support_polarity     TEXT    NOT NULL,
+      speaker_role         TEXT,
+      actor                TEXT,
+      excerpt              TEXT    NOT NULL,
+      start_offset         INTEGER,
+      end_offset           INTEGER,
+      is_explicit          INTEGER NOT NULL DEFAULT 0,
+      explicitness_score   REAL    NOT NULL DEFAULT 0,
+      outcome              TEXT,
+      created_at           INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ke_knowledge_memory
+      ON knowledge_evidence(knowledge_memory_id, created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_ke_candidate
+      ON knowledge_evidence(knowledge_candidate_id, created_at DESC);
 
     CREATE TABLE IF NOT EXISTS context_monitor (
       id                    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -214,6 +285,8 @@ export function createSQLiteSchema(database: Database.Database): void {
   `);
 
   const knowledgeMemoryAlterStatements = [
+    "ALTER TABLE knowledge_memory ADD COLUMN knowledge_state TEXT NOT NULL DEFAULT 'trusted'",
+    "ALTER TABLE knowledge_memory ADD COLUMN knowledge_class TEXT NOT NULL DEFAULT 'project_fact'",
     'ALTER TABLE knowledge_memory ADD COLUMN fact_subject TEXT',
     'ALTER TABLE knowledge_memory ADD COLUMN fact_attribute TEXT',
     'ALTER TABLE knowledge_memory ADD COLUMN fact_value TEXT',
@@ -221,9 +294,22 @@ export function createSQLiteSchema(database: Database.Database): void {
     'ALTER TABLE knowledge_memory ADD COLUMN slot_key TEXT',
     'ALTER TABLE knowledge_memory ADD COLUMN is_negated INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE knowledge_memory ADD COLUMN confidence_score REAL NOT NULL DEFAULT 0.5',
+    "ALTER TABLE knowledge_memory ADD COLUMN grounding_strength TEXT NOT NULL DEFAULT 'moderate'",
+    'ALTER TABLE knowledge_memory ADD COLUMN evidence_count INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE knowledge_memory ADD COLUMN trust_score REAL NOT NULL DEFAULT 0.7',
     "ALTER TABLE knowledge_memory ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'unverified'",
     'ALTER TABLE knowledge_memory ADD COLUMN verification_notes TEXT',
+    'ALTER TABLE knowledge_memory ADD COLUMN last_verified_at INTEGER',
+    'ALTER TABLE knowledge_memory ADD COLUMN next_reverification_at INTEGER',
+    'ALTER TABLE knowledge_memory ADD COLUMN last_confirmed_at INTEGER',
+    'ALTER TABLE knowledge_memory ADD COLUMN confirmation_count INTEGER NOT NULL DEFAULT 0',
     "ALTER TABLE knowledge_memory ADD COLUMN source_turn_ids TEXT NOT NULL DEFAULT '[]'",
+    'ALTER TABLE knowledge_memory ADD COLUMN successful_use_count INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE knowledge_memory ADD COLUMN failed_use_count INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE knowledge_memory ADD COLUMN disputed_at INTEGER',
+    'ALTER TABLE knowledge_memory ADD COLUMN dispute_reason TEXT',
+    'ALTER TABLE knowledge_memory ADD COLUMN contradiction_score REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE knowledge_memory ADD COLUMN superseded_at INTEGER',
     'ALTER TABLE knowledge_memory ADD COLUMN retired_at INTEGER',
   ];
 
@@ -233,6 +319,14 @@ export function createSQLiteSchema(database: Database.Database): void {
     } catch {
       // Column already exists on upgraded databases.
     }
+  }
+
+  try {
+    database.exec(
+      'CREATE INDEX IF NOT EXISTS idx_km_reverify ON knowledge_memory(knowledge_state, next_reverification_at, knowledge_class, trust_score DESC)',
+    );
+  } catch {
+    // Index already exists on upgraded databases.
   }
 
   try {

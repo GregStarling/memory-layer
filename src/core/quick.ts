@@ -31,6 +31,10 @@ type QuickSummarizerOption = 'claude' | 'openai' | 'extractive' | Summarizer;
 type QuickExtractorOption = 'claude' | 'openai' | 'regex' | Extractor | false;
 type QuickEmbeddingOption = 'local' | EmbeddingGenerator | false;
 export type MemoryQualityTier = 'offline_default' | 'local_semantic' | 'provider_backed';
+export type MemoryQualityMode =
+  | 'fast_adoption'
+  | 'balanced_memory'
+  | 'high_fidelity_memory';
 
 interface QuickProviderOptions {
   apiKey?: string;
@@ -47,6 +51,7 @@ export interface CreateMemoryOptions {
   sessionId?: string;
   preset?: MemoryManagerPreset;
   summarizer?: QuickSummarizerOption;
+  qualityMode?: MemoryQualityMode;
   qualityTier?: MemoryQualityTier;
   summarizerOptions?: QuickProviderOptions;
   extractor?: QuickExtractorOption;
@@ -68,6 +73,92 @@ export interface CreateMemoryOptions {
   crossScopeLevel?: MemoryManagerConfig['crossScopeLevel'];
   failurePolicy?: MemoryManagerConfig['failurePolicy'];
   tokenEstimator?: TokenEstimator;
+}
+
+interface QualityModeConfig {
+  monitorPolicy?: Partial<MonitorPolicy>;
+  extractionPolicy?: Partial<ExtractionPolicy>;
+  contextPolicy?: Partial<ContextPolicy>;
+  maintenancePolicy?: Partial<MaintenancePolicy>;
+}
+
+const QUALITY_MODE_CONFIG: Record<MemoryQualityMode, QualityModeConfig> = {
+  fast_adoption: {
+    extractionPolicy: {
+      requireGroundingForTrusted: false,
+      minimumEvidenceCountForTrusted: 1,
+      trustPromotionThreshold: 0.55,
+      trustProvisionalThreshold: 0.15,
+      contradictionDisputeThreshold: 0.5,
+    },
+    contextPolicy: {
+      trustWeight: 0.8,
+      contradictionPenalty: 1,
+      provisionalPenalty: 0.15,
+    },
+    maintenancePolicy: {
+      trustedCoreRetentionDays: 60,
+      provisionalRetentionDays: 21,
+      reverificationCadenceDays: 60,
+      requireReconfirmationForProjectFacts: false,
+    },
+  },
+  balanced_memory: {
+    extractionPolicy: {
+      requireGroundingForTrusted: true,
+      minimumEvidenceCountForTrusted: 2,
+      trustPromotionThreshold: 0.7,
+      trustProvisionalThreshold: 0.45,
+      contradictionDisputeThreshold: 0.35,
+    },
+    contextPolicy: {
+      trustWeight: 1.3,
+      contradictionPenalty: 1.5,
+      provisionalPenalty: 0.75,
+    },
+    maintenancePolicy: {
+      trustedCoreRetentionDays: 365,
+      provisionalRetentionDays: 14,
+      reverificationCadenceDays: 30,
+      requireReconfirmationForProjectFacts: true,
+    },
+  },
+  high_fidelity_memory: {
+    extractionPolicy: {
+      requireGroundingForTrusted: true,
+      minimumEvidenceCountForTrusted: 2,
+      minConfidenceForPromotion: 'high',
+      trustPromotionThreshold: 0.82,
+      trustProvisionalThreshold: 0.55,
+      contradictionDisputeThreshold: 0.25,
+    },
+    contextPolicy: {
+      trustWeight: 1.6,
+      contradictionPenalty: 2,
+      provisionalPenalty: 1.2,
+      trustedCoreLimit: 10,
+      taskRelevantLimit: 10,
+    },
+    maintenancePolicy: {
+      trustedCoreRetentionDays: 730,
+      provisionalRetentionDays: 10,
+      reverificationCadenceDays: 14,
+      requireReconfirmationForProjectFacts: true,
+    },
+  },
+};
+
+function resolveQualityMode(options: CreateMemoryOptions): MemoryQualityMode {
+  if (options.qualityMode) return options.qualityMode;
+  switch (options.qualityTier) {
+    case 'offline_default':
+      return 'fast_adoption';
+    case 'provider_backed':
+      return 'high_fidelity_memory';
+    case 'local_semantic':
+    default:
+      return 'balanced_memory';
+  }
 }
 
 function resolveScope(scope?: string | MemoryScope): MemoryScope {
@@ -93,10 +184,10 @@ function resolveAdapter(
   path: string | ':memory:',
   logger?: Logger,
   onEvent?: EventHook,
-  qualityTier: MemoryQualityTier = 'offline_default',
+  qualityTier?: MemoryQualityTier,
 ): { adapter: StorageAdapter; embeddingAdapter?: EmbeddingAdapter } {
   if (!adapter || adapter === 'sqlite') {
-    if (qualityTier === 'offline_default' || qualityTier === 'local_semantic') {
+    if (!qualityTier || qualityTier === 'offline_default' || qualityTier === 'local_semantic') {
       const sqlite = createSQLiteAdapterWithEmbeddings(path, { logger, onEvent });
       return { adapter: sqlite, embeddingAdapter: sqlite.embeddings };
     }
@@ -166,6 +257,8 @@ function resolveEmbeddingGenerator(
 export function createMemory(options: CreateMemoryOptions = {}): MemoryManager {
   const scope = resolveScope(options.scope);
   const preset = resolveMemoryManagerPreset(options.preset);
+  const qualityMode = resolveQualityMode(options);
+  const qualityConfig = QUALITY_MODE_CONFIG[qualityMode];
   const resolvedAdapter = resolveAdapter(
     options.adapter,
     options.path ?? ':memory:',
@@ -199,18 +292,22 @@ export function createMemory(options: CreateMemoryOptions = {}): MemoryManager {
     crossScopeLevel: options.crossScopeLevel ?? preset.crossScopeLevel,
     monitorPolicy: {
       ...preset.monitorPolicy,
+      ...qualityConfig.monitorPolicy,
       ...options.policies?.monitor,
     },
     extractionPolicy: {
       ...preset.extractionPolicy,
+      ...qualityConfig.extractionPolicy,
       ...options.policies?.extraction,
     },
     contextPolicy: {
       ...preset.contextPolicy,
+      ...qualityConfig.contextPolicy,
       ...options.policies?.context,
     },
     maintenancePolicy: {
       ...preset.maintenancePolicy,
+      ...qualityConfig.maintenancePolicy,
       ...options.policies?.maintenance,
     },
     failurePolicy: options.failurePolicy,

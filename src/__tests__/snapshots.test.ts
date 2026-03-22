@@ -9,6 +9,10 @@ function makeSnapshotContext(): MemoryContext {
     mode: 'coding',
     activeTurns: [],
     workingMemory: null,
+    trustedCoreMemory: [],
+    taskRelevantKnowledge: [],
+    provisionalKnowledge: [],
+    disputedKnowledge: [],
     relevantKnowledge: [],
     durableKnowledge: [],
     recentSummaries: [],
@@ -36,7 +40,10 @@ describe('stable snapshots', () => {
       Active Objectives:
       - None
 
-      Durable Knowledge:
+      Trusted Core Memory:
+      - None
+
+      Task Relevant Knowledge:
       - None
 
       Unresolved Work:

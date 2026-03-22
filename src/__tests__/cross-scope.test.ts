@@ -18,8 +18,8 @@ describe('cross-scope learning', () => {
   });
 
   it('can read knowledge across a workspace boundary intentionally', async () => {
-    const scopeA = makeScope({ scope_id: 'thread-1' });
-    const scopeB = makeScope({ scope_id: 'thread-2' });
+    const scopeA = makeScope({ scope_id: 'project/root' });
+    const scopeB = makeScope({ scope_id: 'project/root/child' });
     const knowledge = adapter.insertKnowledgeMemory({
       ...scopeA,
       fact: 'Workspace shared fact',

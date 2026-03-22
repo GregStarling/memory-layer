@@ -3,9 +3,13 @@ import type {
   CompactionLog,
   ContextMonitor,
   ContextMonitorUpsert,
+  KnowledgeCandidate,
+  KnowledgeEvidence,
   KnowledgeMemory,
   KnowledgeMemoryAudit,
   NewCompactionLog,
+  NewKnowledgeCandidate,
+  NewKnowledgeEvidence,
   NewKnowledgeMemory,
   NewKnowledgeMemoryAudit,
   NewWorkItem,
@@ -63,6 +67,18 @@ export interface AsyncStorageAdapter {
 
   insertKnowledgeMemory(input: NewKnowledgeMemory): Promise<KnowledgeMemory>;
   insertKnowledgeMemories(inputs: NewKnowledgeMemory[]): Promise<KnowledgeMemory[]>;
+  insertKnowledgeCandidate(input: NewKnowledgeCandidate): Promise<KnowledgeCandidate>;
+  insertKnowledgeCandidates(inputs: NewKnowledgeCandidate[]): Promise<KnowledgeCandidate[]>;
+  getKnowledgeCandidateById(id: number): Promise<KnowledgeCandidate | null>;
+  listKnowledgeCandidates(
+    scope: MemoryScope,
+    options?: { state?: Array<KnowledgeCandidate['state']> },
+  ): Promise<KnowledgeCandidate[]>;
+  insertKnowledgeEvidence(input: NewKnowledgeEvidence): Promise<KnowledgeEvidence>;
+  insertKnowledgeEvidenceBatch(inputs: NewKnowledgeEvidence[]): Promise<KnowledgeEvidence[]>;
+  listKnowledgeEvidenceForKnowledge(knowledgeId: number): Promise<KnowledgeEvidence[]>;
+  listKnowledgeEvidenceForCandidate(candidateId: number): Promise<KnowledgeEvidence[]>;
+  promoteKnowledgeCandidate(candidateId: number, input: NewKnowledgeMemory): Promise<KnowledgeMemory>;
   getKnowledgeMemoryById(id: number): Promise<KnowledgeMemory | null>;
   getActiveKnowledgeMemory(scope: MemoryScope): Promise<KnowledgeMemory[]>;
   getActiveKnowledgeMemoryPaginated(
@@ -90,6 +106,26 @@ export interface AsyncStorageAdapter {
     scope: MemoryScope,
     limit?: number,
   ): Promise<KnowledgeMemoryAudit[]>;
+  updateKnowledgeMemory(
+    id: number,
+    patch: {
+      knowledge_state?: KnowledgeMemory['knowledge_state'];
+      knowledge_class?: KnowledgeMemory['knowledge_class'];
+      trust_score?: number;
+      verification_status?: KnowledgeMemory['verification_status'];
+      verification_notes?: string | null;
+      last_verified_at?: number | null;
+      next_reverification_at?: number | null;
+      last_confirmed_at?: number | null;
+      confirmation_count?: number;
+      disputed_at?: number | null;
+      dispute_reason?: string | null;
+      contradiction_score?: number;
+      superseded_at?: number | null;
+      successful_use_count?: number;
+      failed_use_count?: number;
+    },
+  ): Promise<KnowledgeMemory | null>;
   touchKnowledgeMemory(id: number): Promise<void>;
   retireKnowledgeMemory(id: number, retiredAt?: number): Promise<void>;
   supersedeKnowledgeMemory(oldId: number, newId: number): Promise<void>;

@@ -7,13 +7,20 @@ import type {
   MaintenancePolicy,
   MonitorPolicy,
 } from '../contracts/policy.js';
-import { DEFAULT_MONITOR_POLICY } from '../contracts/policy.js';
+import {
+  DEFAULT_CONTEXT_POLICY,
+  DEFAULT_MAINTENANCE_POLICY,
+  DEFAULT_MONITOR_POLICY,
+} from '../contracts/policy.js';
 import type { StorageAdapter } from '../contracts/storage.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type {
   FactConfidence,
   FactType,
+  KnowledgeEvidence,
   KnowledgeMemory,
+  KnowledgeMemoryAudit,
+  KnowledgeTrustAssessment,
   SearchOptions,
   SearchResult,
   TimeRange,
@@ -38,6 +45,14 @@ import { emitMemoryEvent } from './telemetry.js';
 import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 import { estimateTokens, type TokenEstimator } from './tokens.js';
 import { createCircuitBreaker, type CircuitBreakerOptions } from './circuit-breaker.js';
+import { DEFAULT_EXTRACTION_POLICY } from '../contracts/policy.js';
+import { assessKnowledgeReverification } from './trust.js';
+import { matchesKnowledgeSearchOptions, rankKnowledge } from './retrieval.js';
+import {
+  computeNextReverificationAt,
+  getDueReverificationKnowledge,
+  resolveMaintenancePolicy,
+} from './knowledge-lifecycle.js';
 
 export interface MemoryManagerConfig {
   /** Synchronous storage adapter (SQLite, in-memory). Mutually exclusive with asyncAdapter. */
@@ -106,6 +121,16 @@ export interface MemoryManager {
     status?: WorkItem['status'],
     detail?: string,
   ): Promise<WorkItem>;
+  inspectKnowledge(id: number): Promise<{
+    knowledge: KnowledgeMemory | null;
+    evidence: KnowledgeEvidence[];
+    audits: KnowledgeMemoryAudit[];
+  }>;
+  reverifyKnowledge(id: number): Promise<KnowledgeTrustAssessment>;
+  runReverification(options?: { limit?: number }): Promise<{
+    reverifiedKnowledgeIds: number[];
+    demotedKnowledgeIds: number[];
+  }>;
   runMaintenance(policy?: MaintenancePolicy): Promise<MaintenanceReport>;
   close(): Promise<void>;
 }
@@ -118,6 +143,21 @@ function resolveAdapter(config: MemoryManagerConfig): AsyncStorageAdapter {
     return wrapSyncAdapter(config.adapter);
   }
   throw new Error("MemoryManagerConfig requires either 'adapter' or 'asyncAdapter'");
+}
+
+function manualKnowledgeClassForFactType(factType: FactType): KnowledgeMemory['knowledge_class'] {
+  switch (factType) {
+    case 'preference':
+      return 'preference';
+    case 'constraint':
+      return 'constraint';
+    case 'decision':
+      return 'procedure';
+    case 'entity':
+      return 'identity';
+    default:
+      return 'project_fact';
+  }
 }
 
 export function createMemoryManager(config: MemoryManagerConfig): MemoryManager {
@@ -247,13 +287,14 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       level === 'scope'
         ? await asyncAdapter.searchKnowledge(config.scope, query, options)
         : await asyncAdapter.searchKnowledgeCrossScope(config.scope, level, query, options);
+    const filteredLexical = lexical.filter((result) => matchesKnowledgeSearchOptions(result.item, options));
     if (!config.embeddingAdapter) {
-      return lexical;
+      return filteredLexical;
     }
 
     const queryVector = await buildQueryVector(query);
     if (!queryVector) {
-      return lexical;
+      return filteredLexical;
     }
 
     const semantic =
@@ -269,28 +310,40 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
     const lexicalRanks = new Map<number, number>();
     const semanticRanks = new Map<number, number>();
-    lexical.forEach((result) => lexicalRanks.set(result.item.id, result.rank));
+    filteredLexical.forEach((result) => lexicalRanks.set(result.item.id, result.rank));
     semantic.forEach((result) => semanticRanks.set(result.knowledgeMemoryId, result.similarity));
 
     const merged = new Map<number, SearchResult<KnowledgeMemory>>();
-    for (const result of lexical) {
+    for (const result of filteredLexical) {
       merged.set(result.item.id, result);
     }
     for (const result of semantic) {
       const knowledge = await asyncAdapter.getKnowledgeMemoryById(result.knowledgeMemoryId);
       if (!knowledge) continue;
+      if (!matchesKnowledgeSearchOptions(knowledge, options)) continue;
       const existing = merged.get(knowledge.id);
       const recencyScore =
         knowledge.last_accessed_at > 0
           ? 1 / (1 + Math.max(0, Math.floor(Date.now() / 1000) - knowledge.last_accessed_at) / 86400)
           : 0;
-      const rank =
-        (lexicalRanks.get(knowledge.id) ?? 0) * 1.15 +
-        (semanticRanks.get(knowledge.id) ?? 0) * 1.2 +
-        recencyScore * 0.2;
+      const ranking = rankKnowledge({
+        knowledge,
+        lexicalScore: lexicalRanks.get(knowledge.id) ?? 0,
+        semanticScore: semanticRanks.get(knowledge.id) ?? 0,
+        recencyScore,
+        importanceScore: Math.min(1, knowledge.access_count / 10),
+        policy: {
+          ...DEFAULT_CONTEXT_POLICY,
+          ...config.contextPolicy,
+        },
+        scope: config.scope,
+        relevanceTexts: [query],
+        preferLocalTrusted: options?.preferLocalTrusted ?? true,
+        preferLineageMemory: options?.preferLineageMemory ?? level !== 'scope',
+      });
       merged.set(knowledge.id, {
         item: knowledge,
-        rank: existing ? Math.max(existing.rank, rank) : rank,
+        rank: existing ? Math.max(existing.rank, ranking.finalScore) : ranking.finalScore,
       });
     }
 
@@ -569,6 +622,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         ...config.scope,
         fact: config.redactText ? config.redactText({ kind: 'fact', text: fact }) : fact,
         fact_type: factType,
+        knowledge_class: manualKnowledgeClassForFactType(factType),
         source: 'manual',
         confidence,
       });
@@ -595,13 +649,146 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       });
     },
 
+    async inspectKnowledge(id) {
+      const knowledge = await asyncAdapter.getKnowledgeMemoryById(id);
+      if (!knowledge) {
+        return { knowledge: null, evidence: [], audits: [] };
+      }
+      const evidence = await asyncAdapter.listKnowledgeEvidenceForKnowledge(id);
+      const audits = (await asyncAdapter.getRecentKnowledgeMemoryAudits(config.scope, 50)).filter(
+        (audit) => audit.created_knowledge_id === id || audit.related_knowledge_id === id,
+      );
+      return { knowledge, evidence, audits };
+    },
+
+    async reverifyKnowledge(id) {
+      const knowledge = await asyncAdapter.getKnowledgeMemoryById(id);
+      if (!knowledge) {
+        throw new Error(`Memory validation: knowledge memory ${id} was not found`);
+      }
+      const evidence = await asyncAdapter.listKnowledgeEvidenceForKnowledge(id);
+      const policy = {
+        ...DEFAULT_EXTRACTION_POLICY,
+        ...config.extractionPolicy,
+      };
+      const assessment = assessKnowledgeReverification({
+        knowledge,
+        evidence,
+        policy,
+      });
+      const supportEvidence = evidence.filter((item) => item.support_polarity === 'supports');
+      const successCount = supportEvidence.filter((item) => item.outcome === 'success').length;
+      const failureCount = supportEvidence.filter((item) => item.outcome === 'failure').length;
+      const now = Math.floor(Date.now() / 1000);
+      const maintenancePolicy = resolveMaintenancePolicy(config.maintenancePolicy);
+      const nextReverificationAt = computeNextReverificationAt(
+        {
+          ...knowledge,
+          knowledge_state: assessment.state,
+          last_verified_at: now,
+          last_confirmed_at:
+            assessment.state === 'trusted' ? now : knowledge.last_confirmed_at,
+          confirmation_count:
+            assessment.state === 'trusted'
+              ? knowledge.confirmation_count + 1
+              : knowledge.confirmation_count,
+        },
+        maintenancePolicy,
+      );
+      await asyncAdapter.updateKnowledgeMemory(id, {
+        knowledge_state: assessment.state,
+        knowledge_class:
+          failureCount > successCount &&
+          ['strategy', 'procedure'].includes(knowledge.knowledge_class)
+            ? 'anti_pattern'
+            : successCount > 0 &&
+                assessment.state === 'trusted' &&
+                knowledge.knowledge_class === 'procedure'
+              ? 'strategy'
+              : knowledge.knowledge_class,
+        trust_score: assessment.trust_score,
+        verification_status:
+          assessment.state === 'trusted'
+            ? 'verified'
+            : assessment.state === 'provisional'
+              ? 'corroborated'
+              : 'unverified',
+        verification_notes: assessment.reasons.join(', ') || null,
+        last_verified_at: now,
+        next_reverification_at: nextReverificationAt,
+        last_confirmed_at: assessment.state === 'trusted' ? now : knowledge.last_confirmed_at,
+        confirmation_count:
+          assessment.state === 'trusted'
+            ? knowledge.confirmation_count + 1
+            : knowledge.confirmation_count,
+        disputed_at: assessment.state === 'disputed' ? now : knowledge.disputed_at,
+        dispute_reason: assessment.state === 'disputed' ? assessment.reasons.join(', ') : knowledge.dispute_reason,
+        contradiction_score:
+          assessment.state === 'disputed'
+            ? Math.max(knowledge.contradiction_score, 1)
+            : knowledge.contradiction_score,
+        successful_use_count: knowledge.successful_use_count + successCount,
+        failed_use_count: knowledge.failed_use_count + failureCount,
+      });
+      return assessment;
+    },
+
+    async runReverification(options) {
+      const now = Math.floor(Date.now() / 1000);
+      const maintenancePolicy = resolveMaintenancePolicy(config.maintenancePolicy);
+      const activeKnowledge = await asyncAdapter.getActiveKnowledgeMemory(config.scope);
+      const due = getDueReverificationKnowledge(activeKnowledge, maintenancePolicy, now).slice(
+        0,
+        options?.limit ?? activeKnowledge.length,
+      );
+      const reverifiedKnowledgeIds: number[] = [];
+      const demotedKnowledgeIds: number[] = [];
+      for (const item of due) {
+        const assessment = await this.reverifyKnowledge(item.id);
+        reverifiedKnowledgeIds.push(item.id);
+        if (assessment.state !== 'trusted') {
+          demotedKnowledgeIds.push(item.id);
+        }
+      }
+      return { reverifiedKnowledgeIds, demotedKnowledgeIds };
+    },
+
     async runMaintenance(policy) {
-      const report = await runMaintenance(asyncAdapter, config.scope, policy ?? config.maintenancePolicy);
+      const effectivePolicyInput = {
+        ...(config.maintenancePolicy ?? {}),
+        ...(policy ?? {}),
+        classRetentionOverrides: {
+          ...(config.maintenancePolicy?.classRetentionOverrides ?? {}),
+          ...(policy?.classRetentionOverrides ?? {}),
+        },
+      };
+      const effectivePolicy = resolveMaintenancePolicy(effectivePolicyInput);
+      const report = await runMaintenance(asyncAdapter, config.scope, effectivePolicy);
+      const activeKnowledge = await asyncAdapter.getActiveKnowledgeMemory(config.scope);
+      const due = getDueReverificationKnowledge(
+        activeKnowledge,
+        effectivePolicy,
+        Math.floor(Date.now() / 1000),
+      );
+      const reverification = { reverifiedKnowledgeIds: [] as number[], demotedKnowledgeIds: [] as number[] };
+      for (const item of due) {
+        const assessment = await this.reverifyKnowledge(item.id);
+        reverification.reverifiedKnowledgeIds.push(item.id);
+        if (assessment.state !== 'trusted') {
+          reverification.demotedKnowledgeIds.push(item.id);
+        }
+      }
+      report.reverifiedKnowledgeIds.push(...reverification.reverifiedKnowledgeIds);
+      report.demotedKnowledgeIds.push(...reverification.demotedKnowledgeIds);
+      report.reverifiedKnowledgeIds = [...new Set(report.reverifiedKnowledgeIds)];
+      report.demotedKnowledgeIds = [...new Set(report.demotedKnowledgeIds)];
       emitMemoryEvent('manager', config.scope, { logger: config.logger, onEvent }, 0, {
         action: 'run_maintenance',
         expiredWorkingMemoryCount: report.expiredWorkingMemoryIds.length,
         retiredKnowledgeCount: report.retiredKnowledgeIds.length,
         deletedWorkItemCount: report.deletedWorkItemIds.length,
+        reverifiedKnowledgeCount: report.reverifiedKnowledgeIds.length,
+        demotedKnowledgeCount: report.demotedKnowledgeIds.length,
       });
       return report;
     },

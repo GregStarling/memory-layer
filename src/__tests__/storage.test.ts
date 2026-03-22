@@ -188,6 +188,78 @@ describe('SQLite storage adapter', () => {
     });
   });
 
+  describe('grounded knowledge storage', () => {
+    it('stores candidates, evidence, and promoted knowledge records', () => {
+      const memoryScope = scope();
+      const sessionId = createSessionId(memoryScope);
+      const turn = adapter.insertTurn({
+        ...memoryScope,
+        session_id: sessionId,
+        actor: 'user-1',
+        role: 'user',
+        content: 'Use smaller batches for the migration.',
+      });
+      const workingMemory = adapter.insertWorkingMemory({
+        ...memoryScope,
+        session_id: sessionId,
+        summary: 'Migration lesson',
+        key_entities: ['migration'],
+        topic_tags: ['strategy'],
+        turn_id_start: turn.id,
+        turn_id_end: turn.id,
+        turn_count: 1,
+        compaction_trigger: 'manual',
+      });
+
+      const candidate = adapter.insertKnowledgeCandidate({
+        ...memoryScope,
+        working_memory_id: workingMemory.id,
+        fact: 'Use smaller batches for the migration.',
+        fact_type: 'decision',
+        knowledge_class: 'strategy',
+        normalized_fact: 'use smaller batches for the migration',
+        confidence: 'high',
+        grounding_strength: 'strong',
+        evidence_count: 1,
+        trust_score: 0.85,
+      });
+      const evidence = adapter.insertKnowledgeEvidence({
+        ...memoryScope,
+        knowledge_candidate_id: candidate.id,
+        working_memory_id: workingMemory.id,
+        turn_id: turn.id,
+        source_type: 'user_turn',
+        support_polarity: 'supports',
+        speaker_role: 'user',
+        actor: 'user-1',
+        excerpt: 'Use smaller batches for the migration.',
+        is_explicit: true,
+        explicitness_score: 1,
+      });
+      const promoted = adapter.promoteKnowledgeCandidate(candidate.id, {
+        ...memoryScope,
+        fact: candidate.fact,
+        fact_type: candidate.fact_type,
+        knowledge_state: 'provisional',
+        knowledge_class: candidate.knowledge_class,
+        normalized_fact: candidate.normalized_fact,
+        source: 'promoted_from_working',
+        confidence: candidate.confidence,
+        grounding_strength: candidate.grounding_strength,
+        evidence_count: candidate.evidence_count,
+        trust_score: candidate.trust_score,
+        source_working_memory_id: workingMemory.id,
+        source_turn_ids: [turn.id],
+      });
+
+      expect(adapter.getKnowledgeCandidateById(candidate.id)?.promoted_knowledge_id).toBe(promoted.id);
+      expect(adapter.listKnowledgeCandidates(memoryScope)).toHaveLength(1);
+      expect(adapter.listKnowledgeEvidenceForCandidate(candidate.id)[0]?.id).toBe(evidence.id);
+      expect(adapter.getKnowledgeMemoryById(promoted.id)?.knowledge_state).toBe('provisional');
+      expect(adapter.getKnowledgeMemoryById(promoted.id)?.knowledge_class).toBe('strategy');
+    });
+  });
+
   describe('getActiveTurns', () => {
     it('returns turns in insertion order', () => {
       const memoryScope = scope();

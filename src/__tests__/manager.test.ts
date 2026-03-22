@@ -307,13 +307,13 @@ describe('memory manager', () => {
         floorTokens: 1,
         hardTurnThreshold: 2,
         softTurnThreshold: 10,
-        hardTokenThreshold: 5,
+        hardTokenThreshold: 5000,
         softTokenThreshold: 5000,
       },
     });
 
-    await manager.processTurn('user', 'one');
-    await manager.processTurn('assistant', 'two');
+    await manager.processTurn('user', 'The project uses sqlite.');
+    await manager.processTurn('user', 'The project uses sqlite.');
     await manager.processTurn('user', 'three');
     await manager.processTurn('assistant', 'four');
 
@@ -371,15 +371,18 @@ describe('memory manager', () => {
         floorTokens: 1,
         hardTurnThreshold: 2,
         softTurnThreshold: 10,
-        hardTokenThreshold: 5,
+        hardTokenThreshold: 5000,
         softTokenThreshold: 5000,
       },
     });
 
-    await manager.processTurn('user', 'one');
-    await manager.processTurn('assistant', 'two');
+    await manager.processTurn('user', 'The project uses sqlite.');
+    await manager.processTurn('user', 'The project uses sqlite.');
     const context = await manager.getContext('sqlite');
-    expect(context.relevantKnowledge.some((item) => item.fact.includes('sqlite'))).toBe(true);
+    expect(
+      context.relevantKnowledge.some((item) => item.fact.includes('sqlite')) ||
+        context.provisionalKnowledge.some((item) => item.fact.includes('sqlite')),
+    ).toBe(true);
     await manager.close();
   });
 

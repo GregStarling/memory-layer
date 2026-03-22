@@ -116,6 +116,24 @@ describe('extractors', () => {
     expect(compatibleRelation).toBe('compatible');
   });
 
+  it('parses negated constraints as conflicts on the same slot', () => {
+    const existing = normalizeExtractedFact({
+      fact: 'The system must use Docker',
+      factType: 'constraint',
+      confidence: 'high',
+    });
+    const candidate = normalizeExtractedFact({
+      fact: 'The system must not use Docker',
+      factType: 'constraint',
+      confidence: 'high',
+    });
+
+    expect(existing.slotKey).toBe(candidate.slotKey);
+    expect(existing.isNegated).toBe(false);
+    expect(candidate.isNegated).toBe(true);
+    expect(classifyFactRelation(existing, candidate)).toBe('conflict');
+  });
+
   it('composite extractor merges and deduplicates results', async () => {
     const extractor = createCompositeExtractor(
       async () => [

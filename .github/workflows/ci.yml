@@ -24,6 +24,8 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm run eval:gate
+      - run: npm run eval:memory-quality:enforce
+      - run: npm run eval:memory-quality:delta
       - run: npm run pack:check
 
   python-client:

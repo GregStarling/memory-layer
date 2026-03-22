@@ -207,6 +207,7 @@ createMemory({
   path?: string,                                     // SQLite file path
   scope?: string | MemoryScope,                      // default: 'default'
   preset?: 'ai_ide' | 'chat_agent' | 'autonomous_agent',
+  qualityMode?: 'fast_adoption' | 'balanced_memory' | 'high_fidelity_memory',
   summarizer?: 'extractive' | 'claude' | 'openai' | Summarizer,
   extractor?: 'regex' | 'claude' | 'openai' | Extractor | false,
   policies?: {
@@ -231,6 +232,23 @@ Use a preset first and override only when needed:
 | `ai_ide` | Coding assistants | Moderate (20/40 turns) | Workspace-shared | 14 days |
 | `chat_agent` | Conversational agents | Default (15/30 turns) | Scope-local | 7 days |
 | `autonomous_agent` | Dark factory / autonomous | Aggressive (10/20 turns) | Workspace-wide | 3 days |
+
+## Memory Quality Gate
+
+The memory-quality suite is a hard release gate.
+
+```bash
+npm run eval:memory-quality:enforce
+npm run eval:memory-quality:delta
+```
+
+Quick-start quality modes:
+
+| Mode | Goal | Default posture |
+|------|------|-----------------|
+| `fast_adoption` | Lowest-friction startup | More willing to trust weakly grounded memories |
+| `balanced_memory` | Recommended default | Safer trust and maintenance behavior |
+| `high_fidelity_memory` | Strictest memory quality | Strongest trust, lifecycle, and prompt safety |
 
 ## Integration Patterns
 

@@ -12,6 +12,40 @@ export type FactSource = 'user_stated' | 'promoted_from_working' | 'manual';
 export type FactConfidence = 'high' | 'medium' | 'low';
 export type VerificationStatus = 'unverified' | 'corroborated' | 'verified' | 'tool_verified';
 export type KnowledgeRelation = 'duplicate' | 'compatible' | 'update' | 'conflict';
+export type KnowledgeState =
+  | 'candidate'
+  | 'provisional'
+  | 'trusted'
+  | 'disputed'
+  | 'superseded'
+  | 'retired';
+export type KnowledgeClass =
+  | 'identity'
+  | 'preference'
+  | 'constraint'
+  | 'procedure'
+  | 'strategy'
+  | 'anti_pattern'
+  | 'project_fact'
+  | 'episodic_fact';
+export type EvidenceSourceType =
+  | 'user_turn'
+  | 'assistant_turn'
+  | 'system_turn'
+  | 'tool_output'
+  | 'execution_result'
+  | 'human_feedback'
+  | 'working_memory_summary'
+  | 'manual'
+  | 'imported';
+export type SupportPolarity = 'supports' | 'contradicts';
+export type GroundingStrength = 'weak' | 'moderate' | 'strong' | 'tool_verified';
+export type KnowledgeDecision =
+  | 'promote_candidate'
+  | 'keep_provisional'
+  | 'reject_candidate'
+  | 'mark_disputed'
+  | 'supersede_existing';
 export type KnowledgeAuditDecision =
   | 'created'
   | 'duplicate'
@@ -47,6 +81,42 @@ export const FACT_SOURCES: readonly FactSource[] = [
   'manual',
 ];
 export const FACT_CONFIDENCES: readonly FactConfidence[] = ['high', 'medium', 'low'];
+export const KNOWLEDGE_STATES: readonly KnowledgeState[] = [
+  'candidate',
+  'provisional',
+  'trusted',
+  'disputed',
+  'superseded',
+  'retired',
+];
+export const KNOWLEDGE_CLASSES: readonly KnowledgeClass[] = [
+  'identity',
+  'preference',
+  'constraint',
+  'procedure',
+  'strategy',
+  'anti_pattern',
+  'project_fact',
+  'episodic_fact',
+];
+export const EVIDENCE_SOURCE_TYPES: readonly EvidenceSourceType[] = [
+  'user_turn',
+  'assistant_turn',
+  'system_turn',
+  'tool_output',
+  'execution_result',
+  'human_feedback',
+  'working_memory_summary',
+  'manual',
+  'imported',
+];
+export const SUPPORT_POLARITIES: readonly SupportPolarity[] = ['supports', 'contradicts'];
+export const GROUNDING_STRENGTHS: readonly GroundingStrength[] = [
+  'weak',
+  'moderate',
+  'strong',
+  'tool_verified',
+];
 export const VERIFICATION_STATUSES: readonly VerificationStatus[] = [
   'unverified',
   'corroborated',
@@ -141,6 +211,8 @@ export interface KnowledgeMemory extends NormalizedMemoryScope {
   id: number;
   fact: string;
   fact_type: FactType;
+  knowledge_state: KnowledgeState;
+  knowledge_class: KnowledgeClass;
   fact_subject: string | null;
   fact_attribute: string | null;
   fact_value: string | null;
@@ -150,10 +222,23 @@ export interface KnowledgeMemory extends NormalizedMemoryScope {
   source: FactSource;
   confidence: FactConfidence;
   confidence_score: number;
+  grounding_strength: GroundingStrength;
+  evidence_count: number;
+  trust_score: number;
   verification_status: VerificationStatus;
   verification_notes: string | null;
+  last_verified_at: number | null;
+  next_reverification_at: number | null;
+  last_confirmed_at: number | null;
+  confirmation_count: number;
   source_working_memory_id: number | null;
   source_turn_ids: number[];
+  successful_use_count: number;
+  failed_use_count: number;
+  disputed_at: number | null;
+  dispute_reason: string | null;
+  contradiction_score: number;
+  superseded_at: number | null;
   superseded_by_id: number | null;
   retired_at: number | null;
   created_at: number;
@@ -165,6 +250,8 @@ export interface KnowledgeMemory extends NormalizedMemoryScope {
 export interface NewKnowledgeMemory extends MemoryScope {
   fact: string;
   fact_type: FactType;
+  knowledge_state?: KnowledgeState;
+  knowledge_class?: KnowledgeClass;
   fact_subject?: string | null;
   fact_attribute?: string | null;
   fact_value?: string | null;
@@ -174,10 +261,23 @@ export interface NewKnowledgeMemory extends MemoryScope {
   source: FactSource;
   confidence: FactConfidence;
   confidence_score?: number;
+  grounding_strength?: GroundingStrength;
+  evidence_count?: number;
+  trust_score?: number;
   verification_status?: VerificationStatus;
   verification_notes?: string | null;
+  last_verified_at?: number | null;
+  next_reverification_at?: number | null;
+  last_confirmed_at?: number | null;
+  confirmation_count?: number;
   source_working_memory_id?: number | null;
   source_turn_ids?: number[];
+  successful_use_count?: number;
+  failed_use_count?: number;
+  disputed_at?: number | null;
+  dispute_reason?: string | null;
+  contradiction_score?: number;
+  superseded_at?: number | null;
   retired_at?: number | null;
 }
 
@@ -222,6 +322,95 @@ export interface NewKnowledgeMemoryAudit extends MemoryScope {
   related_knowledge_id?: number | null;
   detail?: string | null;
   created_at?: number;
+}
+
+export interface KnowledgeCandidate extends NormalizedMemoryScope {
+  id: number;
+  working_memory_id: number;
+  fact: string;
+  fact_type: FactType;
+  knowledge_class: KnowledgeClass;
+  normalized_fact: string;
+  slot_key: string | null;
+  confidence: FactConfidence;
+  source_summary: boolean;
+  source_turns: boolean;
+  grounding_strength: GroundingStrength;
+  evidence_count: number;
+  trust_score: number;
+  state: 'candidate' | 'provisional';
+  created_at: number;
+  promoted_knowledge_id: number | null;
+}
+
+export interface NewKnowledgeCandidate extends MemoryScope {
+  working_memory_id: number;
+  fact: string;
+  fact_type: FactType;
+  knowledge_class: KnowledgeClass;
+  normalized_fact: string;
+  slot_key?: string | null;
+  confidence: FactConfidence;
+  source_summary?: boolean;
+  source_turns?: boolean;
+  grounding_strength?: GroundingStrength;
+  evidence_count?: number;
+  trust_score?: number;
+  state?: 'candidate' | 'provisional';
+  created_at?: number;
+  promoted_knowledge_id?: number | null;
+}
+
+export interface KnowledgeEvidence extends NormalizedMemoryScope {
+  id: number;
+  knowledge_memory_id: number | null;
+  knowledge_candidate_id: number | null;
+  working_memory_id: number | null;
+  turn_id: number | null;
+  source_type: EvidenceSourceType;
+  support_polarity: SupportPolarity;
+  speaker_role: TurnRole | null;
+  actor: string | null;
+  excerpt: string;
+  start_offset: number | null;
+  end_offset: number | null;
+  is_explicit: boolean;
+  explicitness_score: number;
+  outcome: 'success' | 'failure' | 'neutral' | null;
+  created_at: number;
+}
+
+export interface NewKnowledgeEvidence extends MemoryScope {
+  knowledge_memory_id?: number | null;
+  knowledge_candidate_id?: number | null;
+  working_memory_id?: number | null;
+  turn_id?: number | null;
+  source_type: EvidenceSourceType;
+  support_polarity: SupportPolarity;
+  speaker_role?: TurnRole | null;
+  actor?: string | null;
+  excerpt: string;
+  start_offset?: number | null;
+  end_offset?: number | null;
+  is_explicit?: boolean;
+  explicitness_score?: number;
+  outcome?: 'success' | 'failure' | 'neutral' | null;
+  created_at?: number;
+}
+
+export interface KnowledgeTrustAssessment {
+  trust_score: number;
+  state: KnowledgeState;
+  decision: KnowledgeDecision;
+  reasons: string[];
+}
+
+export interface KnowledgeConflict {
+  existing_knowledge_id: number;
+  candidate_id: number | null;
+  relation: 'duplicate' | 'update' | 'conflict' | 'compatible';
+  severity: 'low' | 'medium' | 'high';
+  resolution: 'ignore' | 'dispute' | 'supersede';
 }
 
 export interface ContextMonitor extends NormalizedMemoryScope {
@@ -278,6 +467,13 @@ export interface NewCompactionLog extends MemoryScope {
 export interface SearchOptions {
   limit?: number;
   activeOnly?: boolean;
+  includeProvisional?: boolean;
+  includeDisputed?: boolean;
+  minimumTrustScore?: number;
+  knowledgeStates?: KnowledgeState[];
+  knowledgeClasses?: KnowledgeClass[];
+  preferLocalTrusted?: boolean;
+  preferLineageMemory?: boolean;
 }
 
 export interface SearchResult<T> {

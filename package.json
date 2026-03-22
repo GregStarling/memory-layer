@@ -90,10 +90,13 @@
     "eval:retrieval": "npm run build && node evals/retrieval-quality.mjs",
     "eval:scenarios": "npm run build && node evals/scenario-evals.mjs",
     "eval:gate": "npm run build && node evals/scenario-evals.mjs --enforce",
+    "eval:memory-quality": "npm run build && node evals/memory-quality/index.mjs",
+    "eval:memory-quality:enforce": "npm run build && node evals/memory-quality/index.mjs --enforce",
+    "eval:memory-quality:delta": "npm run build && node scripts/report-memory-quality-delta.mjs",
     "export:memory": "node scripts/export-memory.mjs",
     "import:memory": "node scripts/import-memory.mjs",
     "pack:check": "npm pack --dry-run",
-    "release:check": "npm run lint && npm run test:coverage && npm run eval:gate && npm run pack:check",
+    "release:check": "npm run lint && npm run test:coverage && npm run eval:gate && npm run eval:memory-quality:enforce && npm run eval:memory-quality:delta && npm run pack:check",
     "prepublishOnly": "npm run lint && npm test && npm run build && npm run pack:check"
   },
   "dependencies": {

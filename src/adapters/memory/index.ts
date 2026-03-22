@@ -4,9 +4,13 @@ import type {
   CompactionLog,
   ContextMonitor,
   ContextMonitorUpsert,
+  KnowledgeCandidate,
+  KnowledgeEvidence,
   KnowledgeMemory,
   KnowledgeMemoryAudit,
   NewCompactionLog,
+  NewKnowledgeCandidate,
+  NewKnowledgeEvidence,
   NewKnowledgeMemory,
   NewKnowledgeMemoryAudit,
   NewTurn,
@@ -23,11 +27,14 @@ import type {
 } from '../../contracts/types.js';
 import { estimateTokens } from '../../core/tokens.js';
 import { emitMemoryEvent, type TelemetryOptions } from '../../core/telemetry.js';
+import { matchesKnowledgeSearchOptions } from '../../core/retrieval.js';
 import {
   assertArchiveInput,
   nowSeconds,
   validateContextMonitorUpsert,
   validateNewCompactionLog,
+  validateNewKnowledgeCandidate,
+  validateNewKnowledgeEvidence,
   validateNewKnowledgeMemory,
   validateNewKnowledgeMemoryAudit,
   validateNewTurn,
@@ -42,6 +49,8 @@ interface MemoryState {
   turns: Turn[];
   workingMemory: WorkingMemory[];
   knowledgeMemory: KnowledgeMemory[];
+  knowledgeCandidates: KnowledgeCandidate[];
+  knowledgeEvidence: KnowledgeEvidence[];
   knowledgeAudits: KnowledgeMemoryAudit[];
   workItems: WorkItem[];
   contextMonitors: ContextMonitor[];
@@ -102,6 +111,13 @@ function resolveSearchOptions(options?: SearchOptions): Required<SearchOptions> 
   return {
     limit: options?.limit ?? 10,
     activeOnly: options?.activeOnly ?? true,
+    includeProvisional: options?.includeProvisional ?? false,
+    includeDisputed: options?.includeDisputed ?? false,
+    minimumTrustScore: options?.minimumTrustScore ?? 0,
+    knowledgeStates: options?.knowledgeStates ?? [],
+    knowledgeClasses: options?.knowledgeClasses ?? [],
+    preferLocalTrusted: options?.preferLocalTrusted ?? false,
+    preferLineageMemory: options?.preferLineageMemory ?? false,
   };
 }
 
@@ -136,6 +152,8 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     turns: [],
     workingMemory: [],
     knowledgeMemory: [],
+    knowledgeCandidates: [],
+    knowledgeEvidence: [],
     knowledgeAudits: [],
     workItems: [],
     contextMonitors: [],
@@ -146,6 +164,8 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     turn: 1,
     workingMemory: 1,
     knowledgeMemory: 1,
+    knowledgeCandidate: 1,
+    knowledgeEvidence: 1,
     knowledgeAudit: 1,
     workItem: 1,
     contextMonitor: 1,
@@ -306,6 +326,8 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         id: ids.knowledgeMemory++,
         fact: input.fact,
         fact_type: input.fact_type,
+        knowledge_state: input.knowledge_state ?? 'trusted',
+        knowledge_class: input.knowledge_class ?? 'project_fact',
         fact_subject: input.fact_subject ?? null,
         fact_attribute: input.fact_attribute ?? null,
         fact_value: input.fact_value ?? null,
@@ -315,10 +337,23 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         source: input.source,
         confidence: input.confidence,
         confidence_score: input.confidence_score ?? 0.5,
+        grounding_strength: input.grounding_strength ?? 'moderate',
+        evidence_count: input.evidence_count ?? Math.max(1, (input.source_turn_ids ?? []).length),
+        trust_score: input.trust_score ?? (input.confidence_score ?? 0.5),
         verification_status: input.verification_status ?? 'unverified',
         verification_notes: input.verification_notes ?? null,
+        last_verified_at: input.last_verified_at ?? null,
+        next_reverification_at: input.next_reverification_at ?? null,
+        last_confirmed_at: input.last_confirmed_at ?? null,
+        confirmation_count: input.confirmation_count ?? 0,
         source_working_memory_id: input.source_working_memory_id ?? null,
         source_turn_ids: input.source_turn_ids ?? [],
+        successful_use_count: input.successful_use_count ?? 0,
+        failed_use_count: input.failed_use_count ?? 0,
+        disputed_at: input.disputed_at ?? null,
+        dispute_reason: input.dispute_reason ?? null,
+        contradiction_score: input.contradiction_score ?? 0,
+        superseded_at: input.superseded_at ?? null,
         superseded_by_id: null,
         retired_at: input.retired_at ?? null,
         created_at: createdAt,
@@ -332,6 +367,94 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
 
     insertKnowledgeMemories(inputs) {
       return inputs.map((input) => this.insertKnowledgeMemory(input));
+    },
+
+    insertKnowledgeCandidate(input) {
+      const scope = validateNewKnowledgeCandidate(input);
+      const record: KnowledgeCandidate = {
+        ...scope,
+        id: ids.knowledgeCandidate++,
+        working_memory_id: input.working_memory_id,
+        fact: input.fact,
+        fact_type: input.fact_type,
+        knowledge_class: input.knowledge_class,
+        normalized_fact: input.normalized_fact,
+        slot_key: input.slot_key ?? null,
+        confidence: input.confidence,
+        source_summary: input.source_summary ?? false,
+        source_turns: input.source_turns ?? true,
+        grounding_strength: input.grounding_strength ?? 'weak',
+        evidence_count: input.evidence_count ?? 0,
+        trust_score: input.trust_score ?? 0,
+        state: input.state ?? 'candidate',
+        created_at: input.created_at ?? nowSeconds(),
+        promoted_knowledge_id: input.promoted_knowledge_id ?? null,
+      };
+      state.knowledgeCandidates.push(record);
+      return record;
+    },
+
+    insertKnowledgeCandidates(inputs) {
+      return inputs.map((input) => this.insertKnowledgeCandidate(input));
+    },
+
+    getKnowledgeCandidateById(id) {
+      return state.knowledgeCandidates.find((item) => item.id === id) ?? null;
+    },
+
+    listKnowledgeCandidates(scope, options) {
+      return state.knowledgeCandidates.filter(
+        (item) =>
+          matchesScope(item, scope) &&
+          (!options?.state || options.state.includes(item.state)),
+      );
+    },
+
+    insertKnowledgeEvidence(input) {
+      const scope = validateNewKnowledgeEvidence(input);
+      const record: KnowledgeEvidence = {
+        ...scope,
+        id: ids.knowledgeEvidence++,
+        knowledge_memory_id: input.knowledge_memory_id ?? null,
+        knowledge_candidate_id: input.knowledge_candidate_id ?? null,
+        working_memory_id: input.working_memory_id ?? null,
+        turn_id: input.turn_id ?? null,
+        source_type: input.source_type,
+        support_polarity: input.support_polarity,
+        speaker_role: input.speaker_role ?? null,
+        actor: input.actor ?? null,
+        excerpt: input.excerpt,
+        start_offset: input.start_offset ?? null,
+        end_offset: input.end_offset ?? null,
+        is_explicit: input.is_explicit ?? false,
+        explicitness_score: input.explicitness_score ?? 0,
+        outcome: input.outcome ?? null,
+        created_at: input.created_at ?? nowSeconds(),
+      };
+      state.knowledgeEvidence.push(record);
+      return record;
+    },
+
+    insertKnowledgeEvidenceBatch(inputs) {
+      return inputs.map((input) => this.insertKnowledgeEvidence(input));
+    },
+
+    listKnowledgeEvidenceForKnowledge(knowledgeId) {
+      return state.knowledgeEvidence.filter((item) => item.knowledge_memory_id === knowledgeId);
+    },
+
+    listKnowledgeEvidenceForCandidate(candidateId) {
+      return state.knowledgeEvidence.filter((item) => item.knowledge_candidate_id === candidateId);
+    },
+
+    promoteKnowledgeCandidate(candidateId, input) {
+      const candidate = state.knowledgeCandidates.find((item) => item.id === candidateId);
+      const knowledge = this.insertKnowledgeMemory(input);
+      if (candidate) {
+        candidate.promoted_knowledge_id = knowledge.id;
+        candidate.state = 'provisional';
+      }
+      return knowledge;
     },
 
     getKnowledgeMemoryById(id) {
@@ -382,6 +505,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
             (!resolved.activeOnly ||
               (item.superseded_by_id === null && item.retired_at === null)),
         )
+        .filter((item) => matchesKnowledgeSearchOptions(item, resolved))
         .map((item) => ({
           item,
           rank: scoreText(query, item.fact),
@@ -407,6 +531,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
             (!resolved.activeOnly ||
               (item.superseded_by_id === null && item.retired_at === null)),
         )
+        .filter((item) => matchesKnowledgeSearchOptions(item, resolved))
         .map((item) => ({
           item,
           rank: scoreText(query, item.fact),
@@ -458,6 +583,29 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         .slice(0, limit);
     },
 
+    updateKnowledgeMemory(id, patch) {
+      const item = state.knowledgeMemory.find((entry) => entry.id === id);
+      if (!item) return null;
+      if (patch.knowledge_state !== undefined) item.knowledge_state = patch.knowledge_state;
+      if (patch.knowledge_class !== undefined) item.knowledge_class = patch.knowledge_class;
+      if (patch.trust_score !== undefined) item.trust_score = patch.trust_score;
+      if (patch.verification_status !== undefined) item.verification_status = patch.verification_status;
+      if (patch.verification_notes !== undefined) item.verification_notes = patch.verification_notes;
+      if (patch.last_verified_at !== undefined) item.last_verified_at = patch.last_verified_at;
+      if (patch.next_reverification_at !== undefined) {
+        item.next_reverification_at = patch.next_reverification_at;
+      }
+      if (patch.last_confirmed_at !== undefined) item.last_confirmed_at = patch.last_confirmed_at;
+      if (patch.confirmation_count !== undefined) item.confirmation_count = patch.confirmation_count;
+      if (patch.disputed_at !== undefined) item.disputed_at = patch.disputed_at;
+      if (patch.dispute_reason !== undefined) item.dispute_reason = patch.dispute_reason;
+      if (patch.contradiction_score !== undefined) item.contradiction_score = patch.contradiction_score;
+      if (patch.superseded_at !== undefined) item.superseded_at = patch.superseded_at;
+      if (patch.successful_use_count !== undefined) item.successful_use_count = patch.successful_use_count;
+      if (patch.failed_use_count !== undefined) item.failed_use_count = patch.failed_use_count;
+      return item;
+    },
+
     touchKnowledgeMemory(id) {
       const item = state.knowledgeMemory.find((entry) => entry.id === id);
       if (!item) return;
@@ -472,7 +620,11 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
 
     supersedeKnowledgeMemory(oldId, newId) {
       const item = state.knowledgeMemory.find((entry) => entry.id === oldId);
-      if (item) item.superseded_by_id = newId;
+      if (item) {
+        item.superseded_by_id = newId;
+        item.superseded_at = nowSeconds();
+        item.knowledge_state = 'superseded';
+      }
     },
 
     insertWorkItem(input: NewWorkItem): WorkItem {

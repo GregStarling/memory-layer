@@ -15,6 +15,23 @@ export interface MaintenancePolicy {
   minKnowledgeAccessCount?: number;
   maxActiveKnowledgeItems?: number;
   consolidateKnowledge?: boolean;
+  trustedCoreRetentionDays?: number;
+  provisionalRetentionDays?: number;
+  disputedRetentionDays?: number;
+  reverificationCadenceDays?: number;
+  classRetentionOverrides?: Partial<Record<
+    | 'identity'
+    | 'preference'
+    | 'constraint'
+    | 'procedure'
+    | 'strategy'
+    | 'anti_pattern'
+    | 'project_fact'
+    | 'episodic_fact',
+    number
+  >>;
+  requireReconfirmationForProjectFacts?: boolean;
+  preserveEvidenceForTrustedKnowledge?: boolean;
 }
 
 export interface MonitorPolicy {
@@ -44,6 +61,17 @@ export interface ExtractionPolicy {
   touchDuplicates?: boolean;
   minConfidenceForPromotion?: 'high' | 'medium';
   conflictStrategy?: ConflictStrategy;
+  requireGroundingForTrusted?: boolean;
+  minimumEvidenceCountForTrusted?: number;
+  assistantClaimPenalty?: number;
+  toolEvidenceBoost?: number;
+  explicitStatementBoost?: number;
+  contradictionDisputeThreshold?: number;
+  trustPromotionThreshold?: number;
+  trustProvisionalThreshold?: number;
+  humanFeedbackBoost?: number;
+  executionSuccessBoost?: number;
+  executionFailurePenalty?: number;
 }
 
 export interface ContextPolicy {
@@ -55,6 +83,14 @@ export interface ContextPolicy {
   semanticWeight?: number;
   recencyWeight?: number;
   importanceWeight?: number;
+  trustWeight?: number;
+  durabilityWeight?: number;
+  evidenceWeight?: number;
+  contradictionPenalty?: number;
+  provisionalPenalty?: number;
+  objectiveLinkWeight?: number;
+  trustedCoreLimit?: number;
+  taskRelevantLimit?: number;
   diversityPenalty?: number;
   maxPerFactType?: number;
   touchSelectedKnowledge?: boolean;
@@ -94,6 +130,17 @@ export const DEFAULT_EXTRACTION_POLICY: Required<ExtractionPolicy> = {
   touchDuplicates: true,
   minConfidenceForPromotion: 'medium',
   conflictStrategy: 'supersede',
+  requireGroundingForTrusted: true,
+  minimumEvidenceCountForTrusted: 2,
+  assistantClaimPenalty: 0.15,
+  toolEvidenceBoost: 0.2,
+  explicitStatementBoost: 0.1,
+  contradictionDisputeThreshold: 0.35,
+  trustPromotionThreshold: 0.7,
+  trustProvisionalThreshold: 0.45,
+  humanFeedbackBoost: 0.2,
+  executionSuccessBoost: 0.15,
+  executionFailurePenalty: 0.2,
 };
 
 export const DEFAULT_CONTEXT_POLICY: Required<ContextPolicy> = {
@@ -105,6 +152,14 @@ export const DEFAULT_CONTEXT_POLICY: Required<ContextPolicy> = {
   semanticWeight: 1,
   recencyWeight: 1,
   importanceWeight: 0.25,
+  trustWeight: 1.3,
+  durabilityWeight: 0.8,
+  evidenceWeight: 0.5,
+  contradictionPenalty: 1.5,
+  provisionalPenalty: 0.75,
+  objectiveLinkWeight: 0.4,
+  trustedCoreLimit: 8,
+  taskRelevantLimit: 12,
   diversityPenalty: 0.2,
   maxPerFactType: 8,
   touchSelectedKnowledge: true,
@@ -117,4 +172,20 @@ export const DEFAULT_MAINTENANCE_POLICY: Required<MaintenancePolicy> = {
   minKnowledgeAccessCount: 1,
   maxActiveKnowledgeItems: 500,
   consolidateKnowledge: false,
+  trustedCoreRetentionDays: 365,
+  provisionalRetentionDays: 14,
+  disputedRetentionDays: 90,
+  reverificationCadenceDays: 30,
+  classRetentionOverrides: {
+    identity: 3650,
+    preference: 365,
+    constraint: 365,
+    procedure: 180,
+    strategy: 180,
+    anti_pattern: 365,
+    project_fact: 90,
+    episodic_fact: 14,
+  },
+  requireReconfirmationForProjectFacts: true,
+  preserveEvidenceForTrustedKnowledge: true,
 };

@@ -13,6 +13,9 @@ export interface SessionBootstrap {
 export interface FormatOptions {
   includeCitations?: boolean;
   includeTrustMetadata?: boolean;
+  includeProvisionalKnowledge?: boolean;
+  includeDisputedKnowledge?: boolean;
+  includeEvidenceMarkers?: boolean;
   headingLevel?: 'markdown' | 'plain';
 }
 
@@ -27,7 +30,12 @@ function formatKnowledgeLine(knowledge: KnowledgeMemory, options?: FormatOptions
       `confidence=${knowledge.confidence}`,
       `score=${knowledge.confidence_score.toFixed(2)}`,
       `status=${knowledge.verification_status}`,
+      `state=${knowledge.knowledge_state}`,
+      `trust=${knowledge.trust_score.toFixed(2)}`,
     );
+  }
+  if (options?.includeEvidenceMarkers && knowledge.evidence_count > 0) {
+    suffix.push(`evidence=${knowledge.evidence_count}`);
   }
   if (options?.includeCitations) {
     suffix.push(`memory:${knowledge.id}`);
@@ -54,9 +62,14 @@ export function formatContextForPrompt(
       ? context.activeObjectives.map((item) => `- ${item.title} (${item.status})`)
       : ['- None']),
     '',
-    formatHeading('Durable Knowledge', options),
-    ...(context.durableKnowledge.length > 0
-      ? context.durableKnowledge.map((item) => formatKnowledgeLine(item, options))
+    formatHeading('Trusted Core Memory', options),
+    ...(context.trustedCoreMemory.length > 0
+      ? context.trustedCoreMemory.map((item) => formatKnowledgeLine(item, options))
+      : ['- None']),
+    '',
+    formatHeading('Task Relevant Knowledge', options),
+    ...(context.taskRelevantKnowledge.length > 0
+      ? context.taskRelevantKnowledge.map((item) => formatKnowledgeLine(item, options))
       : ['- None']),
     '',
     formatHeading('Unresolved Work', options),
@@ -69,6 +82,26 @@ export function formatContextForPrompt(
       ? context.recentSummaries.map((item) => `- ${item.summary}`)
       : ['- None']),
   ];
+
+  if (options?.includeProvisionalKnowledge) {
+    sections.push(
+      '',
+      formatHeading('Provisional Knowledge', options),
+      ...(context.provisionalKnowledge.length > 0
+        ? context.provisionalKnowledge.map((item) => formatKnowledgeLine(item, options))
+        : ['- None']),
+    );
+  }
+
+  if (options?.includeDisputedKnowledge) {
+    sections.push(
+      '',
+      formatHeading('Disputed Knowledge', options),
+      ...(context.disputedKnowledge.length > 0
+        ? context.disputedKnowledge.map((item) => formatKnowledgeLine(item, options))
+        : ['- None']),
+    );
+  }
 
   return sections.join('\n');
 }

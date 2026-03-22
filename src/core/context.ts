@@ -13,6 +13,7 @@ import type {
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import { estimateTokens, type TokenEstimator } from './tokens.js';
 import { emitMemoryEvent } from './telemetry.js';
+import { getLineageScore, rankKnowledge } from './retrieval.js';
 
 export interface ContextAssemblyOptions {
   crossScopeLevel?: ScopeLevel;
@@ -32,18 +33,26 @@ export interface ContextAssemblyOptions {
 
 export interface KnowledgeSelectionReason {
   knowledgeMemoryId: number;
+  bucket: 'trusted_core' | 'task_relevant' | 'provisional' | 'disputed';
   lexicalScore: number;
   semanticScore: number;
   recencyScore: number;
   importanceScore: number;
+  trustScore: number;
+  classImportanceScore: number;
   diversityPenalty: number;
   finalScore: number;
+  explanation: string;
 }
 
 export interface MemoryContext {
   mode: ContextMode;
   activeTurns: Turn[];
   workingMemory: WorkingMemory | null;
+  trustedCoreMemory: KnowledgeMemory[];
+  taskRelevantKnowledge: KnowledgeMemory[];
+  provisionalKnowledge: KnowledgeMemory[];
+  disputedKnowledge: KnowledgeMemory[];
   relevantKnowledge: KnowledgeMemory[];
   durableKnowledge: KnowledgeMemory[];
   recentSummaries: WorkingMemory[];
@@ -61,6 +70,8 @@ interface CandidateKnowledge {
   semanticScore: number;
   recencyScore: number;
   importanceScore: number;
+  trustScore: number;
+  classImportanceScore: number;
   baseScore: number;
 }
 
@@ -212,6 +223,9 @@ function buildCandidates(
   lexicalRanks: Map<number, number>,
   semanticRanks: Map<number, number>,
   policy: Required<ContextPolicy>,
+  scope: MemoryScope,
+  relevanceTexts: string[],
+  preferLineageMemory: boolean,
 ): CandidateKnowledge[] {
   const now = Math.floor(Date.now() / 1000);
   return items.map((item) => {
@@ -222,17 +236,27 @@ function buildCandidates(
         ? 1 / (1 + Math.max(0, now - item.last_accessed_at) / 86400)
         : 0;
     const importanceScore = Math.min(1, item.access_count / 10);
+    const ranking = rankKnowledge({
+      knowledge: item,
+      lexicalScore,
+      semanticScore,
+      recencyScore,
+      importanceScore,
+      policy,
+      scope,
+      relevanceTexts,
+      preferLocalTrusted: true,
+      preferLineageMemory,
+    });
     return {
       item,
       lexicalScore,
       semanticScore,
       recencyScore,
       importanceScore,
-      baseScore:
-        lexicalScore * policy.lexicalWeight +
-        semanticScore * policy.semanticWeight +
-        recencyScore * policy.recencyWeight +
-        importanceScore * policy.importanceWeight,
+      trustScore: ranking.trustScore,
+      classImportanceScore: ranking.classImportanceScore,
+      baseScore: ranking.finalScore,
     };
   });
 }
@@ -240,6 +264,8 @@ function buildCandidates(
 function selectKnowledge(
   candidates: CandidateKnowledge[],
   policy: Required<ContextPolicy>,
+  bucket: KnowledgeSelectionReason['bucket'],
+  limit = policy.maxKnowledgeItems,
 ): {
   relevantKnowledge: KnowledgeMemory[];
   knowledgeSelectionReasons: KnowledgeSelectionReason[];
@@ -249,7 +275,7 @@ function selectKnowledge(
   const reasons: KnowledgeSelectionReason[] = [];
   const perTypeCount = new Map<string, number>();
 
-  while (remaining.length > 0 && selected.length < policy.maxKnowledgeItems) {
+  while (remaining.length > 0 && selected.length < limit) {
     let bestIndex = -1;
     let bestScore = Number.NEGATIVE_INFINITY;
     let bestPenalty = 0;
@@ -291,12 +317,16 @@ function selectKnowledge(
     perTypeCount.set(winner.item.fact_type, (perTypeCount.get(winner.item.fact_type) ?? 0) + 1);
     reasons.push({
       knowledgeMemoryId: winner.item.id,
+      bucket,
       lexicalScore: winner.lexicalScore,
       semanticScore: winner.semanticScore,
       recencyScore: winner.recencyScore,
       importanceScore: winner.importanceScore,
+      trustScore: winner.trustScore,
+      classImportanceScore: winner.classImportanceScore,
       diversityPenalty: bestPenalty,
       finalScore: bestScore,
+      explanation: `${bucket}:${winner.item.knowledge_state}:${winner.item.knowledge_class}`,
     });
   }
 
@@ -375,10 +405,95 @@ export async function buildMemoryContext(
         )
       : new Map<number, number>();
 
-  let { relevantKnowledge, knowledgeSelectionReasons } = selectKnowledge(
-    buildCandidates(temporalKnowledge, lexicalRanks, semanticRanks, policy),
+  const scopedKnowledge =
+    options?.crossScopeLevel && options.crossScopeLevel !== 'scope'
+      ? temporalKnowledge.filter(
+          (item) =>
+            item.scope_id === normalizedScope.scope_id ||
+            getLineageScore(normalizedScope.scope_id, item.scope_id) >= 0.5,
+        )
+      : temporalKnowledge;
+  const relevanceTexts = [
+    options?.relevanceQuery ?? '',
+    workingMemory?.summary ?? '',
+    ...activeObjectives.map((item) => item.title),
+  ].filter((value) => value.trim().length > 0);
+  const candidates = buildCandidates(
+    scopedKnowledge,
+    lexicalRanks,
+    semanticRanks,
     policy,
+    normalizedScope,
+    relevanceTexts,
+    options?.crossScopeLevel != null && options.crossScopeLevel !== 'scope',
   );
+  const trustedCoreClasses = new Set(['identity', 'constraint', 'preference']);
+  let trustedCoreMemory = selectKnowledge(
+    candidates.filter(
+      (candidate) =>
+        candidate.item.knowledge_state === 'trusted' &&
+        trustedCoreClasses.has(candidate.item.knowledge_class),
+    ),
+    policy,
+    'trusted_core',
+    Math.min(policy.trustedCoreLimit, Math.max(3, Math.floor(policy.maxKnowledgeItems / 2))),
+  ).relevantKnowledge;
+  const trustedCoreIds = new Set(trustedCoreMemory.map((item) => item.id));
+  let taskRelevantKnowledge = selectKnowledge(
+    candidates.filter(
+      (candidate) =>
+        candidate.item.knowledge_state === 'trusted' && !trustedCoreIds.has(candidate.item.id),
+    ),
+    policy,
+    'task_relevant',
+    Math.min(policy.taskRelevantLimit, Math.max(0, policy.maxKnowledgeItems - trustedCoreMemory.length)),
+  ).relevantKnowledge;
+  const provisionalKnowledge = selectKnowledge(
+    candidates.filter((candidate) => candidate.item.knowledge_state === 'provisional'),
+    policy,
+    'provisional',
+    4,
+  ).relevantKnowledge;
+  const disputedKnowledge = selectKnowledge(
+    candidates.filter((candidate) => candidate.item.knowledge_state === 'disputed'),
+    policy,
+    'disputed',
+    4,
+  ).relevantKnowledge;
+  let relevantKnowledge = [...trustedCoreMemory, ...taskRelevantKnowledge];
+  let knowledgeSelectionReasons = [
+    ...selectKnowledge(
+      candidates.filter(
+        (candidate) =>
+          candidate.item.knowledge_state === 'trusted' &&
+          trustedCoreClasses.has(candidate.item.knowledge_class),
+      ),
+      policy,
+      'trusted_core',
+      trustedCoreMemory.length,
+    ).knowledgeSelectionReasons,
+    ...selectKnowledge(
+      candidates.filter(
+        (candidate) =>
+          candidate.item.knowledge_state === 'trusted' && !trustedCoreIds.has(candidate.item.id),
+      ),
+      policy,
+      'task_relevant',
+      taskRelevantKnowledge.length,
+    ).knowledgeSelectionReasons,
+    ...selectKnowledge(
+      candidates.filter((candidate) => candidate.item.knowledge_state === 'provisional'),
+      policy,
+      'provisional',
+      provisionalKnowledge.length,
+    ).knowledgeSelectionReasons,
+    ...selectKnowledge(
+      candidates.filter((candidate) => candidate.item.knowledge_state === 'disputed'),
+      policy,
+      'disputed',
+      disputedKnowledge.length,
+    ).knowledgeSelectionReasons,
+  ];
 
   let trimmedSummaries = [...recentSummaries];
   let tokenEstimate = computeContextTokenEstimate(
@@ -413,6 +528,10 @@ export async function buildMemoryContext(
 
   while (tokenEstimate > policy.tokenBudget && relevantKnowledge.length > 0) {
     relevantKnowledge = relevantKnowledge.slice(0, -1);
+    trustedCoreMemory = trustedCoreMemory.filter((item) => relevantKnowledge.some((entry) => entry.id === item.id));
+    taskRelevantKnowledge = taskRelevantKnowledge.filter((item) =>
+      relevantKnowledge.some((entry) => entry.id === item.id),
+    );
     const retainedIds = new Set(relevantKnowledge.map((item) => item.id));
     knowledgeSelectionReasons = knowledgeSelectionReasons.filter((entry) =>
       retainedIds.has(entry.knowledgeMemoryId),
@@ -460,8 +579,12 @@ export async function buildMemoryContext(
     mode: policy.mode,
     activeTurns,
     workingMemory,
+    trustedCoreMemory,
+    taskRelevantKnowledge,
+    provisionalKnowledge,
+    disputedKnowledge,
     relevantKnowledge,
-    durableKnowledge: relevantKnowledge,
+    durableKnowledge: trustedCoreMemory,
     recentSummaries: trimmedSummaries,
     currentObjective,
     activeObjectives,

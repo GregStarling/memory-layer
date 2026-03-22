@@ -1,13 +1,21 @@
 import type { MemoryScope } from '../contracts/identity.js';
 import type { MaintenancePolicy } from '../contracts/policy.js';
-import { DEFAULT_MAINTENANCE_POLICY } from '../contracts/policy.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import { nowSeconds } from './validation.js';
+import {
+  evaluateKnowledgeLifecycle,
+  getDueReverificationKnowledge,
+  isTrustedCoreKnowledge,
+  resolveMaintenancePolicy,
+} from './knowledge-lifecycle.js';
 
 export interface MaintenanceReport {
   expiredWorkingMemoryIds: number[];
   retiredKnowledgeIds: number[];
   deletedWorkItemIds: number[];
+  reverifiedKnowledgeIds: number[];
+  demotedKnowledgeIds: number[];
+  expiredCandidateIds: number[];
 }
 
 export async function runMaintenance(
@@ -15,14 +23,14 @@ export async function runMaintenance(
   scope: MemoryScope,
   policy: MaintenancePolicy = {},
 ): Promise<MaintenanceReport> {
-  const resolved = {
-    ...DEFAULT_MAINTENANCE_POLICY,
-    ...policy,
-  };
+  const resolved = resolveMaintenancePolicy(policy);
   const now = nowSeconds();
   const expiredWorkingMemoryIds: number[] = [];
   const retiredKnowledgeIds: number[] = [];
   const deletedWorkItemIds: number[] = [];
+  const reverifiedKnowledgeIds: number[] = [];
+  const demotedKnowledgeIds: number[] = [];
+  const expiredCandidateIds: number[] = [];
 
   const staleWorkingMemory = await adapter.getWorkingMemoryByTimeRange(scope, {
     end_at: now - resolved.workingMemoryTtlSeconds,
@@ -34,22 +42,42 @@ export async function runMaintenance(
     }
   }
 
-  const staleKnowledge = await adapter.getKnowledgeByTimeRange(scope, {
-    end_at: now - resolved.knowledgeStaleAfterSeconds,
-  });
-  for (const item of staleKnowledge) {
-    if (
-      item.retired_at === null &&
-      (item.superseded_by_id !== null || item.access_count <= resolved.minKnowledgeAccessCount)
-    ) {
+  const activeKnowledge = await adapter.getActiveKnowledgeMemory(scope);
+  const dueReverification = getDueReverificationKnowledge(activeKnowledge, resolved, now);
+  for (const item of dueReverification) {
+    await adapter.updateKnowledgeMemory(item.id, {
+      next_reverification_at: item.next_reverification_at ?? now,
+    });
+  }
+
+  for (const item of activeKnowledge) {
+    const decision = evaluateKnowledgeLifecycle(item, resolved, now);
+    if (decision.demote) {
+      await adapter.updateKnowledgeMemory(item.id, {
+        knowledge_state: 'provisional',
+        verification_status: 'unverified',
+        verification_notes: 'maintenance_demoted_pending_reconfirmation',
+        trust_score: Math.min(item.trust_score, 0.55),
+        next_reverification_at: decision.nextReverificationAt,
+      });
+      demotedKnowledgeIds.push(item.id);
+      continue;
+    }
+    if (decision.retire) {
       await adapter.retireKnowledgeMemory(item.id, now);
       retiredKnowledgeIds.push(item.id);
+      continue;
+    }
+    if (decision.nextReverificationAt !== item.next_reverification_at) {
+      await adapter.updateKnowledgeMemory(item.id, {
+        next_reverification_at: decision.nextReverificationAt,
+      });
     }
   }
 
-  const activeKnowledge = await adapter.getActiveKnowledgeMemory(scope);
   if (activeKnowledge.length > resolved.maxActiveKnowledgeItems) {
     const overflow = [...activeKnowledge]
+      .filter((item) => !isTrustedCoreKnowledge(item))
       .sort((a, b) => a.access_count - b.access_count || a.last_accessed_at - b.last_accessed_at)
       .slice(0, activeKnowledge.length - resolved.maxActiveKnowledgeItems);
     for (const item of overflow) {
@@ -98,5 +126,8 @@ export async function runMaintenance(
     expiredWorkingMemoryIds,
     retiredKnowledgeIds,
     deletedWorkItemIds,
+    reverifiedKnowledgeIds,
+    demotedKnowledgeIds,
+    expiredCandidateIds,
   };
 }

@@ -6,7 +6,7 @@ import { createRegexExtractor } from '../core/extractor.js';
 import { extractKnowledge } from '../core/orchestrator.js';
 import type { StorageAdapter } from '../contracts/storage.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
-import { makeScope, seedTurns } from './test-helpers.js';
+import { makeScope } from './test-helpers.js';
 
 describe('knowledge growth', () => {
   let adapter: StorageAdapter;
@@ -21,9 +21,26 @@ describe('knowledge growth', () => {
     adapter.close();
   });
 
+  function insertTurns(scope: ReturnType<typeof makeScope>, contents: string[]): string {
+    const sessionId = `session-${Math.random().toString(36).slice(2, 8)}`;
+    adapter.insertTurns(
+      contents.map((content, index) => ({
+        ...scope,
+        session_id: sessionId,
+        actor: `actor-${index + 1}`,
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content,
+      })),
+    );
+    return sessionId;
+  }
+
   it('extracts knowledge from working memory', async () => {
     const scope = makeScope();
-    const { sessionId } = seedTurns(adapter, scope, 2);
+    const sessionId = insertTurns(scope, [
+      'The user prefers Rust.',
+      'The system must keep this local.',
+    ]);
     const wm = adapter.insertWorkingMemory({
       ...scope,
       session_id: sessionId,
@@ -46,7 +63,7 @@ describe('knowledge growth', () => {
 
   it('skips duplicate facts and touches the existing record', async () => {
     const scope = makeScope();
-    const { sessionId } = seedTurns(adapter, scope, 2);
+    const sessionId = insertTurns(scope, ['The user prefers Rust.', 'The user prefers Rust.']);
     const existing = adapter.insertKnowledgeMemory({
       ...scope,
       fact: 'The user prefers Rust',
@@ -73,7 +90,7 @@ describe('knowledge growth', () => {
 
   it('supersedes conflicting preference facts', async () => {
     const scope = makeScope();
-    const { sessionId } = seedTurns(adapter, scope, 2);
+    const sessionId = insertTurns(scope, ['The user prefers Neovim.', 'The user prefers Neovim.']);
     const oldFact = adapter.insertKnowledgeMemory({
       ...scope,
       fact: 'The user prefers Vim',
@@ -101,7 +118,7 @@ describe('knowledge growth', () => {
 
   it('keeps unrelated preferences without superseding them', async () => {
     const scope = makeScope();
-    const { sessionId } = seedTurns(adapter, scope, 2);
+    const sessionId = insertTurns(scope, ['The user prefers TypeScript.', 'The user prefers TypeScript.']);
     const oldFact = adapter.insertKnowledgeMemory({
       ...scope,
       fact: 'The user prefers dark mode',
@@ -134,7 +151,7 @@ describe('knowledge growth', () => {
 
   it('can skip low-confidence facts via policy', async () => {
     const scope = makeScope();
-    const { sessionId } = seedTurns(adapter, scope, 2);
+    const sessionId = insertTurns(scope, ['The user prefers Rust.', 'The user prefers Rust.']);
     const wm = adapter.insertWorkingMemory({
       ...scope,
       session_id: sessionId,
@@ -159,7 +176,7 @@ describe('knowledge growth', () => {
   it('validates working memory scope', async () => {
     const scope = makeScope();
     const otherScope = makeScope({ scope_id: 'other' });
-    const { sessionId } = seedTurns(adapter, scope, 2);
+    const sessionId = insertTurns(scope, ['The user prefers Rust.', 'The user prefers Rust.']);
     const wm = adapter.insertWorkingMemory({
       ...scope,
       session_id: sessionId,

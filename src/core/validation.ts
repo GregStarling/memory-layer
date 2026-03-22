@@ -4,10 +4,16 @@ import type {
   CompactionState,
   CompactionTrigger,
   ContextMonitorUpsert,
+  EvidenceSourceType,
   FactConfidence,
   FactSource,
   FactType,
+  GroundingStrength,
   KnowledgeAuditDecision,
+  KnowledgeClass,
+  KnowledgeState,
+  NewKnowledgeCandidate,
+  NewKnowledgeEvidence,
   NewCompactionLog,
   NewKnowledgeMemoryAudit,
   NewKnowledgeMemory,
@@ -25,7 +31,12 @@ import {
   FACT_CONFIDENCES,
   FACT_SOURCES,
   FACT_TYPES,
+  EVIDENCE_SOURCE_TYPES,
+  GROUNDING_STRENGTHS,
   KNOWLEDGE_AUDIT_DECISIONS,
+  KNOWLEDGE_CLASSES,
+  KNOWLEDGE_STATES,
+  SUPPORT_POLARITIES,
   TURN_ROLES,
   WORK_ITEM_KINDS,
   WORK_ITEM_STATUSES,
@@ -103,6 +114,26 @@ export function assertFactConfidence(confidence: FactConfidence): void {
   assertEnum(confidence, FACT_CONFIDENCES, 'confidence');
 }
 
+export function assertKnowledgeState(state: KnowledgeState): void {
+  assertEnum(state, KNOWLEDGE_STATES, 'knowledge_state');
+}
+
+export function assertKnowledgeClass(knowledgeClass: KnowledgeClass): void {
+  assertEnum(knowledgeClass, KNOWLEDGE_CLASSES, 'knowledge_class');
+}
+
+export function assertEvidenceSourceType(sourceType: EvidenceSourceType): void {
+  assertEnum(sourceType, EVIDENCE_SOURCE_TYPES, 'source_type');
+}
+
+export function assertGroundingStrength(strength: GroundingStrength): void {
+  assertEnum(strength, GROUNDING_STRENGTHS, 'grounding_strength');
+}
+
+export function assertSupportPolarity(polarity: 'supports' | 'contradicts'): void {
+  assertEnum(polarity, SUPPORT_POLARITIES, 'support_polarity');
+}
+
 export function assertKnowledgeAuditDecision(decision: KnowledgeAuditDecision): void {
   assertEnum(decision, KNOWLEDGE_AUDIT_DECISIONS, 'decision');
 }
@@ -149,6 +180,15 @@ export function validateNewKnowledgeMemory(input: NewKnowledgeMemory): Normalize
   assertFactType(input.fact_type);
   assertFactSource(input.source);
   assertFactConfidence(input.confidence);
+  if (input.knowledge_state !== undefined) {
+    assertKnowledgeState(input.knowledge_state);
+  }
+  if (input.knowledge_class !== undefined) {
+    assertKnowledgeClass(input.knowledge_class);
+  }
+  if (input.grounding_strength !== undefined) {
+    assertGroundingStrength(input.grounding_strength);
+  }
   return scope;
 }
 
@@ -160,6 +200,28 @@ export function validateNewKnowledgeMemoryAudit(
   assertFactType(input.fact_type);
   assertFactConfidence(input.confidence);
   assertKnowledgeAuditDecision(input.decision);
+  return scope;
+}
+
+export function validateNewKnowledgeCandidate(input: NewKnowledgeCandidate): NormalizedMemoryScope {
+  const scope = assertScope(input);
+  assertNonEmpty(input.fact, 'fact');
+  assertFactType(input.fact_type);
+  assertKnowledgeClass(input.knowledge_class);
+  assertFactConfidence(input.confidence);
+  assertGroundingStrength(input.grounding_strength ?? 'weak');
+  assertKnowledgeState(input.state ?? 'candidate');
+  return scope;
+}
+
+export function validateNewKnowledgeEvidence(input: NewKnowledgeEvidence): NormalizedMemoryScope {
+  const scope = assertScope(input);
+  assertEvidenceSourceType(input.source_type);
+  assertSupportPolarity(input.support_polarity);
+  assertNonEmpty(input.excerpt, 'excerpt');
+  if (input.speaker_role !== undefined && input.speaker_role !== null) {
+    assertTurnRole(input.speaker_role);
+  }
   return scope;
 }
 

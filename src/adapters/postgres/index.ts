@@ -6,9 +6,13 @@ import type {
   CompactionLog,
   ContextMonitor,
   ContextMonitorUpsert,
+  KnowledgeCandidate,
+  KnowledgeEvidence,
   KnowledgeMemory,
   KnowledgeMemoryAudit,
   NewCompactionLog,
+  NewKnowledgeCandidate,
+  NewKnowledgeEvidence,
   NewKnowledgeMemory,
   NewKnowledgeMemoryAudit,
   NewWorkItem,
@@ -23,6 +27,7 @@ import type {
   WorkItem,
   WorkingMemory,
 } from '../../contracts/types.js';
+import { matchesKnowledgeSearchOptions } from '../../core/retrieval.js';
 import { estimateTokens } from '../../core/tokens.js';
 
 export interface PostgresAdapterOptions {
@@ -136,6 +141,8 @@ function mapKnowledgeMemory(row: Record<string, unknown>): KnowledgeMemory {
     scope_id: String(row.scope_id),
     fact: String(row.fact),
     fact_type: row.fact_type as KnowledgeMemory['fact_type'],
+    knowledge_state: (row.knowledge_state as KnowledgeMemory['knowledge_state']) ?? 'trusted',
+    knowledge_class: (row.knowledge_class as KnowledgeMemory['knowledge_class']) ?? 'project_fact',
     fact_subject: row.fact_subject != null ? String(row.fact_subject) : null,
     fact_attribute: row.fact_attribute != null ? String(row.fact_attribute) : null,
     fact_value: row.fact_value != null ? String(row.fact_value) : null,
@@ -145,12 +152,27 @@ function mapKnowledgeMemory(row: Record<string, unknown>): KnowledgeMemory {
     source: row.source as KnowledgeMemory['source'],
     confidence: row.confidence as KnowledgeMemory['confidence'],
     confidence_score: Number(row.confidence_score ?? 0.5),
+    grounding_strength:
+      (row.grounding_strength as KnowledgeMemory['grounding_strength']) ?? 'moderate',
+    evidence_count: Number(row.evidence_count ?? 0),
+    trust_score: Number(row.trust_score ?? 0.5),
     verification_status: (row.verification_status as KnowledgeMemory['verification_status']) ?? 'unverified',
     verification_notes: row.verification_notes != null ? String(row.verification_notes) : null,
+    last_verified_at: row.last_verified_at != null ? Number(row.last_verified_at) : null,
+    next_reverification_at:
+      row.next_reverification_at != null ? Number(row.next_reverification_at) : null,
+    last_confirmed_at: row.last_confirmed_at != null ? Number(row.last_confirmed_at) : null,
+    confirmation_count: Number(row.confirmation_count ?? 0),
     source_working_memory_id: row.source_working_memory_id != null ? Number(row.source_working_memory_id) : null,
     source_turn_ids: Array.isArray(row.source_turn_ids)
       ? row.source_turn_ids.map((value) => Number(value))
       : [],
+    successful_use_count: Number(row.successful_use_count ?? 0),
+    failed_use_count: Number(row.failed_use_count ?? 0),
+    disputed_at: row.disputed_at != null ? Number(row.disputed_at) : null,
+    dispute_reason: row.dispute_reason != null ? String(row.dispute_reason) : null,
+    contradiction_score: Number(row.contradiction_score ?? 0),
+    superseded_at: row.superseded_at != null ? Number(row.superseded_at) : null,
     superseded_by_id: row.superseded_by_id != null ? Number(row.superseded_by_id) : null,
     retired_at: row.retired_at != null ? Number(row.retired_at) : null,
     access_count: Number(row.access_count ?? 0),
@@ -458,15 +480,24 @@ export function createPostgresAdapter(
     async insertKnowledgeMemory(input) {
       const n = normalizeScope(input);
       const { rows } = await pool.query(
-        `INSERT INTO knowledge_memory (tenant_id, system_id, workspace_id, scope_id, fact, fact_type, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated, source, confidence, confidence_score, verification_status, verification_notes, source_working_memory_id, source_turn_ids, created_at, last_accessed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $20)
+        `INSERT INTO knowledge_memory (tenant_id, system_id, workspace_id, scope_id, fact, fact_type, knowledge_state, knowledge_class, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated, source, confidence, confidence_score, grounding_strength, evidence_count, trust_score, verification_status, verification_notes, last_verified_at, next_reverification_at, last_confirmed_at, confirmation_count, source_working_memory_id, source_turn_ids, successful_use_count, failed_use_count, disputed_at, dispute_reason, contradiction_score, superseded_at, created_at, last_accessed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $36)
          RETURNING *`,
         [n.tenant_id, n.system_id, n.workspace_id, n.scope_id, input.fact, input.fact_type,
+         input.knowledge_state ?? 'trusted', input.knowledge_class ?? 'project_fact',
          input.fact_subject ?? null, input.fact_attribute ?? null, input.fact_value ?? null,
          input.normalized_fact ?? null, input.slot_key ?? null, input.is_negated ?? false,
          input.source, input.confidence ?? 'medium', input.confidence_score ?? 0.5,
+         input.grounding_strength ?? 'moderate',
+         input.evidence_count ?? Math.max(1, (input.source_turn_ids ?? []).length),
+         input.trust_score ?? (input.confidence_score ?? 0.5),
          input.verification_status ?? 'unverified', input.verification_notes ?? null,
-         input.source_working_memory_id ?? null, input.source_turn_ids ?? [], now()],
+         input.last_verified_at ?? null, input.next_reverification_at ?? null,
+         input.last_confirmed_at ?? null, input.confirmation_count ?? 0,
+         input.source_working_memory_id ?? null, input.source_turn_ids ?? [],
+         input.successful_use_count ?? 0, input.failed_use_count ?? 0,
+         input.disputed_at ?? null, input.dispute_reason ?? null, input.contradiction_score ?? 0,
+         input.superseded_at ?? null, now()],
       );
       return mapKnowledgeMemory(rows[0]);
     },
@@ -479,6 +510,251 @@ export function createPostgresAdapter(
         }
         return inserted;
       });
+    },
+
+    async insertKnowledgeCandidate(input: NewKnowledgeCandidate): Promise<KnowledgeCandidate> {
+      const n = normalizeScope(input);
+      const { rows } = await pool.query(
+        `INSERT INTO knowledge_candidate
+          (tenant_id, system_id, workspace_id, scope_id, working_memory_id, fact, fact_type,
+           knowledge_class, normalized_fact, slot_key, confidence, source_summary, source_turns,
+           grounding_strength, evidence_count, trust_score, state, promoted_knowledge_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+         RETURNING *`,
+        [
+          n.tenant_id,
+          n.system_id,
+          n.workspace_id,
+          n.scope_id,
+          input.working_memory_id,
+          input.fact,
+          input.fact_type,
+          input.knowledge_class,
+          input.normalized_fact,
+          input.slot_key ?? null,
+          input.confidence,
+          input.source_summary ?? false,
+          input.source_turns ?? true,
+          input.grounding_strength ?? 'weak',
+          input.evidence_count ?? 0,
+          input.trust_score ?? 0,
+          input.state ?? 'candidate',
+          input.promoted_knowledge_id ?? null,
+          input.created_at ?? now(),
+        ],
+      );
+      return {
+        ...rows[0],
+        id: Number(rows[0].id),
+        tenant_id: String(rows[0].tenant_id),
+        system_id: String(rows[0].system_id),
+        workspace_id: String(rows[0].workspace_id ?? ''),
+        scope_id: String(rows[0].scope_id),
+        working_memory_id: Number(rows[0].working_memory_id),
+        fact: String(rows[0].fact),
+        fact_type: rows[0].fact_type as KnowledgeCandidate['fact_type'],
+        knowledge_class: rows[0].knowledge_class as KnowledgeCandidate['knowledge_class'],
+        normalized_fact: String(rows[0].normalized_fact),
+        slot_key: rows[0].slot_key != null ? String(rows[0].slot_key) : null,
+        confidence: rows[0].confidence as KnowledgeCandidate['confidence'],
+        source_summary: Boolean(rows[0].source_summary),
+        source_turns: Boolean(rows[0].source_turns),
+        grounding_strength: rows[0].grounding_strength as KnowledgeCandidate['grounding_strength'],
+        evidence_count: Number(rows[0].evidence_count ?? 0),
+        trust_score: Number(rows[0].trust_score ?? 0),
+        state: rows[0].state as KnowledgeCandidate['state'],
+        created_at: Number(rows[0].created_at),
+        promoted_knowledge_id: rows[0].promoted_knowledge_id != null ? Number(rows[0].promoted_knowledge_id) : null,
+      };
+    },
+
+    async insertKnowledgeCandidates(inputs): Promise<KnowledgeCandidate[]> {
+      return this.transaction(async () => {
+        const inserted: KnowledgeCandidate[] = [];
+        for (const input of inputs) {
+          inserted.push(await this.insertKnowledgeCandidate(input));
+        }
+        return inserted;
+      });
+    },
+
+    async getKnowledgeCandidateById(id): Promise<KnowledgeCandidate | null> {
+      const { rows } = await pool.query('SELECT * FROM knowledge_candidate WHERE id = $1', [id]);
+      if (!rows[0]) return null;
+      return {
+        ...rows[0],
+        id: Number(rows[0].id),
+        tenant_id: String(rows[0].tenant_id),
+        system_id: String(rows[0].system_id),
+        workspace_id: String(rows[0].workspace_id ?? ''),
+        scope_id: String(rows[0].scope_id),
+        working_memory_id: Number(rows[0].working_memory_id),
+        fact: String(rows[0].fact),
+        fact_type: rows[0].fact_type as KnowledgeCandidate['fact_type'],
+        knowledge_class: rows[0].knowledge_class as KnowledgeCandidate['knowledge_class'],
+        normalized_fact: String(rows[0].normalized_fact),
+        slot_key: rows[0].slot_key != null ? String(rows[0].slot_key) : null,
+        confidence: rows[0].confidence as KnowledgeCandidate['confidence'],
+        source_summary: Boolean(rows[0].source_summary),
+        source_turns: Boolean(rows[0].source_turns),
+        grounding_strength: rows[0].grounding_strength as KnowledgeCandidate['grounding_strength'],
+        evidence_count: Number(rows[0].evidence_count ?? 0),
+        trust_score: Number(rows[0].trust_score ?? 0),
+        state: rows[0].state as KnowledgeCandidate['state'],
+        created_at: Number(rows[0].created_at),
+        promoted_knowledge_id: rows[0].promoted_knowledge_id != null ? Number(rows[0].promoted_knowledge_id) : null,
+      };
+    },
+
+    async listKnowledgeCandidates(scope, options): Promise<KnowledgeCandidate[]> {
+      const { rows } = await pool.query(
+        `SELECT * FROM knowledge_candidate WHERE ${scopeWhere()} ORDER BY created_at DESC, id DESC`,
+        scopeParams(scope),
+      );
+      return rows
+        .map((row) => ({
+          id: Number(row.id),
+          tenant_id: String(row.tenant_id),
+          system_id: String(row.system_id),
+          workspace_id: String(row.workspace_id ?? ''),
+          scope_id: String(row.scope_id),
+          working_memory_id: Number(row.working_memory_id),
+          fact: String(row.fact),
+          fact_type: row.fact_type as KnowledgeCandidate['fact_type'],
+          knowledge_class: row.knowledge_class as KnowledgeCandidate['knowledge_class'],
+          normalized_fact: String(row.normalized_fact),
+          slot_key: row.slot_key != null ? String(row.slot_key) : null,
+          confidence: row.confidence as KnowledgeCandidate['confidence'],
+          source_summary: Boolean(row.source_summary),
+          source_turns: Boolean(row.source_turns),
+          grounding_strength: row.grounding_strength as KnowledgeCandidate['grounding_strength'],
+          evidence_count: Number(row.evidence_count ?? 0),
+          trust_score: Number(row.trust_score ?? 0),
+          state: row.state as KnowledgeCandidate['state'],
+          created_at: Number(row.created_at),
+          promoted_knowledge_id: row.promoted_knowledge_id != null ? Number(row.promoted_knowledge_id) : null,
+        }))
+        .filter((item) => !options?.state || options.state.includes(item.state));
+    },
+
+    async insertKnowledgeEvidence(input: NewKnowledgeEvidence): Promise<KnowledgeEvidence> {
+      const n = normalizeScope(input);
+      const { rows } = await pool.query(
+        `INSERT INTO knowledge_evidence
+          (tenant_id, system_id, workspace_id, scope_id, knowledge_memory_id, knowledge_candidate_id,
+           working_memory_id, turn_id, source_type, support_polarity, speaker_role, actor, excerpt,
+           start_offset, end_offset, is_explicit, explicitness_score, outcome, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+         RETURNING *`,
+        [
+          n.tenant_id, n.system_id, n.workspace_id, n.scope_id,
+          input.knowledge_memory_id ?? null, input.knowledge_candidate_id ?? null,
+          input.working_memory_id ?? null, input.turn_id ?? null, input.source_type, input.support_polarity,
+          input.speaker_role ?? null, input.actor ?? null, input.excerpt, input.start_offset ?? null,
+          input.end_offset ?? null, input.is_explicit ?? false, input.explicitness_score ?? 0,
+          input.outcome ?? null, input.created_at ?? now(),
+        ],
+      );
+      const row = rows[0];
+      return {
+        id: Number(row.id),
+        tenant_id: String(row.tenant_id),
+        system_id: String(row.system_id),
+        workspace_id: String(row.workspace_id ?? ''),
+        scope_id: String(row.scope_id),
+        knowledge_memory_id: row.knowledge_memory_id != null ? Number(row.knowledge_memory_id) : null,
+        knowledge_candidate_id: row.knowledge_candidate_id != null ? Number(row.knowledge_candidate_id) : null,
+        working_memory_id: row.working_memory_id != null ? Number(row.working_memory_id) : null,
+        turn_id: row.turn_id != null ? Number(row.turn_id) : null,
+        source_type: row.source_type as KnowledgeEvidence['source_type'],
+        support_polarity: row.support_polarity as KnowledgeEvidence['support_polarity'],
+        speaker_role: row.speaker_role != null ? (row.speaker_role as KnowledgeEvidence['speaker_role']) : null,
+        actor: row.actor != null ? String(row.actor) : null,
+        excerpt: String(row.excerpt),
+        start_offset: row.start_offset != null ? Number(row.start_offset) : null,
+        end_offset: row.end_offset != null ? Number(row.end_offset) : null,
+        is_explicit: Boolean(row.is_explicit),
+        explicitness_score: Number(row.explicitness_score ?? 0),
+        outcome: row.outcome != null ? (row.outcome as KnowledgeEvidence['outcome']) : null,
+        created_at: Number(row.created_at),
+      };
+    },
+
+    async insertKnowledgeEvidenceBatch(inputs): Promise<KnowledgeEvidence[]> {
+      return this.transaction(async () => {
+        const inserted: KnowledgeEvidence[] = [];
+        for (const input of inputs) {
+          inserted.push(await this.insertKnowledgeEvidence(input));
+        }
+        return inserted;
+      });
+    },
+
+    async listKnowledgeEvidenceForKnowledge(knowledgeId): Promise<KnowledgeEvidence[]> {
+      const { rows } = await pool.query(
+        'SELECT * FROM knowledge_evidence WHERE knowledge_memory_id = $1 ORDER BY created_at DESC, id DESC',
+        [knowledgeId],
+      );
+      return rows.map((row) => ({
+        id: Number(row.id),
+        tenant_id: String(row.tenant_id),
+        system_id: String(row.system_id),
+        workspace_id: String(row.workspace_id ?? ''),
+        scope_id: String(row.scope_id),
+        knowledge_memory_id: row.knowledge_memory_id != null ? Number(row.knowledge_memory_id) : null,
+        knowledge_candidate_id: row.knowledge_candidate_id != null ? Number(row.knowledge_candidate_id) : null,
+        working_memory_id: row.working_memory_id != null ? Number(row.working_memory_id) : null,
+        turn_id: row.turn_id != null ? Number(row.turn_id) : null,
+        source_type: row.source_type as KnowledgeEvidence['source_type'],
+        support_polarity: row.support_polarity as KnowledgeEvidence['support_polarity'],
+        speaker_role: row.speaker_role != null ? (row.speaker_role as KnowledgeEvidence['speaker_role']) : null,
+        actor: row.actor != null ? String(row.actor) : null,
+        excerpt: String(row.excerpt),
+        start_offset: row.start_offset != null ? Number(row.start_offset) : null,
+        end_offset: row.end_offset != null ? Number(row.end_offset) : null,
+        is_explicit: Boolean(row.is_explicit),
+        explicitness_score: Number(row.explicitness_score ?? 0),
+        outcome: row.outcome != null ? (row.outcome as KnowledgeEvidence['outcome']) : null,
+        created_at: Number(row.created_at),
+      }));
+    },
+
+    async listKnowledgeEvidenceForCandidate(candidateId): Promise<KnowledgeEvidence[]> {
+      const { rows } = await pool.query(
+        'SELECT * FROM knowledge_evidence WHERE knowledge_candidate_id = $1 ORDER BY created_at DESC, id DESC',
+        [candidateId],
+      );
+      return rows.map((row) => ({
+        id: Number(row.id),
+        tenant_id: String(row.tenant_id),
+        system_id: String(row.system_id),
+        workspace_id: String(row.workspace_id ?? ''),
+        scope_id: String(row.scope_id),
+        knowledge_memory_id: row.knowledge_memory_id != null ? Number(row.knowledge_memory_id) : null,
+        knowledge_candidate_id: row.knowledge_candidate_id != null ? Number(row.knowledge_candidate_id) : null,
+        working_memory_id: row.working_memory_id != null ? Number(row.working_memory_id) : null,
+        turn_id: row.turn_id != null ? Number(row.turn_id) : null,
+        source_type: row.source_type as KnowledgeEvidence['source_type'],
+        support_polarity: row.support_polarity as KnowledgeEvidence['support_polarity'],
+        speaker_role: row.speaker_role != null ? (row.speaker_role as KnowledgeEvidence['speaker_role']) : null,
+        actor: row.actor != null ? String(row.actor) : null,
+        excerpt: String(row.excerpt),
+        start_offset: row.start_offset != null ? Number(row.start_offset) : null,
+        end_offset: row.end_offset != null ? Number(row.end_offset) : null,
+        is_explicit: Boolean(row.is_explicit),
+        explicitness_score: Number(row.explicitness_score ?? 0),
+        outcome: row.outcome != null ? (row.outcome as KnowledgeEvidence['outcome']) : null,
+        created_at: Number(row.created_at),
+      }));
+    },
+
+    async promoteKnowledgeCandidate(candidateId, input): Promise<KnowledgeMemory> {
+      const knowledge = await this.insertKnowledgeMemory(input);
+      await pool.query(
+        'UPDATE knowledge_candidate SET promoted_knowledge_id = $1, state = $2 WHERE id = $3',
+        [knowledge.id, 'provisional', candidateId],
+      );
+      return knowledge;
     },
 
     async getKnowledgeMemoryById(id) {
@@ -561,10 +837,13 @@ export function createPostgresAdapter(
          LIMIT $6`,
         params,
       );
-      return rows.map((row) => ({
-        item: mapKnowledgeMemory(row),
-        rank: Number(row.rank),
-      }));
+      return rows
+        .map((row) => ({
+          item: mapKnowledgeMemory(row),
+          rank: Number(row.rank),
+        }))
+        .filter((result) => matchesKnowledgeSearchOptions(result.item, searchOptions))
+        .slice(0, limit);
     },
 
     async searchKnowledgeCrossScope(scope, level, queryText, searchOptions) {
@@ -582,10 +861,13 @@ export function createPostgresAdapter(
          LIMIT $${paramOffset + 2}`,
         params,
       );
-      return rows.map((row) => ({
-        item: mapKnowledgeMemory(row),
-        rank: Number(row.rank),
-      }));
+      return rows
+        .map((row) => ({
+          item: mapKnowledgeMemory(row),
+          rank: Number(row.rank),
+        }))
+        .filter((result) => matchesKnowledgeSearchOptions(result.item, searchOptions))
+        .slice(0, limit);
     },
 
     async insertKnowledgeMemoryAudit(input) {
@@ -613,6 +895,41 @@ export function createPostgresAdapter(
       return rows.map(mapKnowledgeMemoryAudit);
     },
 
+    async updateKnowledgeMemory(id, patch) {
+      const assignments: string[] = [];
+      const values: unknown[] = [];
+      const push = (column: string, value: unknown) => {
+        values.push(value);
+        assignments.push(`${column} = $${values.length}`);
+      };
+      if (patch.knowledge_state !== undefined) push('knowledge_state', patch.knowledge_state);
+      if (patch.knowledge_class !== undefined) push('knowledge_class', patch.knowledge_class);
+      if (patch.trust_score !== undefined) push('trust_score', patch.trust_score);
+      if (patch.verification_status !== undefined) push('verification_status', patch.verification_status);
+      if (patch.verification_notes !== undefined) push('verification_notes', patch.verification_notes);
+      if (patch.last_verified_at !== undefined) push('last_verified_at', patch.last_verified_at);
+      if (patch.next_reverification_at !== undefined) {
+        push('next_reverification_at', patch.next_reverification_at);
+      }
+      if (patch.last_confirmed_at !== undefined) push('last_confirmed_at', patch.last_confirmed_at);
+      if (patch.confirmation_count !== undefined) push('confirmation_count', patch.confirmation_count);
+      if (patch.disputed_at !== undefined) push('disputed_at', patch.disputed_at);
+      if (patch.dispute_reason !== undefined) push('dispute_reason', patch.dispute_reason);
+      if (patch.contradiction_score !== undefined) push('contradiction_score', patch.contradiction_score);
+      if (patch.superseded_at !== undefined) push('superseded_at', patch.superseded_at);
+      if (patch.successful_use_count !== undefined) push('successful_use_count', patch.successful_use_count);
+      if (patch.failed_use_count !== undefined) push('failed_use_count', patch.failed_use_count);
+      if (assignments.length === 0) {
+        return this.getKnowledgeMemoryById(id);
+      }
+      values.push(id);
+      const { rows } = await pool.query(
+        `UPDATE knowledge_memory SET ${assignments.join(', ')} WHERE id = $${values.length} RETURNING *`,
+        values,
+      );
+      return rows[0] ? mapKnowledgeMemory(rows[0]) : null;
+    },
+
     async touchKnowledgeMemory(id) {
       await pool.query(
         `UPDATE knowledge_memory SET access_count = access_count + 1, last_accessed_at = $2 WHERE id = $1`,
@@ -629,7 +946,9 @@ export function createPostgresAdapter(
 
     async supersedeKnowledgeMemory(oldId, newId) {
       await pool.query(
-        `UPDATE knowledge_memory SET superseded_by_id = $2, retired_at = $3 WHERE id = $1`,
+        `UPDATE knowledge_memory
+         SET superseded_by_id = $2, superseded_at = $3, knowledge_state = 'superseded', retired_at = $3
+         WHERE id = $1`,
         [oldId, newId, now()],
       );
     },

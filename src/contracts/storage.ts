@@ -3,9 +3,13 @@ import type {
   CompactionLog,
   ContextMonitor,
   ContextMonitorUpsert,
+  KnowledgeCandidate,
+  KnowledgeEvidence,
   KnowledgeMemory,
   KnowledgeMemoryAudit,
   NewCompactionLog,
+  NewKnowledgeCandidate,
+  NewKnowledgeEvidence,
   NewKnowledgeMemory,
   NewKnowledgeMemoryAudit,
   NewWorkItem,
@@ -48,6 +52,18 @@ export interface StorageAdapter {
 
   insertKnowledgeMemory(input: NewKnowledgeMemory): KnowledgeMemory;
   insertKnowledgeMemories(inputs: NewKnowledgeMemory[]): KnowledgeMemory[];
+  insertKnowledgeCandidate(input: NewKnowledgeCandidate): KnowledgeCandidate;
+  insertKnowledgeCandidates(inputs: NewKnowledgeCandidate[]): KnowledgeCandidate[];
+  getKnowledgeCandidateById(id: number): KnowledgeCandidate | null;
+  listKnowledgeCandidates(
+    scope: MemoryScope,
+    options?: { state?: Array<KnowledgeCandidate['state']> },
+  ): KnowledgeCandidate[];
+  insertKnowledgeEvidence(input: NewKnowledgeEvidence): KnowledgeEvidence;
+  insertKnowledgeEvidenceBatch(inputs: NewKnowledgeEvidence[]): KnowledgeEvidence[];
+  listKnowledgeEvidenceForKnowledge(knowledgeId: number): KnowledgeEvidence[];
+  listKnowledgeEvidenceForCandidate(candidateId: number): KnowledgeEvidence[];
+  promoteKnowledgeCandidate(candidateId: number, input: NewKnowledgeMemory): KnowledgeMemory;
   getKnowledgeMemoryById(id: number): KnowledgeMemory | null;
   getActiveKnowledgeMemory(scope: MemoryScope): KnowledgeMemory[];
   getActiveKnowledgeMemoryPaginated(
@@ -69,6 +85,26 @@ export interface StorageAdapter {
   ): SearchResult<KnowledgeMemory>[];
   insertKnowledgeMemoryAudit(input: NewKnowledgeMemoryAudit): KnowledgeMemoryAudit;
   getRecentKnowledgeMemoryAudits(scope: MemoryScope, limit?: number): KnowledgeMemoryAudit[];
+  updateKnowledgeMemory(
+    id: number,
+    patch: {
+      knowledge_state?: KnowledgeMemory['knowledge_state'];
+      knowledge_class?: KnowledgeMemory['knowledge_class'];
+      trust_score?: number;
+      verification_status?: KnowledgeMemory['verification_status'];
+      verification_notes?: string | null;
+      last_verified_at?: number | null;
+      next_reverification_at?: number | null;
+      last_confirmed_at?: number | null;
+      confirmation_count?: number;
+      disputed_at?: number | null;
+      dispute_reason?: string | null;
+      contradiction_score?: number;
+      superseded_at?: number | null;
+      successful_use_count?: number;
+      failed_use_count?: number;
+    },
+  ): KnowledgeMemory | null;
   touchKnowledgeMemory(id: number): void;
   retireKnowledgeMemory(id: number, retiredAt?: number): void;
   supersedeKnowledgeMemory(oldId: number, newId: number): void;

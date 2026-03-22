@@ -1,0 +1,20 @@
+{
+  "overallScore": 55.81,
+  "passed": false,
+  "metrics": {
+    "constraintRetentionRate": 1,
+    "preferenceRetentionRate": 1,
+    "identityRetentionRate": 1,
+    "procedureRetentionRate": 1,
+    "updateCorrectnessRate": 0,
+    "strategyOutcomeRecallRate": 0.5,
+    "falseMemoryRate": 1,
+    "contradictionResolutionAccuracy": 0,
+    "trustedMemoryPrecision": 0,
+    "trustedMemoryRecall": 1,
+    "memoryIsolationAccuracy": 0.5,
+    "provisionalLeakRate": 1,
+    "postCompactionFidelityScore": 0.5,
+    "postMaintenanceFidelityScore": 1
+  }
+}

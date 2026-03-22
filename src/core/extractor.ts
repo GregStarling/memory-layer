@@ -165,7 +165,7 @@ function inferStructuredFields(
   }
 
   const constraintMatch = normalized.match(
-    /^(?:the user |the system |the project |we )?(must|must not|cannot|can't|requires?|should not|never|avoid)\s+(.+)$/,
+    /^(?:the user |the system |the project |we )?(must not|should not|cannot|can't|must|requires?|never|avoid)\s+(.+)$/,
   );
   if (factType === 'constraint' && constraintMatch) {
     const predicate = constraintMatch[1];
@@ -330,7 +330,7 @@ export function createRegexExtractor(options?: { domainGroups?: DomainGroups }):
       ),
       ...extractMatches(
         combined,
-        /\b(?:the user |the system |the project |we )?(?:must|must not|cannot|can't|requires?|should not|avoid|never)\s+[^.?!;]+/gi,
+        /\b(?:the user |the system |the project |we )?(?:must not|should not|cannot|can't|must|requires?|avoid|never)\s+[^.?!;]+/gi,
         'constraint',
         'high',
       ),
