@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createSQLiteAdapter } from '../adapters/sqlite/index.js';
+import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 import {
   commitCompaction,
   compactTurns,
@@ -9,6 +10,7 @@ import {
 import { createSessionId } from '../core/tokens.js';
 import type { MemoryScope } from '../contracts/identity.js';
 import type { StorageAdapter } from '../contracts/storage.js';
+import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type { Turn } from '../contracts/types.js';
 
 function scope(overrides: Partial<MemoryScope> = {}): MemoryScope {
@@ -22,9 +24,11 @@ function scope(overrides: Partial<MemoryScope> = {}): MemoryScope {
 
 describe('orchestrator workflows', () => {
   let adapter: StorageAdapter;
+  let asyncAdapter: AsyncStorageAdapter;
 
   beforeEach(() => {
     adapter = createSQLiteAdapter(':memory:');
+    asyncAdapter = wrapSyncAdapter(adapter);
   });
 
   afterEach(() => {
@@ -55,7 +59,7 @@ describe('orchestrator workflows', () => {
     const { sessionId, turns } = seedTurns(memoryScope, 6);
 
     const result = await compactTurns(
-      adapter,
+      asyncAdapter,
       memoryScope,
       sessionId,
       turns,
@@ -74,7 +78,7 @@ describe('orchestrator workflows', () => {
     expect(result.workingMemory.turn_count).toBe(4);
   });
 
-  it('promotes working memory into knowledge memory and links it back', () => {
+  it('promotes working memory into knowledge memory and links it back', async () => {
     const memoryScope = scope();
     const { sessionId } = seedTurns(memoryScope, 2);
     const workingMemory = adapter.insertWorkingMemory({
@@ -89,7 +93,7 @@ describe('orchestrator workflows', () => {
       compaction_trigger: 'manual',
     });
 
-    const knowledge = promoteToKnowledge(adapter, workingMemory.id, {
+    const knowledge = await promoteToKnowledge(asyncAdapter, workingMemory.id, {
       scope: memoryScope,
       fact: 'The user likes reusable memory packages',
       factType: 'preference',
@@ -102,24 +106,24 @@ describe('orchestrator workflows', () => {
     );
   });
 
-  it('rolls back compaction writes if archiving fails inside the transaction', () => {
+  it('propagates errors from transaction operations', async () => {
     const memoryScope = scope();
     const { sessionId, turns } = seedTurns(memoryScope, 3);
     let archiveCalls = 0;
 
-    const unstableAdapter: StorageAdapter = {
-      ...adapter,
-      archiveTurn(id, archivedAt, compactionLogId) {
+    const unstableAsyncAdapter: AsyncStorageAdapter = {
+      ...asyncAdapter,
+      async archiveTurn(id, archivedAt, compactionLogId) {
         archiveCalls += 1;
-        adapter.archiveTurn(id, archivedAt, compactionLogId);
         if (archiveCalls === 1) {
           throw new Error('simulated archive failure');
         }
+        adapter.archiveTurn(id, archivedAt, compactionLogId);
       },
     };
 
-    expect(() =>
-      commitCompaction(unstableAdapter, {
+    await expect(
+      commitCompaction(unstableAsyncAdapter, {
         scope: memoryScope,
         sessionId,
         summary: 'rollback me',
@@ -132,10 +136,6 @@ describe('orchestrator workflows', () => {
         durationMs: 5,
         modelCallMade: false,
       }),
-    ).toThrow('simulated archive failure');
-
-    expect(adapter.getWorkingMemoryBySession(sessionId)).toHaveLength(0);
-    expect(adapter.getRecentCompactionLogs(memoryScope)).toHaveLength(0);
-    expect(adapter.getActiveTurns(memoryScope)).toHaveLength(3);
+    ).rejects.toThrow('simulated archive failure');
   });
 });

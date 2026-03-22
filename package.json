@@ -1,10 +1,13 @@
 {
   "name": "memory-layer",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Backend-agnostic memory package with scoped conversation history, compaction policy, orchestration workflows, and a SQLite adapter.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "memory-layer": "./bin/memory-server.mjs"
+  },
   "exports": {
     ".": {
       "import": "./dist/index.js",
@@ -25,6 +28,22 @@
     "./summarizers/extractor": {
       "import": "./dist/summarizers/extractor.js",
       "types": "./dist/summarizers/extractor.d.ts"
+    },
+    "./embeddings/openai": {
+      "import": "./dist/embeddings/openai.js",
+      "types": "./dist/embeddings/openai.d.ts"
+    },
+    "./embeddings/voyage": {
+      "import": "./dist/embeddings/voyage.js",
+      "types": "./dist/embeddings/voyage.d.ts"
+    },
+    "./adapters/postgres": {
+      "import": "./dist/adapters/postgres/index.js",
+      "types": "./dist/adapters/postgres/index.d.ts"
+    },
+    "./server": {
+      "import": "./dist/server/mcp-server.js",
+      "types": "./dist/server/mcp-server.d.ts"
     }
   },
   "scripts": {
@@ -36,6 +55,10 @@
     "benchmark:semantic": "npm run build && node benchmarks/semantic-benchmark.mjs",
     "benchmark:compaction": "npm run build && node benchmarks/compaction-benchmark.mjs",
     "eval:retrieval": "npm run build && node evals/retrieval-quality.mjs",
+    "eval:scenarios": "npm run build && node evals/scenario-evals.mjs",
+    "eval:gate": "npm run build && node evals/scenario-evals.mjs --enforce",
+    "export:memory": "node scripts/export-memory.mjs",
+    "import:memory": "node scripts/import-memory.mjs",
     "pack:check": "npm pack --dry-run",
     "prepublishOnly": "npm run lint && npm test && npm run build && npm run pack:check"
   },
@@ -64,10 +87,11 @@
     "dist",
     "!dist/__tests__",
     "!dist/__tests__/**",
+    "bin",
     "README.md",
     "LICENSE"
   ],
-  "license": "UNLICENSED",
+  "license": "MIT",
   "engines": {
     "node": ">=20"
   },

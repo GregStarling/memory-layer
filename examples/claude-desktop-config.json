@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "memory-layer": {
+      "command": "npx",
+      "args": [
+        "memory-layer",
+        "serve",
+        "--db",
+        "./data/memory.db",
+        "--preset",
+        "ai_ide"
+      ]
+    }
+  }
+}

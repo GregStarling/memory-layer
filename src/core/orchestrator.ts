@@ -1,14 +1,15 @@
 import type { MemoryScope } from '../contracts/identity.js';
 import { normalizeScope } from '../contracts/identity.js';
 import type { EventHook, Logger } from '../contracts/observability.js';
-import type { ExtractionPolicy } from '../contracts/policy.js';
+import type { ConflictStrategy, ExtractionPolicy } from '../contracts/policy.js';
 import { DEFAULT_EXTRACTION_POLICY } from '../contracts/policy.js';
-import type { StorageAdapter } from '../contracts/storage.js';
+import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type {
   CompactionTrigger,
   FactConfidence,
   FactType,
   KnowledgeMemory,
+  KnowledgeRelation,
   Turn,
   WorkingMemory,
 } from '../contracts/types.js';
@@ -16,7 +17,6 @@ import {
   assertCompactionTrigger,
   assertFactConfidence,
   assertFactType,
-  assertFactSource,
   assertFactType as assertExtractedFactType,
   assertNonEmpty,
   assertStringArray,
@@ -24,10 +24,12 @@ import {
   nowSeconds,
 } from './validation.js';
 import {
-  getContradictionKey,
+  classifyFactRelation,
   normalizeFactText,
-  type ExtractedFact,
+  normalizeExtractedFact,
+  normalizeKnowledgeMemory,
   type Extractor,
+  type NormalizedExtractedFact,
 } from './extractor.js';
 import { emitMemoryEvent } from './telemetry.js';
 
@@ -59,6 +61,38 @@ function resolveExtractionPolicy(
   };
 }
 
+function confidenceScore(confidence: FactConfidence): number {
+  return confidence === 'high' ? 2 : 1;
+}
+
+function meetsConfidenceThreshold(
+  confidence: FactConfidence,
+  minimum: FactConfidence,
+): boolean {
+  return confidenceScore(confidence) >= confidenceScore(minimum);
+}
+
+function buildKnowledgeInput(
+  scope: ReturnType<typeof normalizeScope>,
+  workingMemoryId: number,
+  fact: NormalizedExtractedFact,
+) {
+  return {
+    ...scope,
+    fact: fact.fact,
+    fact_type: fact.factType,
+    fact_subject: fact.subject,
+    fact_attribute: fact.attribute,
+    fact_value: fact.value,
+    normalized_fact: fact.normalizedFact,
+    slot_key: fact.slotKey,
+    is_negated: fact.isNegated,
+    source: 'promoted_from_working' as const,
+    confidence: fact.confidence,
+    source_working_memory_id: workingMemoryId,
+  };
+}
+
 function sortTurnsAscending(turns: Turn[]): Turn[] {
   return [...turns].sort((a, b) => a.id - b.id);
 }
@@ -82,8 +116,8 @@ function assertTurnsMatchScope(turns: Turn[], scope: MemoryScope, sessionId: str
   }
 }
 
-export function commitCompaction(
-  adapter: StorageAdapter,
+export async function commitCompaction(
+  adapter: AsyncStorageAdapter,
   input: {
     scope: MemoryScope;
     sessionId: string;
@@ -99,7 +133,7 @@ export function commitCompaction(
     logger?: Logger;
     onEvent?: EventHook;
   },
-): CompactionResult {
+): Promise<CompactionResult> {
   const normalizedScope = normalizeScope(input.scope);
   assertNonEmpty(input.sessionId, 'sessionId');
   assertNonEmpty(input.summary, 'summary');
@@ -122,8 +156,8 @@ export function commitCompaction(
   );
   const archivedAt = nowSeconds();
 
-  return adapter.transaction(() => {
-    const workingMemory = adapter.insertWorkingMemory({
+  return adapter.transaction(async () => {
+    const workingMemory = await adapter.insertWorkingMemory({
       ...normalizedScope,
       session_id: input.sessionId,
       summary: input.summary,
@@ -135,7 +169,7 @@ export function commitCompaction(
       compaction_trigger: input.trigger,
     });
 
-    const compactionLog = adapter.insertCompactionLog({
+    const compactionLog = await adapter.insertCompactionLog({
       ...normalizedScope,
       session_id: input.sessionId,
       trigger_type: input.trigger,
@@ -151,7 +185,7 @@ export function commitCompaction(
     });
 
     for (const turn of turnsToArchive) {
-      adapter.archiveTurn(turn.id, archivedAt, compactionLog.id);
+      await adapter.archiveTurn(turn.id, archivedAt, compactionLog.id);
     }
 
     const result = {
@@ -174,7 +208,7 @@ export function commitCompaction(
 }
 
 export async function compactTurns(
-  adapter: StorageAdapter,
+  adapter: AsyncStorageAdapter,
   scope: MemoryScope,
   sessionId: string,
   turnsToCompact: Turn[],
@@ -217,8 +251,8 @@ export async function compactTurns(
   });
 }
 
-export function promoteToKnowledge(
-  adapter: StorageAdapter,
+export async function promoteToKnowledge(
+  adapter: AsyncStorageAdapter,
   workingMemoryId: number,
   input: {
     scope: MemoryScope;
@@ -228,13 +262,13 @@ export function promoteToKnowledge(
     logger?: Logger;
     onEvent?: EventHook;
   },
-): KnowledgeMemory {
+): Promise<KnowledgeMemory> {
   assertNonEmpty(input.fact, 'fact');
   assertFactType(input.factType);
   assertFactConfidence(input.confidence);
 
   const normalizedScope = normalizeScope(input.scope);
-  const workingMemory = adapter.getWorkingMemoryById(workingMemoryId);
+  const workingMemory = await adapter.getWorkingMemoryById(workingMemoryId);
   if (!workingMemory) {
     throw new Error(`Memory validation: working memory ${workingMemoryId} was not found`);
   }
@@ -249,8 +283,8 @@ export function promoteToKnowledge(
     );
   }
 
-  return adapter.transaction(() => {
-    const knowledgeMemory = adapter.insertKnowledgeMemory({
+  return adapter.transaction(async () => {
+    const knowledgeMemory = await adapter.insertKnowledgeMemory({
       ...normalizedScope,
       fact: input.fact,
       fact_type: input.factType,
@@ -258,7 +292,7 @@ export function promoteToKnowledge(
       confidence: input.confidence,
       source_working_memory_id: workingMemoryId,
     });
-    adapter.markWorkingMemoryPromoted(workingMemoryId, knowledgeMemory.id);
+    await adapter.markWorkingMemoryPromoted(workingMemoryId, knowledgeMemory.id);
     emitMemoryEvent('promotion', normalizedScope, input, 0, {
       workingMemoryId,
       knowledgeMemoryId: knowledgeMemory.id,
@@ -269,7 +303,7 @@ export function promoteToKnowledge(
 }
 
 export async function extractKnowledge(
-  adapter: StorageAdapter,
+  adapter: AsyncStorageAdapter,
   workingMemoryId: number,
   scope: MemoryScope,
   extractor: Extractor,
@@ -282,7 +316,7 @@ export async function extractKnowledge(
   const startedAt = Date.now();
   const normalizedScope = normalizeScope(scope);
   const policy = resolveExtractionPolicy(options?.policy);
-  const workingMemory = adapter.getWorkingMemoryById(workingMemoryId);
+  const workingMemory = await adapter.getWorkingMemoryById(workingMemoryId);
   if (!workingMemory) {
     throw new Error(`Memory validation: working memory ${workingMemoryId} was not found`);
   }
@@ -301,17 +335,18 @@ export async function extractKnowledge(
     workingMemory.summary,
     workingMemory.key_entities,
     workingMemory.topic_tags,
-  )).slice(0, policy.maxFactsPerExtraction);
+  ))
+    .slice(0, policy.maxFactsPerExtraction)
+    .map(normalizeExtractedFact);
 
-  const activeKnowledge = adapter.getActiveKnowledgeMemory(normalizedScope);
+  const activeKnowledge = await adapter.getActiveKnowledgeMemory(normalizedScope);
   const duplicateLookup = new Map(
     activeKnowledge.map((fact) => [normalizeFactText(fact.fact), fact]),
   );
-  const contradictionLookup = new Map<string, KnowledgeMemory>();
-  for (const fact of activeKnowledge) {
-    const key = getContradictionKey(fact.fact_type, fact.fact);
-    if (key) contradictionLookup.set(key, fact);
-  }
+  const normalizedKnowledge = activeKnowledge.map((fact) => ({
+    memory: fact,
+    normalized: normalizeKnowledgeMemory(fact),
+  }));
 
   const created: KnowledgeMemory[] = [];
 
@@ -320,37 +355,181 @@ export async function extractKnowledge(
     assertExtractedFactType(fact.factType);
     assertFactConfidence(fact.confidence);
 
+    if (!meetsConfidenceThreshold(fact.confidence, policy.minConfidenceForPromotion)) {
+      await adapter.insertKnowledgeMemoryAudit({
+        ...normalizedScope,
+        working_memory_id: workingMemoryId,
+        fact: fact.fact,
+        fact_type: fact.factType,
+        fact_subject: fact.subject,
+        fact_attribute: fact.attribute,
+        fact_value: fact.value,
+        normalized_fact: fact.normalizedFact,
+        slot_key: fact.slotKey,
+        is_negated: fact.isNegated,
+        confidence: fact.confidence,
+        source_text: fact.sourceText ?? fact.fact,
+        decision: 'skipped_low_confidence',
+        detail: `Below minimum confidence threshold '${policy.minConfidenceForPromotion}'`,
+      });
+      continue;
+    }
+
     const normalizedFact = normalizeFactText(fact.fact);
     const duplicate = duplicateLookup.get(normalizedFact);
     if (policy.deduplicateFacts && duplicate) {
       if (policy.touchDuplicates) {
-        adapter.touchKnowledgeMemory(duplicate.id);
+        await adapter.touchKnowledgeMemory(duplicate.id);
       }
+      await adapter.insertKnowledgeMemoryAudit({
+        ...normalizedScope,
+        working_memory_id: workingMemoryId,
+        fact: fact.fact,
+        fact_type: fact.factType,
+        fact_subject: fact.subject,
+        fact_attribute: fact.attribute,
+        fact_value: fact.value,
+        normalized_fact: fact.normalizedFact,
+        slot_key: fact.slotKey,
+        is_negated: fact.isNegated,
+        confidence: fact.confidence,
+        source_text: fact.sourceText ?? fact.fact,
+        decision: 'duplicate',
+        related_knowledge_id: duplicate.id,
+        detail: 'Exact normalized fact already exists',
+      });
       continue;
     }
 
-    const contradictionKey = getContradictionKey(fact.factType, fact.fact);
-    const contradiction = contradictionKey
-      ? contradictionLookup.get(contradictionKey)
-      : null;
+    let strongestRelation: {
+      relation: KnowledgeRelation | 'created';
+      related: KnowledgeMemory | null;
+    } = { relation: 'created', related: null };
+    for (const existing of normalizedKnowledge) {
+      const relation = classifyFactRelation(existing.normalized, fact);
+      if (relation === 'duplicate') {
+        strongestRelation = { relation, related: existing.memory };
+        break;
+      }
+      if (relation === 'conflict') {
+        strongestRelation = { relation, related: existing.memory };
+      } else if (
+        relation === 'update' &&
+        strongestRelation.relation !== 'conflict'
+      ) {
+        strongestRelation = { relation, related: existing.memory };
+      } else if (
+        relation === 'compatible' &&
+        strongestRelation.related === null
+      ) {
+        strongestRelation = { relation, related: existing.memory };
+      }
+    }
 
-    const createdFact = adapter.transaction(() => {
-      const knowledge = adapter.insertKnowledgeMemory({
+    if (strongestRelation.relation === 'duplicate' && strongestRelation.related) {
+      if (policy.touchDuplicates) {
+        await adapter.touchKnowledgeMemory(strongestRelation.related.id);
+      }
+      await adapter.insertKnowledgeMemoryAudit({
         ...normalizedScope,
+        working_memory_id: workingMemoryId,
         fact: fact.fact,
         fact_type: fact.factType,
-        source: 'promoted_from_working',
+        fact_subject: fact.subject,
+        fact_attribute: fact.attribute,
+        fact_value: fact.value,
+        normalized_fact: fact.normalizedFact,
+        slot_key: fact.slotKey,
+        is_negated: fact.isNegated,
         confidence: fact.confidence,
-        source_working_memory_id: workingMemoryId,
+        source_text: fact.sourceText ?? fact.fact,
+        decision: 'duplicate',
+        related_knowledge_id: strongestRelation.related.id,
+        detail: 'Structured relation classified as duplicate',
       });
-      if (contradiction && contradiction.id !== knowledge.id) {
-        adapter.supersedeKnowledgeMemory(contradiction.id, knowledge.id);
+      continue;
+    }
+
+    if (
+      strongestRelation.relation === 'conflict' &&
+      policy.conflictStrategy === 'skip' &&
+      strongestRelation.related
+    ) {
+      await adapter.insertKnowledgeMemoryAudit({
+        ...normalizedScope,
+        working_memory_id: workingMemoryId,
+        fact: fact.fact,
+        fact_type: fact.factType,
+        fact_subject: fact.subject,
+        fact_attribute: fact.attribute,
+        fact_value: fact.value,
+        normalized_fact: fact.normalizedFact,
+        slot_key: fact.slotKey,
+        is_negated: fact.isNegated,
+        confidence: fact.confidence,
+        source_text: fact.sourceText ?? fact.fact,
+        decision: 'conflict',
+        related_knowledge_id: strongestRelation.related.id,
+        detail: 'Conflict strategy skipped promotion',
+      });
+      continue;
+    }
+
+    const createdFact = await adapter.transaction(async () => {
+      const knowledge = await adapter.insertKnowledgeMemory(
+        buildKnowledgeInput(normalizedScope, workingMemoryId, fact),
+      );
+
+      if (
+        strongestRelation.related &&
+        (strongestRelation.relation === 'update' ||
+          (strongestRelation.relation === 'conflict' &&
+            policy.conflictStrategy === 'supersede'))
+      ) {
+        await adapter.supersedeKnowledgeMemory(strongestRelation.related.id, knowledge.id);
       }
+
+      await adapter.insertKnowledgeMemoryAudit({
+        ...normalizedScope,
+        working_memory_id: workingMemoryId,
+        fact: fact.fact,
+        fact_type: fact.factType,
+        fact_subject: fact.subject,
+        fact_attribute: fact.attribute,
+        fact_value: fact.value,
+        normalized_fact: fact.normalizedFact,
+        slot_key: fact.slotKey,
+        is_negated: fact.isNegated,
+        confidence: fact.confidence,
+        source_text: fact.sourceText ?? fact.fact,
+        decision:
+          strongestRelation.relation === 'update'
+            ? 'updated'
+            : strongestRelation.relation === 'conflict'
+              ? 'conflict'
+              : strongestRelation.relation === 'compatible'
+                ? 'compatible'
+                : 'created',
+        created_knowledge_id: knowledge.id,
+        related_knowledge_id: strongestRelation.related?.id ?? null,
+        detail:
+          strongestRelation.relation === 'conflict'
+            ? `Conflict strategy '${policy.conflictStrategy}'`
+            : strongestRelation.relation === 'update'
+              ? 'Superseded prior related knowledge'
+              : strongestRelation.relation === 'compatible'
+                ? 'Created alongside compatible related knowledge'
+                : 'Created new knowledge memory',
+      });
+
       return knowledge;
     });
 
     duplicateLookup.set(normalizedFact, createdFact);
-    if (contradictionKey) contradictionLookup.set(contradictionKey, createdFact);
+    normalizedKnowledge.push({
+      memory: createdFact,
+      normalized: normalizeKnowledgeMemory(createdFact),
+    });
     created.push(createdFact);
   }
 

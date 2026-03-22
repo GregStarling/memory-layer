@@ -1,16 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createSQLiteAdapter } from '../adapters/sqlite/index.js';
+import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 import { createRegexExtractor } from '../core/extractor.js';
 import { extractKnowledge } from '../core/orchestrator.js';
 import type { StorageAdapter } from '../contracts/storage.js';
+import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import { makeScope, seedTurns } from './test-helpers.js';
 
 describe('knowledge growth', () => {
   let adapter: StorageAdapter;
+  let asyncAdapter: AsyncStorageAdapter;
 
   beforeEach(() => {
     adapter = createSQLiteAdapter(':memory:');
+    asyncAdapter = wrapSyncAdapter(adapter);
   });
 
   afterEach(() => {
@@ -32,9 +36,10 @@ describe('knowledge growth', () => {
       compaction_trigger: 'manual',
     });
 
-    const created = await extractKnowledge(adapter, wm.id, scope, createRegexExtractor());
+    const created = await extractKnowledge(asyncAdapter, wm.id, scope, createRegexExtractor());
     expect(created.length).toBeGreaterThan(0);
     expect(created.some((fact) => fact.fact_type === 'preference')).toBe(true);
+    expect(adapter.getRecentKnowledgeMemoryAudits(scope)).not.toHaveLength(0);
   });
 
   it('skips duplicate facts and touches the existing record', async () => {
@@ -59,7 +64,7 @@ describe('knowledge growth', () => {
       compaction_trigger: 'manual',
     });
 
-    const created = await extractKnowledge(adapter, wm.id, scope, createRegexExtractor());
+    const created = await extractKnowledge(asyncAdapter, wm.id, scope, createRegexExtractor());
     expect(created).toEqual([]);
     expect(adapter.getKnowledgeMemoryById(existing.id)?.access_count).toBeGreaterThan(1);
   });
@@ -86,9 +91,67 @@ describe('knowledge growth', () => {
       compaction_trigger: 'manual',
     });
 
-    const created = await extractKnowledge(adapter, wm.id, scope, createRegexExtractor());
+    const created = await extractKnowledge(asyncAdapter, wm.id, scope, createRegexExtractor());
     expect(created).toHaveLength(1);
     expect(adapter.getKnowledgeMemoryById(oldFact.id)?.superseded_by_id).toBe(created[0].id);
+    expect(adapter.getRecentKnowledgeMemoryAudits(scope)[0]?.decision).toBe('updated');
+  });
+
+  it('keeps unrelated preferences without superseding them', async () => {
+    const scope = makeScope();
+    const { sessionId } = seedTurns(adapter, scope, 2);
+    const oldFact = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'The user prefers dark mode',
+      fact_type: 'preference',
+      fact_subject: 'user',
+      fact_attribute: 'preference',
+      fact_value: 'dark mode',
+      normalized_fact: 'the user prefers dark mode',
+      slot_key: 'user:preference:theme',
+      is_negated: false,
+      source: 'manual',
+      confidence: 'high',
+    });
+    const wm = adapter.insertWorkingMemory({
+      ...scope,
+      session_id: sessionId,
+      summary: 'The user prefers TypeScript.',
+      key_entities: [],
+      topic_tags: [],
+      turn_id_start: 1,
+      turn_id_end: 2,
+      turn_count: 2,
+      compaction_trigger: 'manual',
+    });
+
+    const created = await extractKnowledge(asyncAdapter, wm.id, scope, createRegexExtractor());
+    expect(created).toHaveLength(1);
+    expect(adapter.getKnowledgeMemoryById(oldFact.id)?.superseded_by_id).toBeNull();
+  });
+
+  it('can skip low-confidence facts via policy', async () => {
+    const scope = makeScope();
+    const { sessionId } = seedTurns(adapter, scope, 2);
+    const wm = adapter.insertWorkingMemory({
+      ...scope,
+      session_id: sessionId,
+      summary: 'The user prefers Rust.',
+      key_entities: [],
+      topic_tags: [],
+      turn_id_start: 1,
+      turn_id_end: 2,
+      turn_count: 2,
+      compaction_trigger: 'manual',
+    });
+
+    const created = await extractKnowledge(asyncAdapter, wm.id, scope, createRegexExtractor(), {
+      policy: {
+        minConfidenceForPromotion: 'high',
+      },
+    });
+    expect(created).toEqual([]);
+    expect(adapter.getRecentKnowledgeMemoryAudits(scope)[0]?.decision).toBe('skipped_low_confidence');
   });
 
   it('validates working memory scope', async () => {
@@ -108,7 +171,7 @@ describe('knowledge growth', () => {
     });
 
     await expect(
-      extractKnowledge(adapter, wm.id, otherScope, createRegexExtractor()),
+      extractKnowledge(asyncAdapter, wm.id, otherScope, createRegexExtractor()),
     ).rejects.toThrow('does not belong');
   });
 });

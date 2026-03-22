@@ -1,24 +1,31 @@
 import type { EmbeddingAdapter, EmbeddingGenerator } from '../contracts/embedding.js';
-import type { MemoryScope } from '../contracts/identity.js';
+import type { MemoryScope, ScopeLevel } from '../contracts/identity.js';
 import type { EventHook, Logger } from '../contracts/observability.js';
 import type {
   ContextPolicy,
   ExtractionPolicy,
+  MaintenancePolicy,
   MonitorPolicy,
 } from '../contracts/policy.js';
+import { DEFAULT_MONITOR_POLICY } from '../contracts/policy.js';
 import type { StorageAdapter } from '../contracts/storage.js';
+import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type {
   FactConfidence,
   FactType,
   KnowledgeMemory,
   SearchOptions,
   SearchResult,
+  TimeRange,
   Turn,
   TurnRole,
+  WorkItem,
   WorkingMemory,
 } from '../contracts/types.js';
 import { buildMemoryContext, type MemoryContext } from './context.js';
+import type { MemoryEventEmitter } from './events.js';
 import type { Extractor } from './extractor.js';
+import type { SessionBootstrap } from './formatter.js';
 import {
   compactTurns,
   extractKnowledge,
@@ -26,10 +33,15 @@ import {
   type Summarizer,
 } from './orchestrator.js';
 import { assessContext } from './monitor.js';
+import { runMaintenance, type MaintenanceReport } from './maintenance.js';
 import { emitMemoryEvent } from './telemetry.js';
+import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 
 export interface MemoryManagerConfig {
-  adapter: StorageAdapter;
+  /** Synchronous storage adapter (SQLite, in-memory). Mutually exclusive with asyncAdapter. */
+  adapter?: StorageAdapter;
+  /** Async storage adapter (PostgreSQL, remote). Mutually exclusive with adapter. */
+  asyncAdapter?: AsyncStorageAdapter;
   scope: MemoryScope;
   sessionId: string;
   summarizer: Summarizer;
@@ -38,28 +50,147 @@ export interface MemoryManagerConfig {
   embeddingGenerator?: EmbeddingGenerator;
   logger?: Logger;
   onEvent?: EventHook;
+  eventEmitter?: MemoryEventEmitter;
   monitorPolicy?: MonitorPolicy;
   extractionPolicy?: ExtractionPolicy;
   contextPolicy?: ContextPolicy;
+  maintenancePolicy?: MaintenancePolicy;
+  crossScopeLevel?: ScopeLevel;
   autoCompact?: boolean;
   autoExtract?: boolean;
+  failurePolicy?: {
+    summarizer?: 'throw' | 'retry_once' | 'log_and_continue';
+    extractor?: 'throw' | 'retry_once' | 'log_and_continue' | 'disable_auto_extract';
+  };
+  redactText?: (input: { kind: 'turn' | 'fact' | 'work_item'; text: string }) => string;
 }
 
 export interface MemoryManager {
   processTurn(role: TurnRole, content: string, actor?: string): Promise<Turn>;
-  getContext(relevanceQuery?: string): MemoryContext;
+  processExchange(
+    userContent: string,
+    assistantContent: string,
+    actors?: { user?: string; assistant?: string },
+  ): Promise<{ userTurn: Turn; assistantTurn: Turn; compactionResult: CompactionResult | null }>;
+  getContext(relevanceQuery?: string): Promise<MemoryContext>;
+  getSessionBootstrap(relevanceQuery?: string): Promise<SessionBootstrap>;
+  recall(timeRange: TimeRange): Promise<{
+    turns: Turn[];
+    workingMemory: WorkingMemory[];
+    knowledge: KnowledgeMemory[];
+    workItems: WorkItem[];
+  }>;
   search(
     query: string,
     options?: SearchOptions,
-  ): { turns: SearchResult<Turn>[]; knowledge: SearchResult<KnowledgeMemory>[] };
+  ): Promise<{ turns: SearchResult<Turn>[]; knowledge: SearchResult<KnowledgeMemory>[] }>;
+  searchCrossScope(
+    query: string,
+    level: ScopeLevel,
+    options?: SearchOptions,
+  ): Promise<{ knowledge: SearchResult<KnowledgeMemory>[] }>;
   forceCompact(): Promise<CompactionResult | null>;
-  learnFact(fact: string, factType: FactType, confidence?: FactConfidence): KnowledgeMemory;
-  close(): void;
+  learnFact(fact: string, factType: FactType, confidence?: FactConfidence): Promise<KnowledgeMemory>;
+  trackWorkItem(
+    title: string,
+    kind?: WorkItem['kind'],
+    status?: WorkItem['status'],
+    detail?: string,
+  ): Promise<WorkItem>;
+  runMaintenance(policy?: MaintenancePolicy): Promise<MaintenanceReport>;
+  close(): Promise<void>;
+}
+
+function resolveAdapter(config: MemoryManagerConfig): AsyncStorageAdapter {
+  if (config.asyncAdapter) {
+    return config.asyncAdapter;
+  }
+  if (config.adapter) {
+    return wrapSyncAdapter(config.adapter);
+  }
+  throw new Error("MemoryManagerConfig requires either 'adapter' or 'asyncAdapter'");
 }
 
 export function createMemoryManager(config: MemoryManagerConfig): MemoryManager {
+  const asyncAdapter = resolveAdapter(config);
   const autoCompact = config.autoCompact ?? true;
-  const autoExtract = config.autoExtract ?? Boolean(config.extractor);
+  let autoExtractEnabled = config.autoExtract ?? Boolean(config.extractor);
+  let deferredSoftCompaction = false;
+
+  const onEvent: EventHook = (event) => {
+    config.onEvent?.(event);
+    config.eventEmitter?.emit({
+      ...event,
+      meta: {
+        schemaVersion: 1,
+        ...event.meta,
+      },
+    });
+  };
+
+  async function withFailurePolicy<T>(
+    kind: 'summarizer' | 'extractor',
+    run: () => Promise<T>,
+    fallback: () => T | Promise<T>,
+  ): Promise<T> {
+    const strategy =
+      config.failurePolicy?.[kind] ??
+      (kind === 'extractor' ? 'disable_auto_extract' : 'throw');
+
+    try {
+      return await run();
+    } catch (error) {
+      if (strategy === 'retry_once') {
+        try {
+          return await run();
+        } catch (retryError) {
+          config.logger?.error(`memory.${kind}.retry_failed`, {
+            error: String(retryError),
+          });
+          throw retryError;
+        }
+      }
+
+      config.logger?.error(`memory.${kind}.failed`, {
+        error: String(error),
+      });
+
+      if (strategy === 'disable_auto_extract' && kind === 'extractor') {
+        autoExtractEnabled = false;
+        return fallback();
+      }
+
+      if (strategy === 'log_and_continue') {
+        return fallback();
+      }
+
+      throw error;
+    }
+  }
+
+  async function persistMonitorState(
+    state: 'idle' | 'soft_triggered' | 'hard_triggered' | 'compacting',
+    score: number,
+    turns: Turn[],
+    lastCompactionAt?: number | null,
+  ): Promise<void> {
+    await asyncAdapter.upsertContextMonitor({
+      ...config.scope,
+      compaction_state: state,
+      active_turn_count: turns.length,
+      active_token_estimate: turns.reduce((acc, turn) => acc + turn.token_estimate, 0),
+      compaction_score: score,
+      last_compaction_at: lastCompactionAt,
+    });
+  }
+
+  async function buildQueryVector(input: string): Promise<Float32Array | undefined> {
+    if (!config.embeddingGenerator || input.trim().length === 0) {
+      return undefined;
+    }
+    const vectors = await config.embeddingGenerator([input]);
+    return vectors[0];
+  }
 
   async function maybeEmbedKnowledge(knowledge: KnowledgeMemory[]): Promise<void> {
     if (!config.embeddingAdapter || !config.embeddingGenerator || knowledge.length === 0) {
@@ -74,43 +205,137 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     });
   }
 
-  async function runCompaction(turns: Turn[]): Promise<CompactionResult | null> {
-    const report = assessContext(
-      {
-        scope: config.scope,
-        session_id: config.sessionId,
-        active_turns: turns,
-        latest_working_memory: config.adapter.getLatestWorkingMemory(config.scope),
-      },
-      config.monitorPolicy,
+  async function getHybridKnowledgeResults(
+    query: string,
+    options?: SearchOptions,
+    level: ScopeLevel = config.crossScopeLevel ?? 'scope',
+  ): Promise<SearchResult<KnowledgeMemory>[]> {
+    const lexical =
+      level === 'scope'
+        ? await asyncAdapter.searchKnowledge(config.scope, query, options)
+        : await asyncAdapter.searchKnowledgeCrossScope(config.scope, level, query, options);
+    if (!config.embeddingAdapter) {
+      return lexical;
+    }
+
+    const queryVector = await buildQueryVector(query);
+    if (!queryVector) {
+      return lexical;
+    }
+
+    const semantic =
+      level === 'scope'
+        ? config.embeddingAdapter.findSimilar(config.scope, queryVector, {
+            limit: options?.limit ?? 10,
+            minSimilarity: 0,
+          })
+        : config.embeddingAdapter.findSimilarCrossScope(config.scope, level, queryVector, {
+            limit: options?.limit ?? 10,
+            minSimilarity: 0,
+          });
+
+    const merged = new Map<number, SearchResult<KnowledgeMemory>>();
+    for (const result of lexical) {
+      merged.set(result.item.id, result);
+    }
+    for (const result of semantic) {
+      const knowledge = await asyncAdapter.getKnowledgeMemoryById(result.knowledgeMemoryId);
+      if (!knowledge) continue;
+      const existing = merged.get(knowledge.id);
+      const rank = existing ? Math.max(existing.rank, result.similarity) : result.similarity;
+      merged.set(knowledge.id, {
+        item: knowledge,
+        rank,
+      });
+    }
+
+    const results = [...merged.values()]
+      .sort((a, b) => b.rank - a.rank || b.item.last_accessed_at - a.item.last_accessed_at)
+      .slice(0, options?.limit ?? 10);
+
+    if (config.contextPolicy?.touchSelectedKnowledge ?? true) {
+      for (const result of results) {
+        await asyncAdapter.touchKnowledgeMemory(result.item.id);
+      }
+    }
+
+    return results;
+  }
+
+  async function getContextInternal(relevanceQuery?: string): Promise<MemoryContext> {
+    const activeTurns = await asyncAdapter.getActiveTurns(config.scope);
+    const queryVector = await buildQueryVector(
+      relevanceQuery ??
+        activeTurns
+          .slice(-4)
+          .map((turn) => turn.content)
+          .join('\n'),
     );
 
-    if (report.recommendation.action === 'none') {
+    return buildMemoryContext(asyncAdapter, config.scope, {
+      relevanceQuery,
+      queryVector,
+      embeddingAdapter: config.embeddingAdapter,
+      crossScopeLevel: config.crossScopeLevel,
+      policy: config.contextPolicy,
+      logger: config.logger,
+      onEvent,
+    });
+  }
+
+  async function executeCompaction(
+    turns: Turn[],
+    trigger: 'soft' | 'hard' | 'manual' | 'session_gap',
+    retainedTurnCount: number,
+    score: number,
+  ): Promise<CompactionResult | null> {
+    await persistMonitorState('compacting', score, turns);
+
+    const result = await withFailurePolicy(
+      'summarizer',
+      () =>
+        compactTurns(
+          asyncAdapter,
+          config.scope,
+          config.sessionId,
+          turns,
+          config.summarizer,
+          trigger,
+          retainedTurnCount,
+          { logger: config.logger, onEvent },
+        ),
+      () => null,
+    );
+
+    if (!result) {
       return null;
     }
 
-    const result = await compactTurns(
-      config.adapter,
-      config.scope,
-      config.sessionId,
-      turns,
-      config.summarizer,
-      report.recommendation.action,
-      Math.max(0, Math.min(report.recommendation.post_compaction_target_turns, turns.length - 1)),
-      { logger: config.logger, onEvent: config.onEvent },
+    const remainingTurns = await asyncAdapter.getActiveTurns(config.scope);
+    await persistMonitorState(
+      'idle',
+      score,
+      remainingTurns,
+      Math.floor(Date.now() / 1000),
     );
+    deferredSoftCompaction = false;
 
-    if (config.extractor && autoExtract) {
-      const extracted = await extractKnowledge(
-        config.adapter,
-        result.workingMemory.id,
-        config.scope,
-        config.extractor,
-        {
-          logger: config.logger,
-          onEvent: config.onEvent,
-          policy: config.extractionPolicy,
-        },
+    if (config.extractor && autoExtractEnabled) {
+      const extracted = await withFailurePolicy(
+        'extractor',
+        () =>
+          extractKnowledge(
+            asyncAdapter,
+            result.workingMemory.id,
+            config.scope,
+            config.extractor!,
+            {
+              logger: config.logger,
+              onEvent,
+              policy: config.extractionPolicy,
+            },
+          ),
+        () => [] as KnowledgeMemory[],
       );
       await maybeEmbedKnowledge(extracted);
     }
@@ -118,58 +343,183 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     return result;
   }
 
+  async function runCompaction(turns: Turn[]): Promise<CompactionResult | null> {
+    const latestWorkingMemory = await asyncAdapter.getLatestWorkingMemory(config.scope);
+    const report = assessContext(
+      {
+        scope: config.scope,
+        session_id: config.sessionId,
+        active_turns: turns,
+        latest_working_memory: latestWorkingMemory,
+      },
+      config.monitorPolicy,
+    );
+
+    const longGapDetected = report.topic_drift_signals.some(
+      (signal) => signal.type === 'long_intra_session_gap' && signal.detected,
+    );
+    if (longGapDetected && turns.length > 1) {
+      return executeCompaction(
+        turns,
+        'session_gap',
+        Math.max(
+          1,
+          Math.min(
+            config.monitorPolicy?.softRetainTurns ?? DEFAULT_MONITOR_POLICY.softRetainTurns,
+            turns.length - 1,
+          ),
+        ),
+        report.score_breakdown.total,
+      );
+    }
+
+    if (report.recommendation.action === 'none') {
+      await persistMonitorState('idle', report.score_breakdown.total, turns);
+      deferredSoftCompaction = false;
+      return null;
+    }
+
+    if (report.recommendation.action === 'soft' && report.recommendation.defer_to_idle) {
+      await persistMonitorState('soft_triggered', report.score_breakdown.total, turns);
+      deferredSoftCompaction = true;
+      return null;
+    }
+
+    return executeCompaction(
+      turns,
+      report.recommendation.action,
+      Math.max(0, Math.min(report.recommendation.post_compaction_target_turns, turns.length - 1)),
+      report.score_breakdown.total,
+    );
+  }
+
+  async function insertManagedTurn(role: TurnRole, content: string, actor: string): Promise<Turn> {
+    const turn = await asyncAdapter.insertTurn({
+      ...config.scope,
+      session_id: config.sessionId,
+      actor,
+      role,
+      content: config.redactText ? config.redactText({ kind: 'turn', text: content }) : content,
+    });
+
+    emitMemoryEvent('manager', config.scope, { logger: config.logger, onEvent }, 0, {
+      action: 'process_turn',
+      role,
+      turnId: turn.id,
+    });
+
+    return turn;
+  }
+
   return {
     async processTurn(role, content, actor = role === 'assistant' ? 'assistant' : 'user') {
-      const turn = config.adapter.insertTurn({
-        ...config.scope,
-        session_id: config.sessionId,
-        actor,
-        role,
-        content,
-      });
-
-      emitMemoryEvent('manager', config.scope, config, 0, {
-        action: 'process_turn',
-        role,
-        turnId: turn.id,
-      });
+      const turn = await insertManagedTurn(role, content, actor);
 
       if (autoCompact) {
-        await runCompaction(config.adapter.getActiveTurns(config.scope));
+        const activeTurns = await asyncAdapter.getActiveTurns(config.scope);
+        await runCompaction(activeTurns);
       }
 
       return turn;
     },
 
-    getContext(relevanceQuery) {
-      return buildMemoryContext(config.adapter, config.scope, {
-        relevanceQuery,
-        policy: config.contextPolicy,
-        logger: config.logger,
-        onEvent: config.onEvent,
-      });
+    async processExchange(userContent, assistantContent, actors) {
+      const userTurn = await insertManagedTurn('user', userContent, actors?.user ?? 'user');
+      const assistantTurn = await insertManagedTurn(
+        'assistant',
+        assistantContent,
+        actors?.assistant ?? 'assistant',
+      );
+      const compactionResult = autoCompact
+        ? await runCompaction(await asyncAdapter.getActiveTurns(config.scope))
+        : null;
+      return {
+        userTurn,
+        assistantTurn,
+        compactionResult,
+      };
     },
 
-    search(query, options) {
+    async getContext(relevanceQuery) {
+      return getContextInternal(relevanceQuery);
+    },
+
+    async getSessionBootstrap(relevanceQuery) {
+      const context = await getContextInternal(relevanceQuery);
       return {
-        turns: config.adapter.searchTurns(config.scope, query, options),
-        knowledge: config.adapter.searchKnowledge(config.scope, query, options),
+        currentObjective: context.currentObjective,
+        workingMemory: context.workingMemory,
+        relevantKnowledge: context.relevantKnowledge,
+        recentSummaries: context.recentSummaries,
+        activeObjectives: context.activeObjectives,
+        unresolvedWork: context.unresolvedWork,
+      };
+    },
+
+    async recall(timeRange) {
+      return {
+        turns: await asyncAdapter.getTurnsByTimeRange(config.scope, timeRange),
+        workingMemory: await asyncAdapter.getWorkingMemoryByTimeRange(config.scope, timeRange),
+        knowledge: await asyncAdapter.getKnowledgeByTimeRange(config.scope, timeRange),
+        workItems: await asyncAdapter.getWorkItemsByTimeRange(config.scope, timeRange),
+      };
+    },
+
+    async search(query, options) {
+      const results = {
+        turns: await asyncAdapter.searchTurns(config.scope, query, options),
+        knowledge: await getHybridKnowledgeResults(query, options, config.crossScopeLevel ?? 'scope'),
+      };
+      emitMemoryEvent('manager', config.scope, { logger: config.logger, onEvent }, 0, {
+        action: 'search',
+        query,
+        turnResultCount: results.turns.length,
+        knowledgeResultCount: results.knowledge.length,
+      });
+      return results;
+    },
+
+    async searchCrossScope(query, level, options) {
+      return {
+        knowledge: await getHybridKnowledgeResults(query, options, level),
       };
     },
 
     async forceCompact() {
-      return runCompaction(config.adapter.getActiveTurns(config.scope));
+      if (deferredSoftCompaction) {
+        config.logger?.info('memory.compaction.flushing_deferred');
+      }
+      const turns = await asyncAdapter.getActiveTurns(config.scope);
+      const latestWorkingMemory = await asyncAdapter.getLatestWorkingMemory(config.scope);
+      const report = assessContext(
+        {
+          scope: config.scope,
+          session_id: config.sessionId,
+          active_turns: turns,
+          latest_working_memory: latestWorkingMemory,
+        },
+        config.monitorPolicy,
+      );
+      if (report.recommendation.action === 'none') {
+        return null;
+      }
+      return executeCompaction(
+        turns,
+        'manual',
+        Math.max(0, Math.min(report.recommendation.post_compaction_target_turns, turns.length - 1)),
+        report.score_breakdown.total,
+      );
     },
 
-    learnFact(fact, factType, confidence = 'high') {
-      const knowledge = config.adapter.insertKnowledgeMemory({
+    async learnFact(fact, factType, confidence = 'high') {
+      const knowledge = await asyncAdapter.insertKnowledgeMemory({
         ...config.scope,
-        fact,
+        fact: config.redactText ? config.redactText({ kind: 'fact', text: fact }) : fact,
         fact_type: factType,
         source: 'manual',
         confidence,
       });
-      emitMemoryEvent('manager', config.scope, config, 0, {
+      emitMemoryEvent('manager', config.scope, { logger: config.logger, onEvent }, 0, {
         action: 'learn_fact',
         knowledgeMemoryId: knowledge.id,
         factType,
@@ -177,8 +527,33 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       return knowledge;
     },
 
-    close() {
-      config.adapter.close();
+    async trackWorkItem(title, kind = 'objective', status = 'open', detail) {
+      return asyncAdapter.insertWorkItem({
+        ...config.scope,
+        session_id: config.sessionId,
+        title: config.redactText ? config.redactText({ kind: 'work_item', text: title }) : title,
+        kind,
+        status,
+        detail:
+          detail && config.redactText
+            ? config.redactText({ kind: 'work_item', text: detail })
+            : detail,
+      });
+    },
+
+    async runMaintenance(policy) {
+      const report = await runMaintenance(asyncAdapter, config.scope, policy ?? config.maintenancePolicy);
+      emitMemoryEvent('manager', config.scope, { logger: config.logger, onEvent }, 0, {
+        action: 'run_maintenance',
+        expiredWorkingMemoryCount: report.expiredWorkingMemoryIds.length,
+        retiredKnowledgeCount: report.retiredKnowledgeIds.length,
+        deletedWorkItemCount: report.deletedWorkItemIds.length,
+      });
+      return report;
+    },
+
+    async close() {
+      await asyncAdapter.close();
     },
   };
 }

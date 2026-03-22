@@ -1,16 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createSQLiteAdapter } from '../adapters/sqlite/index.js';
+import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 import { buildMemoryContext } from '../core/context.js';
 import { compactTurns } from '../core/orchestrator.js';
 import { noopLogger } from '../contracts/observability.js';
 import type { MemoryEvent } from '../contracts/observability.js';
 import type { StorageAdapter } from '../contracts/storage.js';
+import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import { makeScope, seedTurns } from './test-helpers.js';
 
 describe('observability', () => {
   let events: MemoryEvent[];
   let adapter: StorageAdapter;
+  let asyncAdapter: AsyncStorageAdapter;
 
   beforeEach(() => {
     events = [];
@@ -18,6 +21,7 @@ describe('observability', () => {
       logger: noopLogger,
       onEvent: (event) => events.push(event),
     });
+    asyncAdapter = wrapSyncAdapter(adapter);
   });
 
   afterEach(() => {
@@ -48,7 +52,7 @@ describe('observability', () => {
     const { sessionId, turns } = seedTurns(adapter, scope, 4);
 
     await compactTurns(
-      adapter,
+      asyncAdapter,
       scope,
       sessionId,
       turns,
@@ -68,11 +72,11 @@ describe('observability', () => {
     expect(events.some((event) => event.type === 'compaction')).toBe(true);
   });
 
-  it('emits context assembly events', () => {
+  it('emits context assembly events', async () => {
     const scope = makeScope();
     seedTurns(adapter, scope, 2);
 
-    buildMemoryContext(adapter, scope, {
+    await buildMemoryContext(asyncAdapter, scope, {
       logger: noopLogger,
       onEvent: (event) => events.push(event),
     });

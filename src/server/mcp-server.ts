@@ -1,0 +1,395 @@
+import { createMemory, type CreateMemoryOptions } from '../core/quick.js';
+import type { MemoryManager } from '../core/manager.js';
+import type { MemoryScope } from '../contracts/identity.js';
+import type { FactType, FactConfidence } from '../contracts/types.js';
+
+export interface McpServerConfig {
+  /** Database path. Defaults to ':memory:'. */
+  dbPath?: string;
+  /** Default scope for all operations. Can be overridden per-tool-call. */
+  scope?: string | MemoryScope;
+  /** Summarizer: 'extractive' | 'claude' | 'openai'. Defaults to 'extractive'. */
+  summarizer?: CreateMemoryOptions['summarizer'];
+  /** Extractor: 'regex' | 'claude' | 'openai' | false. Defaults to 'regex'. */
+  extractor?: CreateMemoryOptions['extractor'];
+  /** Preset: 'ai_ide' | 'chat_agent' | 'autonomous_agent'. */
+  preset?: CreateMemoryOptions['preset'];
+}
+
+interface McpTool {
+  name: string;
+  description: string;
+  inputSchema: {
+    type: 'object';
+    properties: Record<string, unknown>;
+    required?: string[];
+  };
+}
+
+interface McpToolResult {
+  content: Array<{ type: 'text'; text: string }>;
+  isError?: boolean;
+}
+
+const TOOLS: McpTool[] = [
+  {
+    name: 'memory_store_turn',
+    description: 'Store a single conversation turn in memory.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        role: { type: 'string', enum: ['user', 'assistant', 'system'], description: 'Turn role' },
+        content: { type: 'string', description: 'Turn content' },
+        actor: { type: 'string', description: 'Optional actor name' },
+      },
+      required: ['role', 'content'],
+    },
+  },
+  {
+    name: 'memory_store_exchange',
+    description: 'Store a user+assistant exchange atomically.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        userContent: { type: 'string', description: 'User message content' },
+        assistantContent: { type: 'string', description: 'Assistant response content' },
+      },
+      required: ['userContent', 'assistantContent'],
+    },
+  },
+  {
+    name: 'memory_get_context',
+    description: 'Retrieve assembled memory context for prompt injection. Returns active turns, working memory, relevant knowledge, objectives, and unresolved work.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        relevanceQuery: { type: 'string', description: 'Optional query to rank knowledge by relevance' },
+      },
+    },
+  },
+  {
+    name: 'memory_search',
+    description: 'Search across turns and knowledge using hybrid lexical+semantic retrieval.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query' },
+        limit: { type: 'number', description: 'Max results (default: 10)' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'memory_learn_fact',
+    description: 'Manually add a durable knowledge fact.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        fact: { type: 'string', description: 'The fact to store' },
+        factType: {
+          type: 'string',
+          enum: ['preference', 'entity', 'decision', 'constraint', 'reference'],
+          description: 'Fact classification',
+        },
+        confidence: { type: 'string', enum: ['high', 'medium'], description: 'Confidence level (default: high)' },
+      },
+      required: ['fact', 'factType'],
+    },
+  },
+  {
+    name: 'memory_track_work',
+    description: 'Track an objective, unresolved work item, or constraint.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Work item title' },
+        kind: { type: 'string', enum: ['objective', 'unresolved_work', 'constraint'], description: 'Item kind (default: objective)' },
+        status: { type: 'string', enum: ['open', 'in_progress', 'blocked', 'done'], description: 'Item status (default: open)' },
+        detail: { type: 'string', description: 'Additional detail' },
+      },
+      required: ['title'],
+    },
+  },
+  {
+    name: 'memory_force_compact',
+    description: 'Force compaction of conversation history into a summary.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'memory_get_health',
+    description: 'Get memory health report including compaction state and token estimates.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'memory_run_maintenance',
+    description: 'Run maintenance to expire stale data, retire unused knowledge, and clean up completed work items.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+];
+
+function jsonResult(data: unknown): McpToolResult {
+  return {
+    content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
+  };
+}
+
+function errorResult(message: string): McpToolResult {
+  return {
+    content: [{ type: 'text', text: message }],
+    isError: true,
+  };
+}
+
+/**
+ * Creates a standalone MCP server handler that exposes memory operations as tools.
+ *
+ * This function returns the tools list and a callTool dispatcher. It can be used
+ * with any MCP transport (stdio, SSE, etc.).
+ *
+ * For a ready-to-run stdio server, use `startMcpServer()`.
+ */
+export function createMcpServerHandler(config: McpServerConfig = {}) {
+  const manager = createMemory({
+    adapter: 'sqlite',
+    path: config.dbPath ?? ':memory:',
+    scope: config.scope ?? 'default',
+    summarizer: config.summarizer ?? 'extractive',
+    extractor: config.extractor ?? 'regex',
+    preset: config.preset,
+  });
+
+  async function callTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
+    try {
+      switch (name) {
+        case 'memory_store_turn': {
+          const turn = await manager.processTurn(
+            args.role as 'user' | 'assistant' | 'system',
+            String(args.content),
+            args.actor ? String(args.actor) : undefined,
+          );
+          return jsonResult({ stored: true, turnId: turn.id });
+        }
+        case 'memory_store_exchange': {
+          const exchange = await manager.processExchange(
+            String(args.userContent),
+            String(args.assistantContent),
+          );
+          return jsonResult({
+            stored: true,
+            userTurnId: exchange.userTurn.id,
+            assistantTurnId: exchange.assistantTurn.id,
+            compacted: exchange.compactionResult !== null,
+          });
+        }
+        case 'memory_get_context': {
+          const context = await manager.getContext(
+            args.relevanceQuery ? String(args.relevanceQuery) : undefined,
+          );
+          return jsonResult({
+            currentObjective: context.currentObjective,
+            activeTurnCount: context.activeTurns.length,
+            workingMemory: context.workingMemory
+              ? {
+                  summary: context.workingMemory.summary,
+                  key_entities: context.workingMemory.key_entities,
+                  topic_tags: context.workingMemory.topic_tags,
+                }
+              : null,
+            relevantKnowledge: context.relevantKnowledge.map((k) => ({
+              id: k.id,
+              fact: k.fact,
+              fact_type: k.fact_type,
+              confidence: k.confidence,
+            })),
+            activeObjectives: context.activeObjectives.map((o) => ({
+              title: o.title,
+              status: o.status,
+            })),
+            unresolvedWork: context.unresolvedWork,
+            tokenEstimate: context.tokenEstimate,
+          });
+        }
+        case 'memory_search': {
+          const results = await manager.search(
+            String(args.query),
+            args.limit ? { limit: Number(args.limit) } : undefined,
+          );
+          return jsonResult({
+            turns: results.turns.map((r) => ({
+              id: r.item.id,
+              role: r.item.role,
+              content: r.item.content,
+              rank: r.rank,
+            })),
+            knowledge: results.knowledge.map((r) => ({
+              id: r.item.id,
+              fact: r.item.fact,
+              fact_type: r.item.fact_type,
+              rank: r.rank,
+            })),
+          });
+        }
+        case 'memory_learn_fact': {
+          const fact = await manager.learnFact(
+            String(args.fact),
+            args.factType as FactType,
+            (args.confidence as FactConfidence) ?? 'high',
+          );
+          return jsonResult({ stored: true, knowledgeId: fact.id });
+        }
+        case 'memory_track_work': {
+          const item = await manager.trackWorkItem(
+            String(args.title),
+            (args.kind as 'objective' | 'unresolved_work' | 'constraint') ?? 'objective',
+            (args.status as 'open' | 'in_progress' | 'blocked' | 'done') ?? 'open',
+            args.detail ? String(args.detail) : undefined,
+          );
+          return jsonResult({ tracked: true, workItemId: item.id });
+        }
+        case 'memory_force_compact': {
+          const result = await manager.forceCompact();
+          return jsonResult({
+            compacted: result !== null,
+            archivedTurnCount: result?.archivedTurnIds.length ?? 0,
+          });
+        }
+        case 'memory_get_health': {
+          const context = await manager.getContext();
+          return jsonResult({
+            activeTurnCount: context.activeTurns.length,
+            tokenEstimate: context.tokenEstimate,
+            knowledgeCount: context.relevantKnowledge.length,
+            objectiveCount: context.activeObjectives.length,
+            unresolvedWorkCount: context.unresolvedWork.length,
+          });
+        }
+        case 'memory_run_maintenance': {
+          const report = await manager.runMaintenance();
+          return jsonResult({
+            expiredWorkingMemory: report.expiredWorkingMemoryIds.length,
+            retiredKnowledge: report.retiredKnowledgeIds.length,
+            deletedWorkItems: report.deletedWorkItemIds.length,
+          });
+        }
+        default:
+          return errorResult(`Unknown tool: ${name}`);
+      }
+    } catch (error) {
+      return errorResult(`Error in ${name}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  return {
+    tools: TOOLS,
+    callTool,
+    manager,
+    async close() {
+      await manager.close();
+    },
+  };
+}
+
+/**
+ * Starts a stdio-based MCP server.
+ * This is the entry point for `npx memory-layer serve`.
+ */
+export async function startMcpServer(config: McpServerConfig = {}): Promise<void> {
+  const handler = createMcpServerHandler(config);
+
+  // MCP over stdio protocol
+  const readline = await import('readline');
+  const rl = readline.createInterface({ input: process.stdin });
+
+  process.stdout.write(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'notifications/initialized',
+    }) + '\n',
+  );
+
+  rl.on('line', async (line: string) => {
+    try {
+      const message = JSON.parse(line);
+
+      if (message.method === 'initialize') {
+        process.stdout.write(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: message.id,
+            result: {
+              protocolVersion: '2024-11-05',
+              capabilities: { tools: {} },
+              serverInfo: {
+                name: 'memory-layer',
+                version: '2.0.0',
+              },
+            },
+          }) + '\n',
+        );
+        return;
+      }
+
+      if (message.method === 'tools/list') {
+        process.stdout.write(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: message.id,
+            result: {
+              tools: handler.tools,
+            },
+          }) + '\n',
+        );
+        return;
+      }
+
+      if (message.method === 'tools/call') {
+        const result = await handler.callTool(
+          message.params.name,
+          message.params.arguments ?? {},
+        );
+        process.stdout.write(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: message.id,
+            result,
+          }) + '\n',
+        );
+        return;
+      }
+
+      // Respond to unknown methods
+      if (message.id !== undefined) {
+        process.stdout.write(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: message.id,
+            error: {
+              code: -32601,
+              message: `Method not found: ${message.method}`,
+            },
+          }) + '\n',
+        );
+      }
+    } catch (error) {
+      // Parse errors
+      process.stderr.write(`MCP parse error: ${error}\n`);
+    }
+  });
+
+  rl.on('close', async () => {
+    await handler.close();
+    process.exit(0);
+  });
+}
+
+export { TOOLS as MCP_TOOLS };
+export type { McpTool, McpToolResult };

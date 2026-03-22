@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createSQLiteAdapterWithEmbeddings } from '../adapters/sqlite/index.js';
+import { createMemoryEventEmitter } from '../core/events.js';
 import { createMemoryManager } from '../core/manager.js';
+import { createClaudeMemoryManager } from '../core/provider-managers.js';
 import { createRegexExtractor } from '../core/extractor.js';
 import { makeScope } from './test-helpers.js';
 
@@ -34,10 +36,10 @@ describe('memory manager', () => {
       monitorPolicy: {
         floorTurns: 2,
         floorTokens: 1,
-        softTurnThreshold: 2,
-        hardTurnThreshold: 4,
-        softTokenThreshold: 10,
-        hardTokenThreshold: 20,
+        softTurnThreshold: 10,
+        hardTurnThreshold: 2,
+        softTokenThreshold: 5000,
+        hardTokenThreshold: 10,
       },
     });
 
@@ -47,7 +49,7 @@ describe('memory manager', () => {
     expect(adapter.getActiveWorkingMemory(makeScope()).length).toBeGreaterThan(0);
     expect(adapter.getActiveKnowledgeMemory(makeScope()).length).toBeGreaterThan(0);
     expect(onEvent).toHaveBeenCalled();
-    manager.close();
+    await manager.close();
   });
 
   it('returns prompt-ready context', async () => {
@@ -64,12 +66,89 @@ describe('memory manager', () => {
     });
 
     await manager.processTurn('user', 'hello');
-    const context = manager.getContext();
+    const context = await manager.getContext();
     expect(context.activeTurns).toHaveLength(1);
-    manager.close();
+    await manager.close();
   });
 
-  it('delegates lexical search', async () => {
+  it('returns hybrid search results', async () => {
+    const manager = createMemoryManager({
+      adapter,
+      scope: makeScope(),
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      autoCompact: false,
+      embeddingAdapter: adapter.embeddings,
+      embeddingGenerator: async () => [new Float32Array([1, 0])],
+    });
+
+    await manager.processTurn('user', 'remember postgres');
+    const knowledge = adapter.insertKnowledgeMemory({
+      ...makeScope(),
+      fact: 'The project uses postgres',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+    adapter.embeddings.storeEmbedding(knowledge.id, new Float32Array([1, 0]));
+
+    const results = await manager.search('postgres');
+    expect(results.turns).toHaveLength(1);
+    expect(results.knowledge.length).toBeGreaterThan(0);
+    await manager.close();
+  });
+
+  it('uses semantic retrieval in getContext when embeddings are configured', async () => {
+    const manager = createMemoryManager({
+      adapter,
+      scope: makeScope(),
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      autoCompact: false,
+      embeddingAdapter: adapter.embeddings,
+      embeddingGenerator: async () => [new Float32Array([1, 0])],
+    });
+
+    const knowledge = adapter.insertKnowledgeMemory({
+      ...makeScope(),
+      fact: 'The project uses sqlite for local-first storage',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+    adapter.embeddings.storeEmbedding(knowledge.id, new Float32Array([1, 0]));
+
+    const context = await manager.getContext('local-first');
+    expect(context.relevantKnowledge.map((item) => item.id)).toContain(knowledge.id);
+    await manager.close();
+  });
+
+  it('can manually learn facts', async () => {
+    const manager = createMemoryManager({
+      adapter,
+      scope: makeScope(),
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+    });
+
+    const fact = await manager.learnFact('The project uses sqlite', 'reference');
+    expect(fact.source).toBe('manual');
+    await manager.close();
+  });
+
+  it('can process an exchange in one memory cycle', async () => {
     const manager = createMemoryManager({
       adapter,
       scope: makeScope(),
@@ -82,12 +161,87 @@ describe('memory manager', () => {
       autoCompact: false,
     });
 
-    await manager.processTurn('user', 'remember postgres');
-    expect(manager.search('postgres').turns).toHaveLength(1);
-    manager.close();
+    const result = await manager.processExchange('hello', 'hi there');
+    expect(result.userTurn.role).toBe('user');
+    expect(result.assistantTurn.role).toBe('assistant');
+    await manager.close();
   });
 
-  it('can manually learn facts', () => {
+  it('builds session bootstrap from prior memory', async () => {
+    const manager = createMemoryManager({
+      adapter,
+      scope: makeScope(),
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'Need to finish memory work. The project uses sqlite.',
+        key_entities: ['sqlite'],
+        topic_tags: ['memory'],
+      }),
+      autoCompact: false,
+    });
+
+    adapter.insertWorkingMemory({
+      ...makeScope(),
+      session_id: 'prior-session',
+      summary: 'Need to finish memory work.',
+      key_entities: ['memory'],
+      topic_tags: ['continuity'],
+      turn_id_start: 1,
+      turn_id_end: 1,
+      turn_count: 1,
+      compaction_trigger: 'manual',
+    });
+    adapter.insertKnowledgeMemory({
+      ...makeScope(),
+      fact: 'The project uses sqlite',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+
+    const bootstrap = await manager.getSessionBootstrap('sqlite');
+    expect(bootstrap.workingMemory?.summary).toContain('Need to finish');
+    expect(bootstrap.relevantKnowledge.length).toBeGreaterThan(0);
+    await manager.close();
+  });
+
+  it('persists monitor state and defers soft compaction until forced', async () => {
+    const scope = makeScope();
+    const manager = createMemoryManager({
+      adapter,
+      scope,
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      monitorPolicy: {
+        floorTurns: 1,
+        floorTokens: 1,
+        softTurnThreshold: 2,
+        hardTurnThreshold: 10,
+        softTokenThreshold: 5,
+        hardTokenThreshold: 5000,
+      },
+    });
+
+    await manager.processTurn('user', 'This should trigger soft compaction.');
+    await manager.processTurn('assistant', 'Acknowledged.');
+
+    expect(adapter.getContextMonitor(scope)?.compaction_state).toBe('soft_triggered');
+    expect(adapter.getActiveWorkingMemory(scope)).toHaveLength(0);
+
+    await manager.forceCompact();
+    expect(adapter.getActiveWorkingMemory(scope).length).toBeGreaterThan(0);
+    expect(adapter.getContextMonitor(scope)?.compaction_state).toBe('idle');
+    await manager.close();
+  });
+
+  it('supports typed event subscriptions', async () => {
+    const emitter = createMemoryEventEmitter();
+    const managerEvents = vi.fn();
+    emitter.on('manager', managerEvents);
     const manager = createMemoryManager({
       adapter,
       scope: makeScope(),
@@ -97,10 +251,145 @@ describe('memory manager', () => {
         key_entities: [],
         topic_tags: [],
       }),
+      autoCompact: false,
+      eventEmitter: emitter,
     });
 
-    const fact = manager.learnFact('The project uses sqlite', 'reference');
-    expect(fact.source).toBe('manual');
-    manager.close();
+    await manager.processTurn('user', 'hello');
+    expect(managerEvents).toHaveBeenCalled();
+    await manager.close();
+  });
+
+  it('can disable auto extract after extractor failure', async () => {
+    const manager = createMemoryManager({
+      adapter,
+      scope: makeScope(),
+      sessionId: 'session-1',
+      summarizer: async (turns) => ({
+        summary: `summary ${turns.length}`,
+        key_entities: [],
+        topic_tags: [],
+      }),
+      extractor: async () => {
+        throw new Error('extract failed');
+      },
+      failurePolicy: {
+        extractor: 'disable_auto_extract',
+      },
+      monitorPolicy: {
+        floorTurns: 1,
+        floorTokens: 1,
+        hardTurnThreshold: 2,
+        softTurnThreshold: 10,
+        hardTokenThreshold: 5,
+        softTokenThreshold: 5000,
+      },
+    });
+
+    await manager.processTurn('user', 'one');
+    await manager.processTurn('assistant', 'two');
+    await manager.processTurn('user', 'three');
+    await manager.processTurn('assistant', 'four');
+
+    expect(adapter.getActiveWorkingMemory(makeScope()).length).toBeGreaterThan(0);
+    expect(adapter.getActiveKnowledgeMemory(makeScope())).toEqual([]);
+    await manager.close();
+  });
+
+  it('tracks work items and recalls by time range', async () => {
+    const scope = makeScope();
+    const manager = createMemoryManager({
+      adapter,
+      scope,
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      autoCompact: false,
+    });
+
+    await manager.trackWorkItem('Ship the memory layer', 'objective', 'in_progress');
+    const recall = await manager.recall({ start_at: 0, end_at: Math.floor(Date.now() / 1000) + 10 });
+    expect(recall.workItems).toHaveLength(1);
+    await manager.close();
+  });
+
+  it('creates a provider-backed memory manager with default wiring', async () => {
+    const manager = createClaudeMemoryManager({
+      dbPath: ':memory:',
+      scope: makeScope(),
+      summarizer: {
+        client: {
+          async generate(request) {
+            if (request.expectedFormat === 'object') {
+              return '{"summary":"Provider summary","key_entities":["memory"],"topic_tags":["sdk"]}';
+            }
+            return '[{"fact":"The project uses sqlite","factType":"reference","confidence":"high"}]';
+          },
+        },
+      },
+      extractor: {
+        client: {
+          async generate(request) {
+            if (request.expectedFormat === 'object') {
+              return '{"summary":"Provider summary","key_entities":["memory"],"topic_tags":["sdk"]}';
+            }
+            return '[{"fact":"The project uses sqlite","factType":"reference","confidence":"high"}]';
+          },
+        },
+      },
+      monitorPolicy: {
+        floorTurns: 1,
+        floorTokens: 1,
+        hardTurnThreshold: 2,
+        softTurnThreshold: 10,
+        hardTokenThreshold: 5,
+        softTokenThreshold: 5000,
+      },
+    });
+
+    await manager.processTurn('user', 'one');
+    await manager.processTurn('assistant', 'two');
+    const context = await manager.getContext('sqlite');
+    expect(context.relevantKnowledge.some((item) => item.fact.includes('sqlite'))).toBe(true);
+    await manager.close();
+  });
+
+  it('treats a long intra-session gap as a compaction boundary', async () => {
+    const scope = makeScope();
+    adapter.insertTurn({
+      ...scope,
+      session_id: 'session-gap',
+      actor: 'user',
+      role: 'user',
+      content: 'old turn',
+      created_at: 1,
+    });
+
+    const manager = createMemoryManager({
+      adapter,
+      scope,
+      sessionId: 'session-gap',
+      summarizer: async () => ({
+        summary: 'session gap summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      monitorPolicy: {
+        floorTurns: 1,
+        floorTokens: 1,
+        softTurnThreshold: 50,
+        hardTurnThreshold: 100,
+        softTokenThreshold: 50_000,
+        hardTokenThreshold: 100_000,
+        intraSessionGapSeconds: 10,
+      },
+    });
+
+    await manager.processTurn('assistant', 'new turn after a long gap');
+    expect(adapter.getActiveWorkingMemory(scope).length).toBeGreaterThan(0);
+    await manager.close();
   });
 });
