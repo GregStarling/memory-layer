@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 export function createSQLiteSchema(database: Database.Database): void {
   database.pragma('journal_mode = WAL');
@@ -17,6 +17,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       actor             TEXT    NOT NULL,
       role              TEXT    NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
       content           TEXT    NOT NULL,
+      priority          REAL    NOT NULL DEFAULT 1.0,
       token_estimate    INTEGER NOT NULL,
       created_at        INTEGER NOT NULL,
       archived_at       INTEGER,
@@ -27,6 +28,7 @@ export function createSQLiteSchema(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
     CREATE INDEX IF NOT EXISTS idx_turns_scope ON turns(tenant_id, system_id, workspace_id, scope_id);
     CREATE INDEX IF NOT EXISTS idx_turns_archived ON turns(archived_at);
+    CREATE INDEX IF NOT EXISTS idx_turns_created ON turns(created_at);
 
     CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(
       content, content=turns, content_rowid=id
@@ -34,6 +36,15 @@ export function createSQLiteSchema(database: Database.Database): void {
 
     CREATE TRIGGER IF NOT EXISTS turns_ai AFTER INSERT ON turns BEGIN
       INSERT INTO turns_fts(rowid, content) VALUES (new.id, new.content);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS turns_au AFTER UPDATE ON turns BEGIN
+      INSERT INTO turns_fts(turns_fts, rowid, content) VALUES ('delete', old.id, old.content);
+      INSERT INTO turns_fts(rowid, content) VALUES (new.id, new.content);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS turns_ad AFTER DELETE ON turns BEGIN
+      INSERT INTO turns_fts(turns_fts, rowid, content) VALUES ('delete', old.id, old.content);
     END;
 
     CREATE TABLE IF NOT EXISTS working_memory (
@@ -75,7 +86,11 @@ export function createSQLiteSchema(database: Database.Database): void {
       is_negated               INTEGER NOT NULL DEFAULT 0,
       source                   TEXT    NOT NULL,
       confidence               TEXT    NOT NULL DEFAULT 'high',
+      confidence_score         REAL    NOT NULL DEFAULT 0.5,
+      verification_status      TEXT    NOT NULL DEFAULT 'unverified',
+      verification_notes       TEXT,
       source_working_memory_id INTEGER REFERENCES working_memory(id),
+      source_turn_ids          TEXT    NOT NULL DEFAULT '[]',
       superseded_by_id         INTEGER REFERENCES knowledge_memory(id),
       retired_at               INTEGER,
       created_at               INTEGER NOT NULL,
@@ -87,6 +102,8 @@ export function createSQLiteSchema(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_km_scope ON knowledge_memory(tenant_id, system_id, workspace_id, scope_id);
     CREATE INDEX IF NOT EXISTS idx_km_superseded ON knowledge_memory(superseded_by_id);
     CREATE INDEX IF NOT EXISTS idx_km_slot ON knowledge_memory(tenant_id, system_id, workspace_id, scope_id, slot_key);
+    CREATE INDEX IF NOT EXISTS idx_km_access ON knowledge_memory(access_count);
+    CREATE INDEX IF NOT EXISTS idx_km_last_accessed ON knowledge_memory(last_accessed_at);
 
     CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_memory_fts USING fts5(
       fact, content=knowledge_memory, content_rowid=id
@@ -94,6 +111,15 @@ export function createSQLiteSchema(database: Database.Database): void {
 
     CREATE TRIGGER IF NOT EXISTS km_ai AFTER INSERT ON knowledge_memory BEGIN
       INSERT INTO knowledge_memory_fts(rowid, fact) VALUES (new.id, new.fact);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS km_au AFTER UPDATE ON knowledge_memory BEGIN
+      INSERT INTO knowledge_memory_fts(knowledge_memory_fts, rowid, fact) VALUES ('delete', old.id, old.fact);
+      INSERT INTO knowledge_memory_fts(rowid, fact) VALUES (new.id, new.fact);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS km_ad AFTER DELETE ON knowledge_memory BEGIN
+      INSERT INTO knowledge_memory_fts(knowledge_memory_fts, rowid, fact) VALUES ('delete', old.id, old.fact);
     END;
 
     CREATE TABLE IF NOT EXISTS knowledge_memory_audit (
@@ -112,6 +138,8 @@ export function createSQLiteSchema(database: Database.Database): void {
       slot_key             TEXT,
       is_negated           INTEGER NOT NULL DEFAULT 0,
       confidence           TEXT    NOT NULL DEFAULT 'medium',
+      confidence_score     REAL    NOT NULL DEFAULT 0.5,
+      verification_status  TEXT    NOT NULL DEFAULT 'unverified',
       source_text          TEXT,
       decision             TEXT    NOT NULL,
       created_knowledge_id INTEGER REFERENCES knowledge_memory(id),
@@ -192,6 +220,10 @@ export function createSQLiteSchema(database: Database.Database): void {
     'ALTER TABLE knowledge_memory ADD COLUMN normalized_fact TEXT',
     'ALTER TABLE knowledge_memory ADD COLUMN slot_key TEXT',
     'ALTER TABLE knowledge_memory ADD COLUMN is_negated INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE knowledge_memory ADD COLUMN confidence_score REAL NOT NULL DEFAULT 0.5',
+    "ALTER TABLE knowledge_memory ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'unverified'",
+    'ALTER TABLE knowledge_memory ADD COLUMN verification_notes TEXT',
+    "ALTER TABLE knowledge_memory ADD COLUMN source_turn_ids TEXT NOT NULL DEFAULT '[]'",
     'ALTER TABLE knowledge_memory ADD COLUMN retired_at INTEGER',
   ];
 
@@ -201,6 +233,12 @@ export function createSQLiteSchema(database: Database.Database): void {
     } catch {
       // Column already exists on upgraded databases.
     }
+  }
+
+  try {
+    database.exec('ALTER TABLE turns ADD COLUMN priority REAL NOT NULL DEFAULT 1.0');
+  } catch {
+    // Column already exists on upgraded databases.
   }
 
   database

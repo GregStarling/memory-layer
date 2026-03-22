@@ -11,6 +11,14 @@ describe('createMemory quick factory', () => {
     await memory.close();
   });
 
+  it('uses the local semantic tier by default for manual facts on sqlite', async () => {
+    const memory = createMemory();
+    await memory.learnFact('The project relies on PostgreSQL for analytics', 'reference');
+    const context = await memory.getContext('analytics postgres');
+    expect(context.relevantKnowledge.some((item) => item.fact.includes('PostgreSQL'))).toBe(true);
+    await memory.close();
+  });
+
   it('supports string scope shorthand and in-memory adapter', async () => {
     const memory = createMemory({
       adapter: 'memory',

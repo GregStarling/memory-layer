@@ -162,6 +162,32 @@ describe('SQLite storage adapter', () => {
     });
   });
 
+  describe('insertTurns', () => {
+    it('stores multiple turns in a single call', () => {
+      const memoryScope = scope();
+      const sessionId = createSessionId(memoryScope);
+      const turns = adapter.insertTurns([
+        {
+          ...memoryScope,
+          session_id: sessionId,
+          actor: 'user-1',
+          role: 'user',
+          content: 'alpha',
+        },
+        {
+          ...memoryScope,
+          session_id: sessionId,
+          actor: 'assistant-1',
+          role: 'assistant',
+          content: 'beta',
+        },
+      ]);
+
+      expect(turns).toHaveLength(2);
+      expect(adapter.getActiveTurns(memoryScope)).toHaveLength(2);
+    });
+  });
+
   describe('getActiveTurns', () => {
     it('returns turns in insertion order', () => {
       const memoryScope = scope();
@@ -243,6 +269,34 @@ describe('SQLite storage adapter', () => {
       });
       adapter.archiveTurn(turn.id, nowSec(), cl.id);
       expect(adapter.getActiveTurns(memoryScope)).toHaveLength(0);
+    });
+  });
+
+  describe('getActiveTurnsPaginated', () => {
+    it('supports cursor pagination', () => {
+      const memoryScope = scope();
+      const sessionId = createSessionId(memoryScope);
+      for (const content of ['a', 'b', 'c']) {
+        adapter.insertTurn({
+          ...memoryScope,
+          session_id: sessionId,
+          actor: 'user-1',
+          role: 'user',
+          content,
+        });
+      }
+
+      const firstPage = adapter.getActiveTurnsPaginated(memoryScope, { limit: 2 });
+      expect(firstPage.items).toHaveLength(2);
+      expect(firstPage.hasMore).toBe(true);
+      expect(firstPage.nextCursor).toBe(firstPage.items[1].id);
+
+      const secondPage = adapter.getActiveTurnsPaginated(memoryScope, {
+        limit: 2,
+        cursor: firstPage.nextCursor ?? undefined,
+      });
+      expect(secondPage.items).toHaveLength(1);
+      expect(secondPage.hasMore).toBe(false);
     });
   });
 
@@ -703,6 +757,56 @@ describe('SQLite storage adapter', () => {
           confidence: 'high',
         }),
       ).toThrow();
+    });
+  });
+
+  describe('insertKnowledgeMemories', () => {
+    it('stores multiple knowledge records in a single call', () => {
+      const inserted = adapter.insertKnowledgeMemories([
+        {
+          ...scope(),
+          fact: 'The user prefers dark mode',
+          fact_type: 'preference',
+          source: 'user_stated',
+          confidence: 'high',
+        },
+        {
+          ...scope(),
+          fact: 'The project uses sqlite',
+          fact_type: 'reference',
+          source: 'user_stated',
+          confidence: 'medium',
+        },
+      ]);
+
+      expect(inserted).toHaveLength(2);
+      expect(adapter.getActiveKnowledgeMemory(scope())).toHaveLength(2);
+    });
+  });
+
+  describe('getActiveKnowledgeMemoryPaginated', () => {
+    it('supports cursor pagination', () => {
+      const memoryScope = scope();
+      for (const fact of ['fact one', 'fact two', 'fact three']) {
+        adapter.insertKnowledgeMemory({
+          ...memoryScope,
+          fact,
+          fact_type: 'entity',
+          source: 'user_stated',
+          confidence: 'high',
+        });
+      }
+
+      const firstPage = adapter.getActiveKnowledgeMemoryPaginated(memoryScope, { limit: 2 });
+      expect(firstPage.items).toHaveLength(2);
+      expect(firstPage.hasMore).toBe(true);
+
+      const secondPage = adapter.getActiveKnowledgeMemoryPaginated(memoryScope, {
+        limit: 2,
+        cursor: firstPage.nextCursor ?? undefined,
+      });
+      expect(secondPage.items).toHaveLength(1);
+      expect(secondPage.hasMore).toBe(false);
     });
   });
 

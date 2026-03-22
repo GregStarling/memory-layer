@@ -160,20 +160,20 @@ interface MemoryManager {
   searchCrossScope(query, level, options?): Promise<{
     knowledge: SearchResult<KnowledgeMemory>[];
   }>
-  recall(timeRange): {
+  recall(timeRange): Promise<{
     turns: Turn[];
     workingMemory: WorkingMemory[];
     knowledge: KnowledgeMemory[];
     workItems: WorkItem[];
-  }
+  }>
 
   // Knowledge management
-  learnFact(fact, factType, confidence?): KnowledgeMemory
-  trackWorkItem(title, kind?, status?, detail?): WorkItem
+  learnFact(fact, factType, confidence?): Promise<KnowledgeMemory>
+  trackWorkItem(title, kind?, status?, detail?): Promise<WorkItem>
   forceCompact(): Promise<CompactionResult | null>
-  runMaintenance(policy?): MaintenanceReport
+  runMaintenance(policy?): Promise<MaintenanceReport>
 
-  close(): void
+  close(): Promise<void>
 }
 ```
 
@@ -291,6 +291,26 @@ import { createClaudeMemoryTools, createOpenAIMemoryTools } from 'memory-layer';
 
 const claudeTools = createClaudeMemoryTools(runtime);
 const openaiTools = createOpenAIMemoryTools(runtime);
+```
+
+### Pattern 7: Vercel AI Wrapper
+
+```typescript
+import { wrapVercelAIModel } from 'memory-layer';
+
+const runWithMemory = wrapVercelAIModel(runtime, ({ system, messages }) =>
+  generateText({ system, messages })
+);
+const result = await runWithMemory(userInput);
+```
+
+### Pattern 8: LangChain Bridge
+
+```typescript
+import { createLangChainMemoryBridge } from 'memory-layer';
+
+const memory = createLangChainMemoryBridge(manager);
+await memory.saveContext({ input: userInput }, { output: assistantOutput });
 ```
 
 ## Policy Configuration
@@ -435,6 +455,21 @@ node scripts/export-memory.mjs ./data/memory.db ./backup.json
 node scripts/import-memory.mjs ./data/restored.db ./backup.json
 ```
 
+## Service Assets
+
+- OpenAPI: `openapi.yaml`
+- Deployment guide: `docs/DEPLOYMENT.md`
+- Operations guide: `docs/OPERATIONS.md`
+- Integrations guide: `docs/INTEGRATIONS.md`
+- Security guide: `docs/SECURITY.md`
+
+## Docker
+
+```bash
+docker build -t memory-layer .
+docker run --rm -p 3100:3100 -v "$(pwd)/data:/data" memory-layer
+```
+
 ## Examples
 
 | Example | Pattern | Provider |
@@ -445,6 +480,9 @@ node scripts/import-memory.mjs ./data/restored.db ./backup.json
 | `examples/autonomous-agent.ts` | wrapModelCall | Claude |
 | `examples/tool-calling-agent.ts` | Tool schemas | OpenAI |
 | `examples/mcp-server.ts` | MCP adapter | Claude |
+| `examples/hosted-service.ts` | Standalone HTTP service | None |
+| `examples/vercel-ai.ts` | Vercel AI wrapper | Generic |
+| `examples/langchain.ts` | LangChain bridge | Generic |
 
 ## Notes
 

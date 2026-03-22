@@ -11,6 +11,7 @@ import type {
   KnowledgeMemory,
   KnowledgeRelation,
   Turn,
+  VerificationStatus,
   WorkingMemory,
 } from '../contracts/types.js';
 import {
@@ -47,6 +48,24 @@ export interface SummarizerOutput {
 
 export type Summarizer = (turns: Turn[]) => Promise<SummarizerOutput>;
 
+export type KnowledgeVerifier = (
+  fact: NormalizedExtractedFact,
+  context: {
+    workingMemory: WorkingMemory;
+    sourceTurns: Turn[];
+    relatedKnowledge: KnowledgeMemory[];
+  },
+) => Promise<
+  | boolean
+  | {
+      approved?: boolean;
+      confidence?: FactConfidence;
+      confidenceScore?: number;
+      verificationStatus?: VerificationStatus;
+      notes?: string | null;
+    }
+>;
+
 interface WorkflowTelemetry {
   logger?: Logger;
   onEvent?: EventHook;
@@ -62,7 +81,9 @@ function resolveExtractionPolicy(
 }
 
 function confidenceScore(confidence: FactConfidence): number {
-  return confidence === 'high' ? 2 : 1;
+  if (confidence === 'high') return 3;
+  if (confidence === 'medium') return 2;
+  return 1;
 }
 
 function meetsConfidenceThreshold(
@@ -76,6 +97,13 @@ function buildKnowledgeInput(
   scope: ReturnType<typeof normalizeScope>,
   workingMemoryId: number,
   fact: NormalizedExtractedFact,
+  options: {
+    confidence: FactConfidence;
+    confidenceScore: number;
+    verificationStatus: VerificationStatus;
+    verificationNotes?: string | null;
+    sourceTurnIds: number[];
+  },
 ) {
   return {
     ...scope,
@@ -88,9 +116,32 @@ function buildKnowledgeInput(
     slot_key: fact.slotKey,
     is_negated: fact.isNegated,
     source: 'promoted_from_working' as const,
-    confidence: fact.confidence,
+    confidence: options.confidence,
+    confidence_score: options.confidenceScore,
+    verification_status: options.verificationStatus,
+    verification_notes: options.verificationNotes ?? null,
     source_working_memory_id: workingMemoryId,
+    source_turn_ids: options.sourceTurnIds,
   };
+}
+
+function deriveConfidenceScore(
+  confidence: FactConfidence,
+  sourceTurnCount: number,
+  relation: KnowledgeRelation | 'created',
+): number {
+  const base = confidence === 'high' ? 0.85 : confidence === 'medium' ? 0.65 : 0.4;
+  const corroborationBoost = Math.min(0.1, Math.max(0, sourceTurnCount - 1) * 0.05);
+  const conflictPenalty = relation === 'conflict' ? 0.1 : 0;
+  return Math.max(0, Math.min(1, base + corroborationBoost - conflictPenalty));
+}
+
+function deriveVerificationStatus(
+  sourceTurnCount: number,
+  override?: VerificationStatus,
+): VerificationStatus {
+  if (override) return override;
+  return sourceTurnCount >= 2 ? 'corroborated' : 'unverified';
 }
 
 function sortTurnsAscending(turns: Turn[]): Turn[] {
@@ -290,7 +341,10 @@ export async function promoteToKnowledge(
       fact_type: input.factType,
       source: 'promoted_from_working',
       confidence: input.confidence,
+      confidence_score: deriveConfidenceScore(input.confidence, 1, 'created'),
+      verification_status: 'unverified',
       source_working_memory_id: workingMemoryId,
+      source_turn_ids: [],
     });
     await adapter.markWorkingMemoryPromoted(workingMemoryId, knowledgeMemory.id);
     emitMemoryEvent('promotion', normalizedScope, input, 0, {
@@ -311,6 +365,7 @@ export async function extractKnowledge(
     logger?: Logger;
     onEvent?: EventHook;
     policy?: ExtractionPolicy;
+    verifier?: KnowledgeVerifier;
   },
 ): Promise<KnowledgeMemory[]> {
   const startedAt = Date.now();
@@ -338,6 +393,32 @@ export async function extractKnowledge(
   ))
     .slice(0, policy.maxFactsPerExtraction)
     .map(normalizeExtractedFact);
+  const archivedSourceTurns = await adapter.getArchivedTurnRange(
+    workingMemory.session_id,
+    workingMemory.turn_id_start,
+    workingMemory.turn_id_end,
+    normalizedScope,
+  );
+  const sourceTurns =
+    archivedSourceTurns.length > 0
+      ? archivedSourceTurns
+      : (
+          await Promise.all(
+            Array.from(
+              { length: workingMemory.turn_id_end - workingMemory.turn_id_start + 1 },
+              (_, index) => adapter.getTurnById(workingMemory.turn_id_start + index),
+            ),
+          )
+        ).filter(
+          (turn): turn is Turn =>
+            turn !== null &&
+            turn.session_id === workingMemory.session_id &&
+            turn.tenant_id === normalizedScope.tenant_id &&
+            turn.system_id === normalizedScope.system_id &&
+            turn.workspace_id === normalizedScope.workspace_id &&
+            turn.scope_id === normalizedScope.scope_id,
+        );
+  const sourceTurnIds = sourceTurns.map((turn) => turn.id);
 
   const activeKnowledge = await adapter.getActiveKnowledgeMemory(normalizedScope);
   const duplicateLookup = new Map(
@@ -368,6 +449,8 @@ export async function extractKnowledge(
         slot_key: fact.slotKey,
         is_negated: fact.isNegated,
         confidence: fact.confidence,
+        confidence_score: deriveConfidenceScore(fact.confidence, sourceTurnIds.length, 'created'),
+        verification_status: deriveVerificationStatus(sourceTurnIds.length),
         source_text: fact.sourceText ?? fact.fact,
         decision: 'skipped_low_confidence',
         detail: `Below minimum confidence threshold '${policy.minConfidenceForPromotion}'`,
@@ -393,6 +476,8 @@ export async function extractKnowledge(
         slot_key: fact.slotKey,
         is_negated: fact.isNegated,
         confidence: fact.confidence,
+        confidence_score: deriveConfidenceScore(fact.confidence, sourceTurnIds.length, 'duplicate'),
+        verification_status: deriveVerificationStatus(sourceTurnIds.length),
         source_text: fact.sourceText ?? fact.fact,
         decision: 'duplicate',
         related_knowledge_id: duplicate.id,
@@ -426,6 +511,62 @@ export async function extractKnowledge(
       }
     }
 
+    const verificationResult = options?.verifier
+      ? await options.verifier(fact, {
+          workingMemory,
+          sourceTurns,
+          relatedKnowledge: activeKnowledge,
+        })
+      : undefined;
+    const verificationApproved =
+      verificationResult === undefined || typeof verificationResult === 'boolean'
+        ? verificationResult ?? true
+        : verificationResult.approved ?? true;
+    const resolvedConfidence =
+      verificationResult &&
+      typeof verificationResult !== 'boolean' &&
+      verificationResult.confidence
+        ? verificationResult.confidence
+        : fact.confidence;
+    const resolvedVerificationStatus = deriveVerificationStatus(
+      sourceTurnIds.length,
+      verificationResult && typeof verificationResult !== 'boolean'
+        ? verificationResult.verificationStatus
+        : undefined,
+    );
+    const resolvedConfidenceScore =
+      verificationResult &&
+      typeof verificationResult !== 'boolean' &&
+      verificationResult.confidenceScore != null
+        ? verificationResult.confidenceScore
+        : deriveConfidenceScore(resolvedConfidence, sourceTurnIds.length, strongestRelation.relation);
+    const verificationNotes =
+      verificationResult && typeof verificationResult !== 'boolean'
+        ? verificationResult.notes ?? null
+        : null;
+
+    if (!verificationApproved) {
+      await adapter.insertKnowledgeMemoryAudit({
+        ...normalizedScope,
+        working_memory_id: workingMemoryId,
+        fact: fact.fact,
+        fact_type: fact.factType,
+        fact_subject: fact.subject,
+        fact_attribute: fact.attribute,
+        fact_value: fact.value,
+        normalized_fact: fact.normalizedFact,
+        slot_key: fact.slotKey,
+        is_negated: fact.isNegated,
+        confidence: resolvedConfidence,
+        confidence_score: resolvedConfidenceScore,
+        verification_status: resolvedVerificationStatus,
+        source_text: fact.sourceText ?? fact.fact,
+        decision: 'skipped_low_confidence',
+        detail: verificationNotes ?? 'Verifier rejected candidate',
+      });
+      continue;
+    }
+
     if (strongestRelation.relation === 'duplicate' && strongestRelation.related) {
       if (policy.touchDuplicates) {
         await adapter.touchKnowledgeMemory(strongestRelation.related.id);
@@ -441,11 +582,13 @@ export async function extractKnowledge(
         normalized_fact: fact.normalizedFact,
         slot_key: fact.slotKey,
         is_negated: fact.isNegated,
-        confidence: fact.confidence,
+        confidence: resolvedConfidence,
+        confidence_score: resolvedConfidenceScore,
+        verification_status: resolvedVerificationStatus,
         source_text: fact.sourceText ?? fact.fact,
         decision: 'duplicate',
         related_knowledge_id: strongestRelation.related.id,
-        detail: 'Structured relation classified as duplicate',
+        detail: verificationNotes ?? 'Structured relation classified as duplicate',
       });
       continue;
     }
@@ -466,18 +609,26 @@ export async function extractKnowledge(
         normalized_fact: fact.normalizedFact,
         slot_key: fact.slotKey,
         is_negated: fact.isNegated,
-        confidence: fact.confidence,
+        confidence: resolvedConfidence,
+        confidence_score: resolvedConfidenceScore,
+        verification_status: resolvedVerificationStatus,
         source_text: fact.sourceText ?? fact.fact,
         decision: 'conflict',
         related_knowledge_id: strongestRelation.related.id,
-        detail: 'Conflict strategy skipped promotion',
+        detail: verificationNotes ?? 'Conflict strategy skipped promotion',
       });
       continue;
     }
 
     const createdFact = await adapter.transaction(async () => {
       const knowledge = await adapter.insertKnowledgeMemory(
-        buildKnowledgeInput(normalizedScope, workingMemoryId, fact),
+        buildKnowledgeInput(normalizedScope, workingMemoryId, fact, {
+          confidence: resolvedConfidence,
+          confidenceScore: resolvedConfidenceScore,
+          verificationStatus: resolvedVerificationStatus,
+          verificationNotes,
+          sourceTurnIds,
+        }),
       );
 
       if (
@@ -500,7 +651,9 @@ export async function extractKnowledge(
         normalized_fact: fact.normalizedFact,
         slot_key: fact.slotKey,
         is_negated: fact.isNegated,
-        confidence: fact.confidence,
+        confidence: resolvedConfidence,
+        confidence_score: resolvedConfidenceScore,
+        verification_status: resolvedVerificationStatus,
         source_text: fact.sourceText ?? fact.fact,
         decision:
           strongestRelation.relation === 'update'
@@ -514,12 +667,12 @@ export async function extractKnowledge(
         related_knowledge_id: strongestRelation.related?.id ?? null,
         detail:
           strongestRelation.relation === 'conflict'
-            ? `Conflict strategy '${policy.conflictStrategy}'`
+            ? verificationNotes ?? `Conflict strategy '${policy.conflictStrategy}'`
             : strongestRelation.relation === 'update'
-              ? 'Superseded prior related knowledge'
+              ? verificationNotes ?? 'Superseded prior related knowledge'
               : strongestRelation.relation === 'compatible'
-                ? 'Created alongside compatible related knowledge'
-                : 'Created new knowledge memory',
+                ? verificationNotes ?? 'Created alongside compatible related knowledge'
+                : verificationNotes ?? 'Created new knowledge memory',
       });
 
       return knowledge;

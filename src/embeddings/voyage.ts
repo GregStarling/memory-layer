@@ -1,4 +1,9 @@
 import type { EmbeddingGenerator, EmbeddingVector } from '../contracts/embedding.js';
+import {
+  batchedGenerate,
+  createCachedEmbeddingGenerator,
+  withRetry,
+} from './resilience.js';
 
 export interface VoyageEmbeddingOptions {
   /** Voyage API key. Defaults to VOYAGE_API_KEY env var. */
@@ -7,6 +12,10 @@ export interface VoyageEmbeddingOptions {
   model?: string;
   /** API base URL. Defaults to 'https://api.voyageai.com/v1'. */
   baseUrl?: string;
+  maxRetries?: number;
+  retryDelayMs?: number;
+  batchSize?: number;
+  cacheSize?: number;
 }
 
 /**
@@ -41,7 +50,7 @@ export function createVoyageEmbeddingGenerator(
     return key;
   }
 
-  return async (texts: string[]): Promise<EmbeddingVector[]> => {
+  const baseGenerator: EmbeddingGenerator = async (texts: string[]): Promise<EmbeddingVector[]> => {
     if (texts.length === 0) return [];
 
     const apiKey = getApiKey();
@@ -72,4 +81,16 @@ export function createVoyageEmbeddingGenerator(
       (item) => new Float32Array(item.embedding),
     );
   };
+
+  const cachedGenerator = createCachedEmbeddingGenerator(
+    baseGenerator,
+    options?.cacheSize ?? 256,
+  );
+
+  return async (texts: string[]): Promise<EmbeddingVector[]> =>
+    withRetry(
+      () => batchedGenerate(cachedGenerator, texts, options?.batchSize ?? 32),
+      options?.maxRetries ?? 2,
+      options?.retryDelayMs ?? 250,
+    );
 }

@@ -150,6 +150,17 @@ describe('topic drift detection', () => {
     expect(signal?.detected).toBe(true);
   });
 
+  it('supports custom monitor patterns', () => {
+    const turns = makeThread(10, 210);
+    turns.push(makeTurn('Pivot to infra planning next.', 'user'));
+    const signal = assessContext(baseInput(turns), {
+      customPatterns: {
+        subjectChange: [/\bpivot to\b/i],
+      },
+    }).topic_drift_signals.find((entry) => entry.type === 'explicit_subject_change');
+    expect(signal?.detected).toBe(true);
+  });
+
   it('detects entity discontinuity when recent turns do not overlap prior working memory', () => {
     const turns = makeThread(10, 210);
     const signal = assessContext(baseInput(turns, makeWorkingMemory(['Kubernetes', 'Docker']))).topic_drift_signals.find(

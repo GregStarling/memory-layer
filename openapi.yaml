@@ -1,0 +1,471 @@
+openapi: 3.1.0
+info:
+  title: memory-layer HTTP API
+  version: 2.0.0
+  description: HTTP surface for the memory-layer standalone AI memory service.
+servers:
+  - url: http://localhost:3100
+tags:
+  - name: ingestion
+  - name: retrieval
+  - name: maintenance
+  - name: observability
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API key
+    adminKey:
+      type: apiKey
+      in: header
+      name: x-admin-key
+  parameters:
+    Query:
+      name: query
+      in: query
+      schema:
+        type: string
+    ScopeTenant:
+      name: tenant_id
+      in: query
+      schema:
+        type: string
+    ScopeSystem:
+      name: system_id
+      in: query
+      schema:
+        type: string
+    ScopeWorkspace:
+      name: workspace_id
+      in: query
+      schema:
+        type: string
+    ScopeId:
+      name: scope_id
+      in: query
+      schema:
+        type: string
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    Scope:
+      type: object
+      required: [tenant_id, system_id, scope_id]
+      properties:
+        tenant_id:
+          type: string
+        system_id:
+          type: string
+        workspace_id:
+          type: string
+        scope_id:
+          type: string
+    TurnRequest:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [user, assistant, system]
+        content:
+          type: string
+        actor:
+          type: string
+        scope:
+          $ref: '#/components/schemas/Scope'
+    ExchangeRequest:
+      type: object
+      required: [userContent, assistantContent]
+      properties:
+        userContent:
+          type: string
+        assistantContent:
+          type: string
+        scope:
+          $ref: '#/components/schemas/Scope'
+    FactRequest:
+      type: object
+      required: [fact, factType]
+      properties:
+        fact:
+          type: string
+        factType:
+          type: string
+          enum: [preference, identity, project, constraint, procedure, entity, other]
+        confidence:
+          type: string
+          enum: [high, medium, low]
+          default: high
+        scope:
+          $ref: '#/components/schemas/Scope'
+    WorkRequest:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+        kind:
+          type: string
+          enum: [objective, unresolved_work, constraint]
+          default: objective
+        status:
+          type: string
+          enum: [open, in_progress, blocked, done]
+          default: open
+        detail:
+          type: string
+        scope:
+          $ref: '#/components/schemas/Scope'
+    CompactRequest:
+      type: object
+      properties:
+        scope:
+          $ref: '#/components/schemas/Scope'
+    ContextResponse:
+      type: object
+      properties:
+        currentObjective:
+          type: string
+          nullable: true
+        activeTurnCount:
+          type: integer
+        workingMemory:
+          type: object
+          nullable: true
+          properties:
+            summary:
+              type: string
+            key_entities:
+              type: array
+              items:
+                type: string
+            topic_tags:
+              type: array
+              items:
+                type: string
+        relevantKnowledge:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+              fact:
+                type: string
+              fact_type:
+                type: string
+              confidence:
+                type: string
+        activeObjectives:
+          type: array
+          items:
+            type: object
+            properties:
+              title:
+                type: string
+              status:
+                type: string
+        unresolvedWork:
+          type: array
+          items:
+            type: object
+        tokenEstimate:
+          type: integer
+    SearchResponse:
+      type: object
+      properties:
+        turns:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+              role:
+                type: string
+              content:
+                type: string
+              rank:
+                type: number
+        knowledge:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+              fact:
+                type: string
+              fact_type:
+                type: string
+              rank:
+                type: number
+    HealthResponse:
+      type: object
+      properties:
+        activeTurnCount:
+          type: integer
+        tokenEstimate:
+          type: integer
+        knowledgeCount:
+          type: integer
+        objectiveCount:
+          type: integer
+        unresolvedWorkCount:
+          type: integer
+    ReadyResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        scopes:
+          type: integer
+security:
+  - bearerAuth: []
+paths:
+  /v1/turns:
+    post:
+      tags: [ingestion]
+      summary: Store a single turn
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TurnRequest'
+      responses:
+        '201':
+          description: Turn stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  turnId:
+                    type: integer
+                  role:
+                    type: string
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/exchanges:
+    post:
+      tags: [ingestion]
+      summary: Store a user and assistant exchange
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExchangeRequest'
+      responses:
+        '201':
+          description: Exchange stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  userTurnId:
+                    type: integer
+                  assistantTurnId:
+                    type: integer
+                  compacted:
+                    type: boolean
+  /v1/context:
+    get:
+      tags: [retrieval]
+      summary: Assemble prompt-ready context
+      parameters:
+        - $ref: '#/components/parameters/Query'
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Assembled context
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContextResponse'
+  /v1/search:
+    get:
+      tags: [retrieval]
+      summary: Search turns and knowledge
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+        '400':
+          description: Missing search query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/facts:
+    post:
+      tags: [ingestion]
+      summary: Insert durable knowledge directly
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FactRequest'
+      responses:
+        '201':
+          description: Fact stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  knowledgeId:
+                    type: integer
+  /v1/work:
+    post:
+      tags: [ingestion]
+      summary: Track an objective or unresolved work item
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkRequest'
+      responses:
+        '201':
+          description: Work item stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workItemId:
+                    type: integer
+  /v1/compact:
+    post:
+      tags: [maintenance]
+      summary: Force compaction
+      security:
+        - bearerAuth: []
+        - adminKey: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompactRequest'
+      responses:
+        '200':
+          description: Compaction result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  compacted:
+                    type: boolean
+                  archivedTurnCount:
+                    type: integer
+  /v1/maintenance:
+    post:
+      tags: [maintenance]
+      summary: Run maintenance
+      security:
+        - bearerAuth: []
+        - adminKey: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompactRequest'
+      responses:
+        '200':
+          description: Maintenance report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  expiredWorkingMemory:
+                    type: integer
+                  retiredKnowledge:
+                    type: integer
+                  deletedWorkItems:
+                    type: integer
+  /v1/health:
+    get:
+      tags: [observability]
+      summary: Return memory health counters
+      parameters:
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Health counters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /healthz:
+    get:
+      tags: [observability]
+      summary: Liveness probe
+      responses:
+        '200':
+          description: Liveness response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+  /readyz:
+    get:
+      tags: [observability]
+      summary: Readiness probe
+      responses:
+        '200':
+          description: Readiness response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+  /v1/events:
+    get:
+      tags: [observability]
+      summary: Open an event stream for memory events
+      responses:
+        '200':
+          description: Server-sent event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string

@@ -10,6 +10,7 @@ export interface ExtractedFact {
   factType: FactType;
   confidence: FactConfidence;
   sourceText?: string | null;
+  domainGroups?: DomainGroups;
 }
 
 export interface NormalizedExtractedFact extends ExtractedFact {
@@ -27,6 +28,8 @@ export type Extractor = (
   topicTags: string[],
 ) => Promise<ExtractedFact[]>;
 
+export type DomainGroups = Record<string, string[]>;
+
 const STOP_WORDS = new Set([
   'a',
   'an',
@@ -42,7 +45,7 @@ const STOP_WORDS = new Set([
   'with',
 ]);
 
-const DOMAIN_GROUPS: Record<string, string[]> = {
+const DOMAIN_GROUPS: DomainGroups = {
   theme: ['dark', 'light'],
   editor: ['vim', 'neovim', 'emacs', 'vscode', 'cursor'],
   language: ['typescript', 'javascript', 'python', 'rust', 'go', 'java'],
@@ -80,13 +83,22 @@ export function normalizeFactValue(value: string): string {
   return normalizeFactText(value).replace(/^(?:the|a|an)\s+/g, '');
 }
 
-export function extractDomainToken(value: string): string {
+function mergeDomainGroups(customGroups?: DomainGroups): DomainGroups {
+  if (!customGroups) return DOMAIN_GROUPS;
+  const merged: DomainGroups = { ...DOMAIN_GROUPS };
+  for (const [group, values] of Object.entries(customGroups)) {
+    merged[group] = [...new Set([...(merged[group] ?? []), ...values])];
+  }
+  return merged;
+}
+
+export function extractDomainToken(value: string, domainGroups: DomainGroups = DOMAIN_GROUPS): string {
   const normalized = normalizeFactValue(value);
   const tokens = normalized
     .split(/[^a-z0-9]+/g)
     .filter((token) => token.length > 0 && !STOP_WORDS.has(token));
 
-  for (const [group, candidates] of Object.entries(DOMAIN_GROUPS)) {
+  for (const [group, candidates] of Object.entries(domainGroups)) {
     if (tokens.some((token) => candidates.includes(token))) {
       return group;
     }
@@ -107,6 +119,7 @@ function inferSubject(text: string): string | null {
 function inferStructuredFields(
   factType: FactType,
   fact: string,
+  domainGroups: DomainGroups = DOMAIN_GROUPS,
 ): Pick<NormalizedExtractedFact, 'subject' | 'attribute' | 'value' | 'slotKey' | 'isNegated'> {
   const normalized = normalizeFactText(fact);
   const subject = inferSubject(normalized);
@@ -117,7 +130,7 @@ function inferStructuredFields(
       subject: 'entity',
       attribute: 'entity_name',
       value,
-      slotKey: `entity:${extractDomainToken(value)}`,
+      slotKey: `entity:${extractDomainToken(value, domainGroups)}`,
       isNegated: false,
     };
   }
@@ -134,7 +147,7 @@ function inferStructuredFields(
         ? 'preference_avoid'
         : 'preference',
       value,
-      slotKey: `${subject ?? 'user'}:preference:${extractDomainToken(value)}`,
+      slotKey: `${subject ?? 'user'}:preference:${extractDomainToken(value, domainGroups)}`,
       isNegated: predicate.includes('avoid') || predicate.includes("doesn't"),
     };
   }
@@ -146,7 +159,7 @@ function inferStructuredFields(
       subject: subject ?? 'user',
       attribute: 'decision',
       value,
-      slotKey: `${subject ?? 'user'}:decision:${extractDomainToken(value)}`,
+      slotKey: `${subject ?? 'user'}:decision:${extractDomainToken(value, domainGroups)}`,
       isNegated: false,
     };
   }
@@ -161,7 +174,7 @@ function inferStructuredFields(
       subject: subject ?? 'system',
       attribute: 'constraint',
       value,
-      slotKey: `${subject ?? 'system'}:constraint:${extractDomainToken(value)}`,
+      slotKey: `${subject ?? 'system'}:constraint:${extractDomainToken(value, domainGroups)}`,
       isNegated:
         predicate.includes('not') || predicate.includes("can't") || predicate.includes('cannot'),
     };
@@ -176,7 +189,7 @@ function inferStructuredFields(
       subject: subject ?? 'system',
       attribute: 'reference',
       value,
-      slotKey: `${subject ?? 'system'}:reference:${extractDomainToken(value)}`,
+      slotKey: `${subject ?? 'system'}:reference:${extractDomainToken(value, domainGroups)}`,
       isNegated: false,
     };
   }
@@ -186,14 +199,18 @@ function inferStructuredFields(
     subject,
     attribute: factType,
     value: fallbackValue || null,
-    slotKey: `${subject ?? 'general'}:${factType}:${extractDomainToken(fallbackValue)}`,
+    slotKey: `${subject ?? 'general'}:${factType}:${extractDomainToken(fallbackValue, domainGroups)}`,
     isNegated: /\b(?:not|never|cannot|can't|must not|should not)\b/.test(normalized),
   };
 }
 
 export function normalizeExtractedFact(fact: ExtractedFact): NormalizedExtractedFact {
   const normalizedFact = normalizeFactText(fact.fact);
-  const structured = inferStructuredFields(fact.factType, fact.fact);
+  const structured = inferStructuredFields(
+    fact.factType,
+    fact.fact,
+    mergeDomainGroups(fact.domainGroups),
+  );
   return {
     ...fact,
     sourceText: fact.sourceText ?? fact.fact,
@@ -294,7 +311,8 @@ export function createCompositeExtractor(primary: Extractor, fallback: Extractor
   };
 }
 
-export function createRegexExtractor(): Extractor {
+export function createRegexExtractor(options?: { domainGroups?: DomainGroups }): Extractor {
+  const mergedDomainGroups = mergeDomainGroups(options?.domainGroups);
   return async (summary, keyEntities) => {
     const combined = summary.replace(/\n+/g, ' ');
     const facts: ExtractedFact[] = [
@@ -333,9 +351,13 @@ export function createRegexExtractor(): Extractor {
         factType: 'entity' as const,
         confidence: 'medium' as const,
         sourceText: entity,
+        domainGroups: mergedDomainGroups,
       })),
     ];
 
-    return uniqFacts(facts);
+    return uniqFacts(facts).map((fact) => ({
+      ...fact,
+      domainGroups: fact.domainGroups ?? mergedDomainGroups,
+    }));
   };
 }

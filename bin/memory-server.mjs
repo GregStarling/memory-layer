@@ -23,6 +23,10 @@ Options:
   --preset <preset>    Preset: ai_ide|chat_agent|autonomous_agent
   --transport <type>   Transport: mcp|http|both (default: mcp)
   --port <port>        HTTP port (default: 3100)
+  --host <host>        HTTP host (default: 127.0.0.1)
+  --api-key <key>      Bearer auth key for HTTP requests
+  --admin-key <key>    Admin key for compaction and maintenance endpoints
+  --body-limit <n>     Maximum HTTP request body bytes (default: 1048576)
   --help               Show this help message
 
 Environment variables:
@@ -32,7 +36,10 @@ Environment variables:
   MEMORY_EXTRACTOR     Extractor type
   MEMORY_PRESET        Preset name
   MEMORY_API_KEY       API key for HTTP bearer auth
+  MEMORY_ADMIN_API_KEY Admin key for privileged endpoints
   MEMORY_TRANSPORT     Transport type (mcp|http|both)
+  MEMORY_HOST          HTTP host
+  MEMORY_BODY_LIMIT    Maximum HTTP request body bytes
 
 Examples:
   npx memory-layer serve --db ./memory.db --preset ai_ide
@@ -54,6 +61,10 @@ const config = {
   summarizer: getArg('summarizer') ?? process.env.MEMORY_SUMMARIZER ?? 'extractive',
   extractor: getArg('extractor') ?? process.env.MEMORY_EXTRACTOR ?? 'regex',
   preset: getArg('preset') ?? process.env.MEMORY_PRESET ?? undefined,
+  apiKey: getArg('api-key') ?? process.env.MEMORY_API_KEY ?? undefined,
+  adminApiKey: getArg('admin-key') ?? process.env.MEMORY_ADMIN_API_KEY ?? undefined,
+  host: getArg('host') ?? process.env.MEMORY_HOST ?? '127.0.0.1',
+  bodyLimitBytes: Number(getArg('body-limit') ?? process.env.MEMORY_BODY_LIMIT ?? 1048576),
 };
 
 if (config.extractor === 'none') {
@@ -79,7 +90,7 @@ async function main() {
   if (transport === 'http' || transport === 'both') {
     const { startHttpServer } = await import('../dist/server/http-server.js');
     const { server } = await startHttpServer({ ...config, port });
-    console.error(`memory-layer HTTP server listening on port ${port}`);
+    console.error(`memory-layer HTTP server listening on ${config.host}:${port}`);
 
     process.on('SIGINT', () => {
       server.close();

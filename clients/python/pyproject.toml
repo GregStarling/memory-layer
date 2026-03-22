@@ -7,12 +7,14 @@ name = "memory-layer-client"
 version = "2.0.0"
 description = "Python REST client for the memory-layer server"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 requires-python = ">=3.9"
+dependencies = [
+    "httpx>=0.27.0,<1.0.0",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
@@ -24,6 +26,11 @@ keywords = ["ai", "memory", "agent", "retrieval"]
 
 [project.urls]
 Repository = "https://github.com/your-org/memory-layer"
+Documentation = "https://github.com/your-org/memory-layer/tree/main/clients/python"
+Issues = "https://github.com/your-org/memory-layer/issues"
 
 [tool.setuptools.packages.find]
 include = ["memory_layer_client*"]
+
+[tool.setuptools.package-data]
+memory_layer_client = ["py.typed"]

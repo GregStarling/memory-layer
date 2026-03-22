@@ -9,7 +9,8 @@ export type FactType =
   | 'constraint'
   | 'reference';
 export type FactSource = 'user_stated' | 'promoted_from_working' | 'manual';
-export type FactConfidence = 'high' | 'medium';
+export type FactConfidence = 'high' | 'medium' | 'low';
+export type VerificationStatus = 'unverified' | 'corroborated' | 'verified' | 'tool_verified';
 export type KnowledgeRelation = 'duplicate' | 'compatible' | 'update' | 'conflict';
 export type KnowledgeAuditDecision =
   | 'created'
@@ -45,7 +46,13 @@ export const FACT_SOURCES: readonly FactSource[] = [
   'promoted_from_working',
   'manual',
 ];
-export const FACT_CONFIDENCES: readonly FactConfidence[] = ['high', 'medium'];
+export const FACT_CONFIDENCES: readonly FactConfidence[] = ['high', 'medium', 'low'];
+export const VERIFICATION_STATUSES: readonly VerificationStatus[] = [
+  'unverified',
+  'corroborated',
+  'verified',
+  'tool_verified',
+];
 export const KNOWLEDGE_RELATIONS: readonly KnowledgeRelation[] = [
   'duplicate',
   'compatible',
@@ -84,6 +91,7 @@ export interface Turn extends NormalizedMemoryScope {
   actor: string;
   role: TurnRole;
   content: string;
+  priority: number;
   token_estimate: number;
   created_at: number;
   archived_at: number | null;
@@ -96,6 +104,7 @@ export interface NewTurn extends MemoryScope {
   actor: string;
   role: TurnRole;
   content: string;
+  priority?: number;
   token_estimate?: number;
   created_at?: number;
 }
@@ -140,7 +149,11 @@ export interface KnowledgeMemory extends NormalizedMemoryScope {
   is_negated: boolean;
   source: FactSource;
   confidence: FactConfidence;
+  confidence_score: number;
+  verification_status: VerificationStatus;
+  verification_notes: string | null;
   source_working_memory_id: number | null;
+  source_turn_ids: number[];
   superseded_by_id: number | null;
   retired_at: number | null;
   created_at: number;
@@ -160,7 +173,11 @@ export interface NewKnowledgeMemory extends MemoryScope {
   is_negated?: boolean;
   source: FactSource;
   confidence: FactConfidence;
+  confidence_score?: number;
+  verification_status?: VerificationStatus;
+  verification_notes?: string | null;
   source_working_memory_id?: number | null;
+  source_turn_ids?: number[];
   retired_at?: number | null;
 }
 
@@ -176,6 +193,8 @@ export interface KnowledgeMemoryAudit extends NormalizedMemoryScope {
   slot_key: string | null;
   is_negated: boolean;
   confidence: FactConfidence;
+  confidence_score: number;
+  verification_status: VerificationStatus;
   source_text: string | null;
   decision: KnowledgeAuditDecision;
   created_knowledge_id: number | null;
@@ -195,6 +214,8 @@ export interface NewKnowledgeMemoryAudit extends MemoryScope {
   slot_key?: string | null;
   is_negated?: boolean;
   confidence: FactConfidence;
+  confidence_score?: number;
+  verification_status?: VerificationStatus;
   source_text?: string | null;
   decision: KnowledgeAuditDecision;
   created_knowledge_id?: number | null;
@@ -262,6 +283,18 @@ export interface SearchOptions {
 export interface SearchResult<T> {
   item: T;
   rank: number;
+}
+
+export interface PaginationOptions {
+  limit?: number;
+  offset?: number;
+  cursor?: number;
+}
+
+export interface PaginatedResult<T> {
+  items: T[];
+  hasMore: boolean;
+  nextCursor: number | null;
 }
 
 export interface TimeRange {

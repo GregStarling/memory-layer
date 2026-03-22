@@ -60,6 +60,30 @@ export async function runMaintenance(
     }
   }
 
+  if (resolved.consolidateKnowledge) {
+    const bySlot = new Map<string, typeof activeKnowledge>();
+    for (const item of activeKnowledge) {
+      if (!item.slot_key) continue;
+      bySlot.set(item.slot_key, [...(bySlot.get(item.slot_key) ?? []), item]);
+    }
+    for (const group of bySlot.values()) {
+      if (group.length < 2) continue;
+      const [winner, ...duplicates] = [...group].sort(
+        (a, b) =>
+          b.confidence_score - a.confidence_score ||
+          b.access_count - a.access_count ||
+          b.last_accessed_at - a.last_accessed_at,
+      );
+      void winner;
+      for (const duplicate of duplicates) {
+        if (duplicate.retired_at === null) {
+          await adapter.retireKnowledgeMemory(duplicate.id, now);
+          retiredKnowledgeIds.push(duplicate.id);
+        }
+      }
+    }
+  }
+
   const completedWorkItems = (
     await adapter.getWorkItemsByTimeRange(scope, {
       end_at: now - resolved.completedWorkItemTtlSeconds,

@@ -11,7 +11,7 @@ import type {
   WorkingMemory,
 } from '../contracts/types.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
-import { estimateTokens } from './tokens.js';
+import { estimateTokens, type TokenEstimator } from './tokens.js';
 import { emitMemoryEvent } from './telemetry.js';
 
 export interface ContextAssemblyOptions {
@@ -26,6 +26,8 @@ export interface ContextAssemblyOptions {
   policy?: ContextPolicy;
   logger?: Logger;
   onEvent?: EventHook;
+  tokenEstimator?: TokenEstimator;
+  asOf?: number;
 }
 
 export interface KnowledgeSelectionReason {
@@ -162,23 +164,31 @@ function computeContextTokenEstimate(
   workingMemory: WorkingMemory | null,
   relevantKnowledge: KnowledgeMemory[],
   recentSummaries: WorkingMemory[],
+  tokenEstimator: TokenEstimator = estimateTokens,
 ): number {
   const turnTokens = activeTurns.reduce((acc, turn) => acc + turn.token_estimate, 0);
   const workingTokens = workingMemory
-    ? estimateTokens(workingMemory.summary) +
-      workingMemory.key_entities.reduce((acc, entity) => acc + estimateTokens(entity), 0) +
-      workingMemory.topic_tags.reduce((acc, tag) => acc + estimateTokens(tag), 0)
+    ? tokenEstimator(workingMemory.summary) +
+      workingMemory.key_entities.reduce((acc, entity) => acc + tokenEstimator(entity), 0) +
+      workingMemory.topic_tags.reduce((acc, tag) => acc + tokenEstimator(tag), 0)
     : 0;
   const knowledgeTokens = relevantKnowledge.reduce(
-    (acc, knowledge) => acc + estimateTokens(knowledge.fact),
+    (acc, knowledge) => acc + tokenEstimator(knowledge.fact),
     0,
   );
   const summaryTokens = recentSummaries.reduce(
-    (acc, summary) => acc + estimateTokens(summary.summary),
+    (acc, summary) => acc + tokenEstimator(summary.summary),
     0,
   );
 
   return turnTokens + workingTokens + knowledgeTokens + summaryTokens;
+}
+
+function dropLowestPriorityTurn(activeTurns: Turn[]): Turn[] {
+  if (activeTurns.length === 0) return activeTurns;
+  const removal = [...activeTurns]
+    .sort((a, b) => a.priority - b.priority || a.created_at - b.created_at)[0];
+  return activeTurns.filter((turn) => turn.id !== removal.id);
 }
 
 function normalizeLexicalRanks(results: SearchResult<KnowledgeMemory>[]): Map<number, number> {
@@ -251,19 +261,18 @@ function selectKnowledge(
         continue;
       }
 
-      let diversityPenalty = 0;
-      for (const existing of selected) {
-        if (existing.item.fact_type === candidate.item.fact_type) {
-          diversityPenalty += policy.diversityPenalty;
-        }
+      const sameTypePenalty = currentTypeCount * policy.diversityPenalty;
+      const sameSlotPenalty = selected.reduce((penalty, existing) => {
         if (
           existing.item.slot_key &&
           candidate.item.slot_key &&
           existing.item.slot_key === candidate.item.slot_key
         ) {
-          diversityPenalty += policy.diversityPenalty;
+          return penalty + policy.diversityPenalty;
         }
-      }
+        return penalty;
+      }, 0);
+      const diversityPenalty = sameTypePenalty + sameSlotPenalty;
 
       const finalScore = candidate.baseScore - diversityPenalty;
       if (finalScore > bestScore) {
@@ -305,13 +314,21 @@ export async function buildMemoryContext(
   const startedAt = Date.now();
   const normalizedScope = normalizeScope(scope);
   const policy = resolveContextPolicy(options);
+  const tokenEstimator = options?.tokenEstimator ?? estimateTokens;
+  const asOf = options?.asOf;
 
   let activeTurns = await adapter.getActiveTurns(normalizedScope);
+  if (asOf != null) {
+    activeTurns = activeTurns.filter((turn) => turn.created_at <= asOf);
+  }
   const activeObjectives = (await adapter.getActiveWorkItems(normalizedScope)).filter(
     (item) => item.kind === 'objective',
   );
-  const workingMemory = await adapter.getLatestWorkingMemory(normalizedScope);
-  const allWorkingMemory = await adapter.getActiveWorkingMemory(normalizedScope);
+  const workingMemoryCandidates = await adapter.getActiveWorkingMemory(normalizedScope);
+  const workingMemory = [...workingMemoryCandidates]
+    .filter((item) => asOf == null || item.created_at <= asOf)
+    .sort((a, b) => b.id - a.id)[0] ?? null;
+  const allWorkingMemory = workingMemoryCandidates.filter((item) => asOf == null || item.created_at <= asOf);
   const recentSummaries = allWorkingMemory
     .filter((summary) => summary.id !== workingMemory?.id)
     .slice(0, policy.maxRecentSummaries);
@@ -319,6 +336,7 @@ export async function buildMemoryContext(
   const activeKnowledge = options?.crossScopeLevel
     ? await adapter.getActiveKnowledgeCrossScope(normalizedScope, options.crossScopeLevel)
     : await adapter.getActiveKnowledgeMemory(normalizedScope);
+  const temporalKnowledge = activeKnowledge.filter((item) => asOf == null || item.created_at <= asOf);
   const lexicalRanks = options?.relevanceQuery
     ? normalizeLexicalRanks(
         options.crossScopeLevel
@@ -358,7 +376,7 @@ export async function buildMemoryContext(
       : new Map<number, number>();
 
   let { relevantKnowledge, knowledgeSelectionReasons } = selectKnowledge(
-    buildCandidates(activeKnowledge, lexicalRanks, semanticRanks, policy),
+    buildCandidates(temporalKnowledge, lexicalRanks, semanticRanks, policy),
     policy,
   );
 
@@ -368,15 +386,17 @@ export async function buildMemoryContext(
     workingMemory,
     relevantKnowledge,
     trimmedSummaries,
+    tokenEstimator,
   );
 
   while (tokenEstimate > policy.tokenBudget && activeTurns.length > 0) {
-    activeTurns = activeTurns.slice(1);
+    activeTurns = dropLowestPriorityTurn(activeTurns);
     tokenEstimate = computeContextTokenEstimate(
       activeTurns,
       workingMemory,
       relevantKnowledge,
       trimmedSummaries,
+      tokenEstimator,
     );
   }
 
@@ -387,6 +407,7 @@ export async function buildMemoryContext(
       workingMemory,
       relevantKnowledge,
       trimmedSummaries,
+      tokenEstimator,
     );
   }
 
@@ -401,6 +422,7 @@ export async function buildMemoryContext(
       workingMemory,
       relevantKnowledge,
       trimmedSummaries,
+      tokenEstimator,
     );
   }
 

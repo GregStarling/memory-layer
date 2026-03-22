@@ -1,6 +1,7 @@
-import { buildMemoryContext, createSQLiteAdapter } from '../dist/index.js';
+import { buildMemoryContext, createSQLiteAdapter, wrapSyncAdapter } from '../dist/index.js';
 
 const adapter = createSQLiteAdapter(':memory:');
+const asyncAdapter = wrapSyncAdapter(adapter);
 const scope = {
   tenant_id: 'eval',
   system_id: 'retrieval',
@@ -22,7 +23,7 @@ adapter.insertKnowledgeMemory({
   confidence: 'high',
 });
 
-const context = buildMemoryContext(adapter, scope, {
+const context = await buildMemoryContext(asyncAdapter, scope, {
   relevanceQuery: 'sqlite local-first',
 });
 

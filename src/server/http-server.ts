@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import { createMemory, type CreateMemoryOptions } from '../core/quick.js';
 import type { MemoryManager } from '../core/manager.js';
-import type { MemoryScope } from '../contracts/identity.js';
+import { normalizeScope, type MemoryScope } from '../contracts/identity.js';
 import type { FactType, FactConfidence } from '../contracts/types.js';
 export interface HttpServerConfig {
   /** Port to listen on. Defaults to 3100. */
@@ -18,8 +18,16 @@ export interface HttpServerConfig {
   preset?: CreateMemoryOptions['preset'];
   /** API key for bearer token auth. If set, all requests require Authorization header. */
   apiKey?: string;
+  /** Separate admin API key for compaction and maintenance endpoints. */
+  adminApiKey?: string;
   /** Enable CORS headers. Defaults to true. */
   cors?: boolean;
+  /** Host to bind to. Defaults to 127.0.0.1. */
+  host?: string;
+  /** Maximum accepted request body size in bytes. Defaults to 1 MiB. */
+  bodyLimitBytes?: number;
+  /** Optional redaction hook for stored turns/facts/work items. */
+  redactText?: CreateMemoryOptions['redactText'];
 }
 
 function writeJson(res: ServerResponse, status: number, data: unknown): void {
@@ -35,12 +43,29 @@ function writeError(res: ServerResponse, status: number, message: string): void 
   writeJson(res, status, { error: message });
 }
 
-async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+async function readBody(
+  req: IncomingMessage,
+  limitBytes = 1_048_576,
+): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    let totalBytes = 0;
+    let tooLarge = false;
+    req.on('data', (chunk: Buffer) => {
+      if (!tooLarge) {
+        chunks.push(chunk);
+      }
+      totalBytes += chunk.length;
+      if (totalBytes > limitBytes) {
+        tooLarge = true;
+      }
+    });
     req.on('end', () => {
       try {
+        if (tooLarge) {
+          reject(new Error('Request body too large'));
+          return;
+        }
         const text = Buffer.concat(chunks).toString('utf-8');
         resolve(text ? JSON.parse(text) : {});
       } catch {
@@ -61,6 +86,45 @@ function parseQuery(url: string): Record<string, string> {
     if (key) params[decodeURIComponent(key)] = decodeURIComponent(value ?? '');
   }
   return params;
+}
+
+function resolveRequestScope(
+  fallbackScope: string | MemoryScope | undefined,
+  req: IncomingMessage,
+  query: Record<string, string>,
+  body?: Record<string, unknown>,
+): string | MemoryScope {
+  const bodyScope =
+    body?.scope && typeof body.scope === 'object' ? (body.scope as MemoryScope) : undefined;
+  if (bodyScope) {
+    return bodyScope;
+  }
+
+  const headerScope = {
+    tenant_id: req.headers['x-memory-tenant'],
+    system_id: req.headers['x-memory-system'],
+    workspace_id: req.headers['x-memory-workspace'],
+    scope_id: req.headers['x-memory-scope'],
+  };
+  if (headerScope.tenant_id && headerScope.system_id && headerScope.scope_id) {
+    return {
+      tenant_id: String(headerScope.tenant_id),
+      system_id: String(headerScope.system_id),
+      workspace_id: headerScope.workspace_id ? String(headerScope.workspace_id) : undefined,
+      scope_id: String(headerScope.scope_id),
+    };
+  }
+
+  if (query.tenant_id && query.system_id && query.scope_id) {
+    return {
+      tenant_id: query.tenant_id,
+      system_id: query.system_id,
+      workspace_id: query.workspace_id,
+      scope_id: query.scope_id,
+    };
+  }
+
+  return fallbackScope ?? 'default';
 }
 
 /**
@@ -84,28 +148,48 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
   close: () => Promise<void>;
 }> {
   const port = config.port ?? 3100;
+  const host = config.host ?? '127.0.0.1';
   const apiKey = config.apiKey ?? process.env.MEMORY_API_KEY;
+  const adminApiKey = config.adminApiKey ?? process.env.MEMORY_ADMIN_API_KEY;
   const enableCors = config.cors ?? true;
+  const bodyLimitBytes = config.bodyLimitBytes ?? 1_048_576;
+  const managers = new Map<string, MemoryManager>();
 
   // SSE clients
   const sseClients = new Set<ServerResponse>();
 
-  const manager = createMemory({
-    adapter: 'sqlite',
-    path: config.dbPath ?? ':memory:',
-    scope: config.scope ?? 'default',
-    summarizer: config.summarizer ?? 'extractive',
-    extractor: config.extractor ?? 'regex',
-    preset: config.preset,
-    onEvent: (event) => {
-      if (sseClients.size > 0) {
-        const data = `data: ${JSON.stringify(event)}\n\n`;
-        for (const client of sseClients) {
-          client.write(data);
+  function getManager(scopeInput: string | MemoryScope): MemoryManager {
+    const key =
+      typeof scopeInput === 'string'
+        ? `scope:${scopeInput}`
+        : JSON.stringify(normalizeScope(scopeInput));
+    const existing = managers.get(key);
+    if (existing) {
+      return existing;
+    }
+
+    const manager = createMemory({
+      adapter: 'sqlite',
+      path: config.dbPath ?? ':memory:',
+      scope: scopeInput,
+      summarizer: config.summarizer ?? 'extractive',
+      extractor: config.extractor ?? 'regex',
+      preset: config.preset,
+      redactText: config.redactText,
+      onEvent: (event) => {
+        if (sseClients.size > 0) {
+          const data = `data: ${JSON.stringify(event)}\n\n`;
+          for (const client of sseClients) {
+            client.write(data);
+          }
         }
-      }
-    },
-  });
+      },
+    });
+    managers.set(key, manager);
+    return manager;
+  }
+
+  const manager = getManager(config.scope ?? 'default');
 
   const server = createServer(async (req, res) => {
     // CORS
@@ -137,8 +221,9 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
     try {
       // POST /v1/turns
       if (path === '/v1/turns' && req.method === 'POST') {
-        const body = await readBody(req);
-        const turn = await manager.processTurn(
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const turn = await requestManager.processTurn(
           body.role as 'user' | 'assistant' | 'system',
           String(body.content),
           body.actor ? String(body.actor) : undefined,
@@ -149,8 +234,9 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // POST /v1/exchanges
       if (path === '/v1/exchanges' && req.method === 'POST') {
-        const body = await readBody(req);
-        const exchange = await manager.processExchange(
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const exchange = await requestManager.processExchange(
           String(body.userContent),
           String(body.assistantContent),
         );
@@ -164,7 +250,8 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/context
       if (path === '/v1/context' && req.method === 'GET') {
-        const context = await manager.getContext(query.query || undefined);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const context = await requestManager.getContext(query.query || undefined);
         writeJson(res, 200, {
           currentObjective: context.currentObjective,
           activeTurnCount: context.activeTurns.length,
@@ -197,7 +284,8 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           writeError(res, 400, 'Missing required query parameter: q');
           return;
         }
-        const results = await manager.search(
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const results = await requestManager.search(
           query.q,
           query.limit ? { limit: Number(query.limit) } : undefined,
         );
@@ -220,8 +308,9 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // POST /v1/facts
       if (path === '/v1/facts' && req.method === 'POST') {
-        const body = await readBody(req);
-        const fact = await manager.learnFact(
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const fact = await requestManager.learnFact(
           String(body.fact),
           body.factType as FactType,
           (body.confidence as FactConfidence) ?? 'high',
@@ -232,8 +321,9 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // POST /v1/work
       if (path === '/v1/work' && req.method === 'POST') {
-        const body = await readBody(req);
-        const item = await manager.trackWorkItem(
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const item = await requestManager.trackWorkItem(
           String(body.title),
           (body.kind as 'objective' | 'unresolved_work' | 'constraint') ?? 'objective',
           (body.status as 'open' | 'in_progress' | 'blocked' | 'done') ?? 'open',
@@ -245,7 +335,13 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // POST /v1/compact
       if (path === '/v1/compact' && req.method === 'POST') {
-        const result = await manager.forceCompact();
+        if (adminApiKey && req.headers['x-admin-key'] !== adminApiKey) {
+          writeError(res, 403, 'Admin key required');
+          return;
+        }
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const result = await requestManager.forceCompact();
         writeJson(res, 200, {
           compacted: result !== null,
           archivedTurnCount: result?.archivedTurnIds.length ?? 0,
@@ -255,7 +351,8 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/health
       if (path === '/v1/health' && req.method === 'GET') {
-        const context = await manager.getContext();
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const context = await requestManager.getContext();
         writeJson(res, 200, {
           activeTurnCount: context.activeTurns.length,
           tokenEstimate: context.tokenEstimate,
@@ -266,9 +363,20 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         return;
       }
 
+      if ((path === '/healthz' || path === '/readyz') && req.method === 'GET') {
+        writeJson(res, 200, { ok: true, scopes: managers.size });
+        return;
+      }
+
       // POST /v1/maintenance
       if (path === '/v1/maintenance' && req.method === 'POST') {
-        const report = await manager.runMaintenance();
+        if (adminApiKey && req.headers['x-admin-key'] !== adminApiKey) {
+          writeError(res, 403, 'Admin key required');
+          return;
+        }
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const report = await requestManager.runMaintenance();
         writeJson(res, 200, {
           expiredWorkingMemory: report.expiredWorkingMemoryIds.length,
           retiredKnowledge: report.retiredKnowledgeIds.length,
@@ -303,7 +411,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
   });
 
   return new Promise((resolve) => {
-    server.listen(port, () => {
+    server.listen(port, host, () => {
       resolve({
         server,
         manager,
@@ -313,7 +421,10 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           }
           sseClients.clear();
           server.close();
-          await manager.close();
+          for (const cachedManager of managers.values()) {
+            await cachedManager.close();
+          }
+          managers.clear();
         },
       });
     });

@@ -25,7 +25,11 @@ function makeContext(): MemoryContext {
       is_negated: false,
       source: 'manual' as const,
       confidence: 'high' as const,
+      confidence_score: 0.92,
+      verification_status: 'verified' as const,
+      verification_notes: 'Confirmed by repeated usage',
       source_working_memory_id: null,
+      source_turn_ids: [1, 2],
       superseded_by_id: null,
       created_at: 1,
       last_accessed_at: 1,
@@ -74,5 +78,11 @@ describe('formatter helpers', () => {
     const messages = formatContextAsMessages(makeContext(), { includeCitations: true });
     expect(messages).toHaveLength(1);
     expect(messages[0].content).toContain('[memory:1]');
+  });
+
+  it('can include trust metadata in formatted knowledge', () => {
+    const text = formatContextForPrompt(makeContext(), { includeTrustMetadata: true });
+    expect(text).toContain('confidence=high');
+    expect(text).toContain('status=verified');
   });
 });

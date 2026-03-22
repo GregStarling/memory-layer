@@ -36,6 +36,8 @@ import { assessContext } from './monitor.js';
 import { runMaintenance, type MaintenanceReport } from './maintenance.js';
 import { emitMemoryEvent } from './telemetry.js';
 import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
+import { estimateTokens, type TokenEstimator } from './tokens.js';
+import { createCircuitBreaker, type CircuitBreakerOptions } from './circuit-breaker.js';
 
 export interface MemoryManagerConfig {
   /** Synchronous storage adapter (SQLite, in-memory). Mutually exclusive with asyncAdapter. */
@@ -56,11 +58,17 @@ export interface MemoryManagerConfig {
   contextPolicy?: ContextPolicy;
   maintenancePolicy?: MaintenancePolicy;
   crossScopeLevel?: ScopeLevel;
+  tokenEstimator?: TokenEstimator;
   autoCompact?: boolean;
   autoExtract?: boolean;
   failurePolicy?: {
     summarizer?: 'throw' | 'retry_once' | 'log_and_continue';
     extractor?: 'throw' | 'retry_once' | 'log_and_continue' | 'disable_auto_extract';
+  };
+  circuitBreaker?: {
+    summarizer?: CircuitBreakerOptions;
+    extractor?: CircuitBreakerOptions;
+    embeddings?: CircuitBreakerOptions;
   };
   redactText?: (input: { kind: 'turn' | 'fact' | 'work_item'; text: string }) => string;
 }
@@ -73,6 +81,7 @@ export interface MemoryManager {
     actors?: { user?: string; assistant?: string },
   ): Promise<{ userTurn: Turn; assistantTurn: Turn; compactionResult: CompactionResult | null }>;
   getContext(relevanceQuery?: string): Promise<MemoryContext>;
+  getContextAt(asOf: number, relevanceQuery?: string): Promise<MemoryContext>;
   getSessionBootstrap(relevanceQuery?: string): Promise<SessionBootstrap>;
   recall(timeRange: TimeRange): Promise<{
     turns: Turn[];
@@ -116,6 +125,12 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
   const autoCompact = config.autoCompact ?? true;
   let autoExtractEnabled = config.autoExtract ?? Boolean(config.extractor);
   let deferredSoftCompaction = false;
+  const tokenEstimator = config.tokenEstimator ?? estimateTokens;
+  const circuitBreakers = {
+    summarizer: createCircuitBreaker(config.circuitBreaker?.summarizer),
+    extractor: createCircuitBreaker(config.circuitBreaker?.extractor),
+    embeddings: createCircuitBreaker(config.circuitBreaker?.embeddings),
+  };
 
   const onEvent: EventHook = (event) => {
     config.onEvent?.(event);
@@ -138,7 +153,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       (kind === 'extractor' ? 'disable_auto_extract' : 'throw');
 
     try {
-      return await run();
+      return await circuitBreakers[kind].execute(run);
     } catch (error) {
       if (strategy === 'retry_once') {
         try {
@@ -188,21 +203,39 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     if (!config.embeddingGenerator || input.trim().length === 0) {
       return undefined;
     }
-    const vectors = await config.embeddingGenerator([input]);
-    return vectors[0];
+    try {
+      const vectors = await circuitBreakers.embeddings.execute(() =>
+        config.embeddingGenerator!([input]),
+      );
+      return vectors[0];
+    } catch (error) {
+      config.logger?.warn('memory.embeddings.query_vector_failed', {
+        error: String(error),
+      });
+      return undefined;
+    }
   }
 
   async function maybeEmbedKnowledge(knowledge: KnowledgeMemory[]): Promise<void> {
     if (!config.embeddingAdapter || !config.embeddingGenerator || knowledge.length === 0) {
       return;
     }
-    const vectors = await config.embeddingGenerator(knowledge.map((item) => item.fact));
-    knowledge.forEach((item, index) => {
-      const vector = vectors[index];
-      if (vector) {
-        config.embeddingAdapter!.storeEmbedding(item.id, vector);
-      }
-    });
+    try {
+      const vectors = await circuitBreakers.embeddings.execute(() =>
+        config.embeddingGenerator!(knowledge.map((item) => item.fact)),
+      );
+      knowledge.forEach((item, index) => {
+        const vector = vectors[index];
+        if (vector) {
+          config.embeddingAdapter!.storeEmbedding(item.id, vector);
+        }
+      });
+    } catch (error) {
+      config.logger?.warn('memory.embeddings.index_failed', {
+        error: String(error),
+        knowledgeCount: knowledge.length,
+      });
+    }
   }
 
   async function getHybridKnowledgeResults(
@@ -227,12 +260,17 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       level === 'scope'
         ? config.embeddingAdapter.findSimilar(config.scope, queryVector, {
             limit: options?.limit ?? 10,
-            minSimilarity: 0,
+            minSimilarity: 0.1,
           })
         : config.embeddingAdapter.findSimilarCrossScope(config.scope, level, queryVector, {
             limit: options?.limit ?? 10,
-            minSimilarity: 0,
+            minSimilarity: 0.1,
           });
+
+    const lexicalRanks = new Map<number, number>();
+    const semanticRanks = new Map<number, number>();
+    lexical.forEach((result) => lexicalRanks.set(result.item.id, result.rank));
+    semantic.forEach((result) => semanticRanks.set(result.knowledgeMemoryId, result.similarity));
 
     const merged = new Map<number, SearchResult<KnowledgeMemory>>();
     for (const result of lexical) {
@@ -242,10 +280,17 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       const knowledge = await asyncAdapter.getKnowledgeMemoryById(result.knowledgeMemoryId);
       if (!knowledge) continue;
       const existing = merged.get(knowledge.id);
-      const rank = existing ? Math.max(existing.rank, result.similarity) : result.similarity;
+      const recencyScore =
+        knowledge.last_accessed_at > 0
+          ? 1 / (1 + Math.max(0, Math.floor(Date.now() / 1000) - knowledge.last_accessed_at) / 86400)
+          : 0;
+      const rank =
+        (lexicalRanks.get(knowledge.id) ?? 0) * 1.15 +
+        (semanticRanks.get(knowledge.id) ?? 0) * 1.2 +
+        recencyScore * 0.2;
       merged.set(knowledge.id, {
         item: knowledge,
-        rank,
+        rank: existing ? Math.max(existing.rank, rank) : rank,
       });
     }
 
@@ -262,7 +307,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     return results;
   }
 
-  async function getContextInternal(relevanceQuery?: string): Promise<MemoryContext> {
+  async function getContextInternal(relevanceQuery?: string, asOf?: number): Promise<MemoryContext> {
     const activeTurns = await asyncAdapter.getActiveTurns(config.scope);
     const queryVector = await buildQueryVector(
       relevanceQuery ??
@@ -278,6 +323,8 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       embeddingAdapter: config.embeddingAdapter,
       crossScopeLevel: config.crossScopeLevel,
       policy: config.contextPolicy,
+      tokenEstimator,
+      asOf,
       logger: config.logger,
       onEvent,
     });
@@ -394,12 +441,14 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
   }
 
   async function insertManagedTurn(role: TurnRole, content: string, actor: string): Promise<Turn> {
+    const redactedContent = config.redactText ? config.redactText({ kind: 'turn', text: content }) : content;
     const turn = await asyncAdapter.insertTurn({
       ...config.scope,
       session_id: config.sessionId,
       actor,
       role,
-      content: config.redactText ? config.redactText({ kind: 'turn', text: content }) : content,
+      content: redactedContent,
+      token_estimate: tokenEstimator(redactedContent),
     });
 
     emitMemoryEvent('manager', config.scope, { logger: config.logger, onEvent }, 0, {
@@ -442,6 +491,10 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
     async getContext(relevanceQuery) {
       return getContextInternal(relevanceQuery);
+    },
+
+    async getContextAt(asOf, relevanceQuery) {
+      return getContextInternal(relevanceQuery, asOf);
     },
 
     async getSessionBootstrap(relevanceQuery) {
@@ -519,6 +572,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         source: 'manual',
         confidence,
       });
+      await maybeEmbedKnowledge([knowledge]);
       emitMemoryEvent('manager', config.scope, { logger: config.logger, onEvent }, 0, {
         action: 'learn_fact',
         knowledgeMemoryId: knowledge.id,

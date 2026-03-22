@@ -1,11 +1,17 @@
-export { estimateTokens, createSessionId } from './core/tokens.js';
-export { estimateTokens as estimateTokensLocal } from './core/tokens.js';
+export {
+  estimateTokens,
+  estimateTokens as estimateTokensLocal,
+  createModelTokenEstimator,
+  createTiktokenEstimator,
+  createSessionId,
+} from './core/tokens.js';
 export { assessContext } from './core/monitor.js';
 export { buildMemoryContext } from './core/context.js';
 export { createMemoryEventEmitter } from './core/events.js';
 export { runMaintenance } from './core/maintenance.js';
 export { createMemory } from './core/quick.js';
 export { createMemoryRuntime } from './core/runtime.js';
+export { createCircuitBreaker } from './core/circuit-breaker.js';
 export {
   formatBootstrapForPrompt,
   formatContextAsMessages,
@@ -28,14 +34,23 @@ export { MEMORY_MANAGER_PRESETS, resolveMemoryManagerPreset } from './core/prese
 export { createSQLiteAdapter, createSQLiteAdapterWithEmbeddings } from './adapters/sqlite/index.js';
 export { createInMemoryAdapter } from './adapters/memory/index.js';
 export { createClaudeMemoryTools } from './integrations/claude-tools.js';
+export { createLangChainMemoryBridge } from './integrations/langchain.js';
 export { createMemoryMcpAdapter } from './integrations/mcp.js';
 export { wrapWithMemory } from './integrations/middleware.js';
 export { createOpenAIMemoryTools } from './integrations/openai-tools.js';
+export { prepareVercelAIInput, wrapVercelAIModel } from './integrations/vercel-ai.js';
+export { startHttpServer, createMcpServerHandler, startMcpServer } from './server/index.js';
 export { createClaudeSummarizer } from './summarizers/claude.js';
 export { createExtractiveSummarizer } from './summarizers/extractive.js';
 export { createOpenAISummarizer } from './summarizers/openai.js';
 export { createClaudeExtractor, createOpenAIExtractor } from './summarizers/extractor.js';
 export { createClientExtractor, createClientSummarizer } from './summarizers/client.js';
+export { createLocalEmbeddingGenerator } from './embeddings/local.js';
+export {
+  withRetry,
+  batchedGenerate,
+  createCachedEmbeddingGenerator,
+} from './embeddings/resilience.js';
 export {
   SUMMARIZATION_SYSTEM_PROMPT,
   SUMMARIZATION_PROMPT_VERSION,
@@ -57,6 +72,7 @@ export type { Logger, MemoryEvent, MemoryEventType, EventHook } from './contract
 export { noopLogger } from './contracts/observability.js';
 export type {
   MonitorPolicy,
+  MonitorPatterns,
   ExtractionPolicy,
   ContextPolicy,
   ContextMode,
@@ -80,6 +96,7 @@ export type {
   FactType,
   FactSource,
   FactConfidence,
+  VerificationStatus,
   CompactionState,
   Turn,
   NewTurn,
@@ -93,6 +110,8 @@ export type {
   NewCompactionLog,
   SearchOptions,
   SearchResult,
+  PaginationOptions,
+  PaginatedResult,
   TimeRange,
   WorkItem,
   NewWorkItem,
@@ -113,6 +132,7 @@ export type {
 export type { MemoryContext, ContextAssemblyOptions, KnowledgeSelectionReason } from './core/context.js';
 export type { FormatOptions, SessionBootstrap } from './core/formatter.js';
 export type { MemoryEventEmitter } from './core/events.js';
+export type { CircuitBreaker, CircuitBreakerOptions, CircuitState } from './core/circuit-breaker.js';
 export type { MaintenanceReport } from './core/maintenance.js';
 export type {
   MemoryRuntime,
@@ -124,15 +144,18 @@ export type {
 } from './core/runtime.js';
 export type {
   CompactionResult,
+  KnowledgeVerifier,
   Summarizer,
   SummarizerOutput,
 } from './core/orchestrator.js';
-export type { ExtractedFact, Extractor } from './core/extractor.js';
+export type { ExtractedFact, Extractor, DomainGroups } from './core/extractor.js';
+export type { TokenEstimator } from './core/tokens.js';
 export type {
   MemoryManager,
   MemoryManagerConfig,
 } from './core/manager.js';
 export type { CreateMemoryOptions } from './core/quick.js';
+export type { MemoryQualityTier } from './core/quick.js';
 export type {
   ClaudeMemoryManagerOptions,
   OpenAIMemoryManagerOptions,
@@ -143,6 +166,7 @@ export type {
 } from './summarizers/client.js';
 export type { MemoryManagerPreset, MemoryManagerPresetConfig } from './core/presets.js';
 export type { ClaudeToolDefinition } from './integrations/claude-tools.js';
+export type { LangChainChatMessage, LangChainMemoryVariables } from './integrations/langchain.js';
 export type {
   MessageHandler,
   MessageLike,
@@ -150,6 +174,7 @@ export type {
 } from './integrations/middleware.js';
 export type { McpToolDefinition } from './integrations/mcp.js';
 export type { OpenAIFunctionTool } from './integrations/openai-tools.js';
+export type { VercelAIPreparedInput, VercelAIWrapOptions } from './integrations/vercel-ai.js';
 export type { StreamCollector } from './core/streaming.js';
 export type { McpServerConfig } from './server/mcp-server.js';
 export type { HttpServerConfig } from './server/http-server.js';

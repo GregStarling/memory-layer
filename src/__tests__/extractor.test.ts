@@ -57,6 +57,18 @@ describe('extractors', () => {
     expect(facts.some((fact) => fact.fact === 'SQLite')).toBe(true);
   });
 
+  it('supports custom domain groups for contradiction bucketing', () => {
+    const normalized = normalizeExtractedFact({
+      fact: 'The user prefers tmuxinator',
+      factType: 'preference',
+      confidence: 'high',
+      domainGroups: {
+        tooling: ['tmuxinator', 'overmind'],
+      },
+    });
+    expect(normalized.slotKey).toContain('tooling');
+  });
+
   it('extracts expanded reference and entity patterns', async () => {
     const extractor = createRegexExtractor();
     const facts = await extractor(

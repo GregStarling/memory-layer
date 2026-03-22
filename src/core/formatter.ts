@@ -12,6 +12,7 @@ export interface SessionBootstrap {
 
 export interface FormatOptions {
   includeCitations?: boolean;
+  includeTrustMetadata?: boolean;
   headingLevel?: 'markdown' | 'plain';
 }
 
@@ -20,10 +21,18 @@ function formatHeading(label: string, options?: FormatOptions): string {
 }
 
 function formatKnowledgeLine(knowledge: KnowledgeMemory, options?: FormatOptions): string {
-  if (!options?.includeCitations) {
-    return `- ${knowledge.fact}`;
+  const suffix: string[] = [];
+  if (options?.includeTrustMetadata) {
+    suffix.push(
+      `confidence=${knowledge.confidence}`,
+      `score=${knowledge.confidence_score.toFixed(2)}`,
+      `status=${knowledge.verification_status}`,
+    );
   }
-  return `- ${knowledge.fact} [memory:${knowledge.id}]`;
+  if (options?.includeCitations) {
+    suffix.push(`memory:${knowledge.id}`);
+  }
+  return suffix.length > 0 ? `- ${knowledge.fact} [${suffix.join(', ')}]` : `- ${knowledge.fact}`;
 }
 
 export function formatContextForPrompt(

@@ -14,6 +14,8 @@ import type {
   NewWorkItem,
   NewTurn,
   NewWorkingMemory,
+  PaginationOptions,
+  PaginatedResult,
   SearchOptions,
   SearchResult,
   TimeRange,
@@ -75,6 +77,14 @@ function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+function resolvePaginationOptions(options?: PaginationOptions): Required<PaginationOptions> {
+  return {
+    limit: options?.limit ?? 25,
+    offset: options?.offset ?? 0,
+    cursor: options?.cursor ?? 0,
+  };
+}
+
 function mapTurn(row: Record<string, unknown>): Turn {
   return {
     id: Number(row.id),
@@ -86,6 +96,7 @@ function mapTurn(row: Record<string, unknown>): Turn {
     actor: String(row.actor),
     role: row.role as Turn['role'],
     content: String(row.content),
+    priority: Number(row.priority ?? 1),
     token_estimate: Number(row.token_estimate),
     archived_at: row.archived_at != null ? Number(row.archived_at) : null,
     compaction_log_id: row.compaction_log_id != null ? Number(row.compaction_log_id) : null,
@@ -133,7 +144,13 @@ function mapKnowledgeMemory(row: Record<string, unknown>): KnowledgeMemory {
     is_negated: Boolean(row.is_negated),
     source: row.source as KnowledgeMemory['source'],
     confidence: row.confidence as KnowledgeMemory['confidence'],
+    confidence_score: Number(row.confidence_score ?? 0.5),
+    verification_status: (row.verification_status as KnowledgeMemory['verification_status']) ?? 'unverified',
+    verification_notes: row.verification_notes != null ? String(row.verification_notes) : null,
     source_working_memory_id: row.source_working_memory_id != null ? Number(row.source_working_memory_id) : null,
+    source_turn_ids: Array.isArray(row.source_turn_ids)
+      ? row.source_turn_ids.map((value) => Number(value))
+      : [],
     superseded_by_id: row.superseded_by_id != null ? Number(row.superseded_by_id) : null,
     retired_at: row.retired_at != null ? Number(row.retired_at) : null,
     access_count: Number(row.access_count ?? 0),
@@ -216,6 +233,9 @@ function mapKnowledgeMemoryAudit(row: Record<string, unknown>): KnowledgeMemoryA
     slot_key: row.slot_key != null ? String(row.slot_key) : null,
     is_negated: Boolean(row.is_negated),
     confidence: row.confidence as KnowledgeMemoryAudit['confidence'],
+    confidence_score: Number(row.confidence_score ?? 0.5),
+    verification_status:
+      (row.verification_status as KnowledgeMemoryAudit['verification_status']) ?? 'unverified',
     source_text: String(row.source_text),
     decision: row.decision as KnowledgeMemoryAudit['decision'],
     detail: row.detail != null ? String(row.detail) : null,
@@ -247,14 +267,24 @@ export function createPostgresAdapter(
   return {
     async insertTurn(input: NewTurn): Promise<Turn> {
       const n = normalizeScope(input);
-      const tokenEst = estimateTokens(input.content);
+      const tokenEst = input.token_estimate ?? estimateTokens(input.content);
       const { rows } = await pool.query(
-        `INSERT INTO turns (tenant_id, system_id, workspace_id, scope_id, session_id, actor, role, content, token_estimate, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        `INSERT INTO turns (tenant_id, system_id, workspace_id, scope_id, session_id, actor, role, content, priority, token_estimate, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          RETURNING *`,
-        [n.tenant_id, n.system_id, n.workspace_id, n.scope_id, input.session_id, input.actor, input.role, input.content, tokenEst, now()],
+        [n.tenant_id, n.system_id, n.workspace_id, n.scope_id, input.session_id, input.actor, input.role, input.content, input.priority ?? (input.role === 'system' ? 1.5 : 1), tokenEst, now()],
       );
       return mapTurn(rows[0]);
+    },
+
+    async insertTurns(inputs) {
+      return this.transaction(async () => {
+        const inserted: Turn[] = [];
+        for (const input of inputs) {
+          inserted.push(await this.insertTurn(input));
+        }
+        return inserted;
+      });
     },
 
     async getTurnById(id) {
@@ -269,6 +299,30 @@ export function createPostgresAdapter(
         params,
       );
       return rows.map(mapTurn);
+    },
+
+    async getActiveTurnsPaginated(scope, options): Promise<PaginatedResult<Turn>> {
+      const resolved = resolvePaginationOptions(options);
+      const params = [...scopeParams(scope)];
+      let query = `SELECT * FROM turns WHERE ${scopeWhere()} AND status = 'active'`;
+      if (resolved.cursor > 0) {
+        params.push(resolved.cursor);
+        query += ` AND id > $${params.length}`;
+      }
+      query += ' ORDER BY id ASC';
+      params.push(resolved.limit + 1);
+      query += ` LIMIT $${params.length}`;
+      if (resolved.cursor === 0) {
+        params.push(resolved.offset);
+        query += ` OFFSET $${params.length}`;
+      }
+      const { rows } = await pool.query(query, params);
+      const items = rows.slice(0, resolved.limit).map(mapTurn);
+      return {
+        items,
+        hasMore: rows.length > resolved.limit,
+        nextCursor: rows.length > resolved.limit ? items[items.length - 1]?.id ?? null : null,
+      };
     },
 
     async getTurnsByTimeRange(scope, range) {
@@ -404,15 +458,27 @@ export function createPostgresAdapter(
     async insertKnowledgeMemory(input) {
       const n = normalizeScope(input);
       const { rows } = await pool.query(
-        `INSERT INTO knowledge_memory (tenant_id, system_id, workspace_id, scope_id, fact, fact_type, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated, source, confidence, source_working_memory_id, created_at, last_accessed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $16)
+        `INSERT INTO knowledge_memory (tenant_id, system_id, workspace_id, scope_id, fact, fact_type, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated, source, confidence, confidence_score, verification_status, verification_notes, source_working_memory_id, source_turn_ids, created_at, last_accessed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $20)
          RETURNING *`,
         [n.tenant_id, n.system_id, n.workspace_id, n.scope_id, input.fact, input.fact_type,
          input.fact_subject ?? null, input.fact_attribute ?? null, input.fact_value ?? null,
          input.normalized_fact ?? null, input.slot_key ?? null, input.is_negated ?? false,
-         input.source, input.confidence ?? 'medium', input.source_working_memory_id ?? null, now()],
+         input.source, input.confidence ?? 'medium', input.confidence_score ?? 0.5,
+         input.verification_status ?? 'unverified', input.verification_notes ?? null,
+         input.source_working_memory_id ?? null, input.source_turn_ids ?? [], now()],
       );
       return mapKnowledgeMemory(rows[0]);
+    },
+
+    async insertKnowledgeMemories(inputs) {
+      return this.transaction(async () => {
+        const inserted: KnowledgeMemory[] = [];
+        for (const input of inputs) {
+          inserted.push(await this.insertKnowledgeMemory(input));
+        }
+        return inserted;
+      });
     },
 
     async getKnowledgeMemoryById(id) {
@@ -426,6 +492,34 @@ export function createPostgresAdapter(
         scopeParams(scope),
       );
       return rows.map(mapKnowledgeMemory);
+    },
+
+    async getActiveKnowledgeMemoryPaginated(
+      scope,
+      options,
+    ): Promise<PaginatedResult<KnowledgeMemory>> {
+      const resolved = resolvePaginationOptions(options);
+      const params = [...scopeParams(scope)];
+      let query =
+        `SELECT * FROM knowledge_memory WHERE ${scopeWhere()} AND superseded_by_id IS NULL AND retired_at IS NULL`;
+      if (resolved.cursor > 0) {
+        params.push(resolved.cursor);
+        query += ` AND id > $${params.length}`;
+      }
+      query += ' ORDER BY id ASC';
+      params.push(resolved.limit + 1);
+      query += ` LIMIT $${params.length}`;
+      if (resolved.cursor === 0) {
+        params.push(resolved.offset);
+        query += ` OFFSET $${params.length}`;
+      }
+      const { rows } = await pool.query(query, params);
+      const items = rows.slice(0, resolved.limit).map(mapKnowledgeMemory);
+      return {
+        items,
+        hasMore: rows.length > resolved.limit,
+        nextCursor: rows.length > resolved.limit ? items[items.length - 1]?.id ?? null : null,
+      };
     },
 
     async getActiveKnowledgeCrossScope(scope, level) {
@@ -497,13 +591,14 @@ export function createPostgresAdapter(
     async insertKnowledgeMemoryAudit(input) {
       const n = normalizeScope(input);
       const { rows } = await pool.query(
-        `INSERT INTO knowledge_memory_audit (tenant_id, system_id, workspace_id, scope_id, working_memory_id, fact, fact_type, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated, confidence, source_text, decision, detail, related_knowledge_id, created_knowledge_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+        `INSERT INTO knowledge_memory_audit (tenant_id, system_id, workspace_id, scope_id, working_memory_id, fact, fact_type, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated, confidence, confidence_score, verification_status, source_text, decision, detail, related_knowledge_id, created_knowledge_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
          RETURNING *`,
         [n.tenant_id, n.system_id, n.workspace_id, n.scope_id, input.working_memory_id,
          input.fact, input.fact_type, input.fact_subject ?? null, input.fact_attribute ?? null,
          input.fact_value ?? null, input.normalized_fact ?? null, input.slot_key ?? null,
-         input.is_negated ?? false, input.confidence, input.source_text, input.decision,
+         input.is_negated ?? false, input.confidence, input.confidence_score ?? 0.5,
+         input.verification_status ?? 'unverified', input.source_text, input.decision,
          input.detail ?? null, input.related_knowledge_id ?? null, input.created_knowledge_id ?? null, now()],
       );
       return mapKnowledgeMemoryAudit(rows[0]);

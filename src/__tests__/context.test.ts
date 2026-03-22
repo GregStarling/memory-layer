@@ -103,13 +103,65 @@ describe('buildMemoryContext', () => {
     expect(after).toBeGreaterThan(before);
   });
 
-  it('trims oldest turns first to meet the token budget', async () => {
+  it('trims lower-priority turns first to meet the token budget', async () => {
     const scope = makeScope();
-    seedTurns(adapter, scope, 5, { tokenEstimate: 500 });
+    const { sessionId } = seedTurns(adapter, scope, 0);
+    adapter.insertTurn({
+      ...scope,
+      session_id: sessionId,
+      actor: 'user-1',
+      role: 'user',
+      content: 'high priority',
+      priority: 1.5,
+      token_estimate: 500,
+    });
+    adapter.insertTurn({
+      ...scope,
+      session_id: sessionId,
+      actor: 'assistant-1',
+      role: 'assistant',
+      content: 'low priority',
+      priority: 0.25,
+      token_estimate: 500,
+    });
+    adapter.insertTurn({
+      ...scope,
+      session_id: sessionId,
+      actor: 'user-1',
+      role: 'user',
+      content: 'keep me',
+      priority: 1.2,
+      token_estimate: 500,
+    });
 
     const context = await buildMemoryContext(asyncAdapter, scope, { tokenBudget: 1200 });
-    expect(context.activeTurns.length).toBeLessThan(5);
+    expect(context.activeTurns.map((turn) => turn.content)).not.toContain('low priority');
     expect(context.tokenEstimate).toBeLessThanOrEqual(1200);
+  });
+
+  it('supports temporal context snapshots with asOf', async () => {
+    const scope = makeScope();
+    const { sessionId } = seedTurns(adapter, scope, 0);
+    adapter.insertTurn({
+      ...scope,
+      session_id: sessionId,
+      actor: 'user-1',
+      role: 'user',
+      content: 'early turn',
+      created_at: 100,
+    });
+    adapter.insertTurn({
+      ...scope,
+      session_id: sessionId,
+      actor: 'assistant-1',
+      role: 'assistant',
+      content: 'later turn',
+      created_at: 200,
+    });
+
+    const context = await buildMemoryContext(asyncAdapter, scope, { asOf: 150 });
+    expect(context.activeTurns).toHaveLength(1);
+    expect(context.activeTurns[0]?.content).toBe('early turn');
   });
 
   it('returns empty context gracefully', async () => {

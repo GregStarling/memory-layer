@@ -1,6 +1,6 @@
 import type { MemoryScope, NormalizedMemoryScope } from '../contracts/identity.js';
 import { normalizeScope } from '../contracts/identity.js';
-import type { MonitorPolicy } from '../contracts/policy.js';
+import type { MonitorPatterns, MonitorPolicy } from '../contracts/policy.js';
 import { DEFAULT_MONITOR_POLICY } from '../contracts/policy.js';
 import type { Turn, WorkingMemory } from '../contracts/types.js';
 
@@ -94,7 +94,7 @@ export interface ContextHealthReport {
   recommendation: CompactionRecommendation;
 }
 
-const SUBJECT_CHANGE_PATTERNS = [
+const DEFAULT_SUBJECT_CHANGE_PATTERNS = [
   /\bactually,?\s+(let'?s|can we|i want to)\b/i,
   /\bchanging? (topic|subject|gears)\b/i,
   /\bforget (that|about)\b/i,
@@ -106,19 +106,58 @@ const SUBJECT_CHANGE_PATTERNS = [
   /\boff topic,? but\b/i,
   /\bsomething (else|different)\b/i,
 ];
+const DEFAULT_TASK_RESET_PATTERNS = [
+  /\b(start|begin) (over|fresh|from scratch)\b/i,
+  /\bscrap (that|this|it|everything)\b/i,
+  /\blet'?s (try|do) something (else|new|different)\b/i,
+  /\bnever\s?mind\b/i,
+];
+const DEFAULT_ACKNOWLEDGMENT_PATTERNS = [
+  /\b(thanks?|thank you|perfect|great|got it|that'?s? (it|all|what i needed))\b/i,
+  /\blooks? good\b/i,
+  /\bawesome\b/i,
+  /\bexactly\b/i,
+];
+const DEFAULT_CLOSE_PATTERNS = [
+  /\b(bye|goodbye|see you|later|done|that'?s? all|signing off|good night|gn)\b/i,
+];
 
-function resolvePolicy(policy?: MonitorPolicy): Required<MonitorPolicy> {
+function resolvePolicy(policy?: MonitorPolicy): Required<Omit<MonitorPolicy, 'customPatterns'>> & {
+  customPatterns: Partial<MonitorPatterns>;
+} {
   return {
     ...DEFAULT_MONITOR_POLICY,
     ...policy,
+    customPatterns: {
+      ...DEFAULT_MONITOR_POLICY.customPatterns,
+      ...policy?.customPatterns,
+    },
   };
 }
 
-function detectExplicitSubjectChange(turns: Turn[], recentWindow: number): TopicDriftSignal {
+function resolvePatterns(
+  policy: ReturnType<typeof resolvePolicy>,
+): Required<MonitorPatterns> {
+  return {
+    subjectChange: [...DEFAULT_SUBJECT_CHANGE_PATTERNS, ...(policy.customPatterns.subjectChange ?? [])],
+    taskReset: [...DEFAULT_TASK_RESET_PATTERNS, ...(policy.customPatterns.taskReset ?? [])],
+    acknowledgment: [
+      ...DEFAULT_ACKNOWLEDGMENT_PATTERNS,
+      ...(policy.customPatterns.acknowledgment ?? []),
+    ],
+    close: [...DEFAULT_CLOSE_PATTERNS, ...(policy.customPatterns.close ?? [])],
+  };
+}
+
+function detectExplicitSubjectChange(
+  turns: Turn[],
+  recentWindow: number,
+  patterns: RegExp[],
+): TopicDriftSignal {
   const recent = turns.slice(-recentWindow);
   for (const turn of recent) {
     if (turn.role !== 'user') continue;
-    for (const pattern of SUBJECT_CHANGE_PATTERNS) {
+    for (const pattern of patterns) {
       if (pattern.test(turn.content)) {
         return {
           type: 'explicit_subject_change',
@@ -171,18 +210,15 @@ function detectEntityDiscontinuity(
   };
 }
 
-const TASK_RESET_PATTERNS = [
-  /\b(start|begin) (over|fresh|from scratch)\b/i,
-  /\bscrap (that|this|it|everything)\b/i,
-  /\blet'?s (try|do) something (else|new|different)\b/i,
-  /\bnever\s?mind\b/i,
-];
-
-function detectUnpromptedTaskReset(turns: Turn[], recentWindow: number): TopicDriftSignal {
+function detectUnpromptedTaskReset(
+  turns: Turn[],
+  recentWindow: number,
+  patterns: RegExp[],
+): TopicDriftSignal {
   const recent = turns.slice(-recentWindow);
   for (const turn of recent) {
     if (turn.role !== 'user') continue;
-    for (const pattern of TASK_RESET_PATTERNS) {
+    for (const pattern of patterns) {
       if (pattern.test(turn.content)) {
         return {
           type: 'unprompted_task_reset',
@@ -234,19 +270,15 @@ function detectLongIntraSessionGap(
   };
 }
 
-const ACKNOWLEDGMENT_PATTERNS = [
-  /\b(thanks?|thank you|perfect|great|got it|that'?s? (it|all|what i needed))\b/i,
-  /\blooks? good\b/i,
-  /\bawesome\b/i,
-  /\bexactly\b/i,
-];
-
-function detectExplicitAcknowledgment(turns: Turn[]): TaskCompletionSignal {
+function detectExplicitAcknowledgment(
+  turns: Turn[],
+  patterns: RegExp[],
+): TaskCompletionSignal {
   const recent = turns.slice(-5);
   for (let i = recent.length - 1; i >= 0; i -= 1) {
     const turn = recent[i];
     if (turn.role !== 'user') continue;
-    for (const pattern of ACKNOWLEDGMENT_PATTERNS) {
+    for (const pattern of patterns) {
       if (pattern.test(turn.content)) {
         return {
           type: 'explicit_acknowledgment',
@@ -293,14 +325,15 @@ function detectDeliverableFollowedByGap(turns: Turn[], now: number): TaskComplet
   };
 }
 
-const CLOSE_PATTERNS = [/\b(bye|goodbye|see you|later|done|that'?s? all|signing off|good night|gn)\b/i];
-
-function detectExplicitClose(turns: Turn[]): TaskCompletionSignal {
+function detectExplicitClose(
+  turns: Turn[],
+  patterns: RegExp[],
+): TaskCompletionSignal {
   const recent = turns.slice(-3);
   for (let i = recent.length - 1; i >= 0; i -= 1) {
     const turn = recent[i];
     if (turn.role !== 'user') continue;
-    for (const pattern of CLOSE_PATTERNS) {
+    for (const pattern of patterns) {
       if (pattern.test(turn.content)) {
         return {
           type: 'explicit_close',
@@ -460,6 +493,7 @@ export function assessContext(
   const turns = input.active_turns;
   const activeTurnCount = turns.length;
   const recentTurns = turns.slice(-policy.recentWindow);
+  const patterns = resolvePatterns(policy);
   const activeTokenEstimate = turns.reduce((acc, turn) => acc + turn.token_estimate, 0);
   const recentTokenEstimate = recentTurns.reduce((acc, turn) => acc + turn.token_estimate, 0);
   const maxSingleTurnTokens = turns.reduce((max, turn) => Math.max(max, turn.token_estimate), 0);
@@ -469,18 +503,18 @@ export function assessContext(
   );
 
   const driftSignals: TopicDriftSignal[] = [
-    detectExplicitSubjectChange(turns, policy.recentWindow),
+    detectExplicitSubjectChange(turns, policy.recentWindow, patterns.subjectChange),
     detectEntityDiscontinuity(turns, input.latest_working_memory, policy.recentWindow),
-    detectUnpromptedTaskReset(turns, policy.recentWindow),
+    detectUnpromptedTaskReset(turns, policy.recentWindow, patterns.taskReset),
     detectLongIntraSessionGap(turns, policy.intraSessionGapSeconds),
   ];
   const topicDriftSignalCount = driftSignals.filter((signal) => signal.detected).length;
   const topicDriftDetected = topicDriftSignalCount >= 2;
 
   const completionSignals: TaskCompletionSignal[] = [
-    detectExplicitAcknowledgment(turns),
+    detectExplicitAcknowledgment(turns, patterns.acknowledgment),
     detectDeliverableFollowedByGap(turns, now),
-    detectExplicitClose(turns),
+    detectExplicitClose(turns, patterns.close),
   ];
   const taskCompletionDetected = completionSignals.some((signal) => signal.detected);
 

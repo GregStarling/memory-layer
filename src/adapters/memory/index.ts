@@ -12,6 +12,8 @@ import type {
   NewTurn,
   NewWorkItem,
   NewWorkingMemory,
+  PaginationOptions,
+  PaginatedResult,
   SearchOptions,
   SearchResult,
   TimeRange,
@@ -103,6 +105,32 @@ function resolveSearchOptions(options?: SearchOptions): Required<SearchOptions> 
   };
 }
 
+function resolvePaginationOptions(options?: PaginationOptions): Required<PaginationOptions> {
+  return {
+    limit: options?.limit ?? 25,
+    offset: options?.offset ?? 0,
+    cursor: options?.cursor ?? 0,
+  };
+}
+
+function paginateItems<T extends { id: number }>(
+  items: T[],
+  options?: PaginationOptions,
+): PaginatedResult<T> {
+  const resolved = resolvePaginationOptions(options);
+  const ordered = [...items].sort((a, b) => a.id - b.id);
+  const filtered =
+    resolved.cursor > 0 ? ordered.filter((item) => item.id > resolved.cursor) : ordered.slice(resolved.offset);
+  const page = filtered.slice(0, resolved.limit + 1);
+  const hasMore = page.length > resolved.limit;
+  const itemsPage = hasMore ? page.slice(0, resolved.limit) : page;
+  return {
+    items: itemsPage,
+    hasMore,
+    nextCursor: hasMore ? itemsPage[itemsPage.length - 1]?.id ?? null : null,
+  };
+}
+
 export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdapter {
   const state: MemoryState = {
     turns: [],
@@ -134,6 +162,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         actor: input.actor,
         role: input.role,
         content: input.content,
+        priority: input.priority ?? (input.role === 'system' ? 1.5 : 1),
         token_estimate: input.token_estimate ?? estimateTokens(input.content),
         created_at: input.created_at ?? nowSeconds(),
         archived_at: null,
@@ -144,12 +173,23 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       return turn;
     },
 
+    insertTurns(inputs) {
+      return inputs.map((input) => this.insertTurn(input));
+    },
+
     getTurnById(id) {
       return state.turns.find((turn) => turn.id === id) ?? null;
     },
 
     getActiveTurns(scope) {
       return state.turns.filter((turn) => matchesScope(turn, scope) && turn.archived_at === null);
+    },
+
+    getActiveTurnsPaginated(scope, options) {
+      return paginateItems(
+        state.turns.filter((turn) => matchesScope(turn, scope) && turn.archived_at === null),
+        options,
+      );
     },
 
     getTurnsByTimeRange(scope, range) {
@@ -274,7 +314,11 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         is_negated: input.is_negated ?? false,
         source: input.source,
         confidence: input.confidence,
+        confidence_score: input.confidence_score ?? 0.5,
+        verification_status: input.verification_status ?? 'unverified',
+        verification_notes: input.verification_notes ?? null,
         source_working_memory_id: input.source_working_memory_id ?? null,
+        source_turn_ids: input.source_turn_ids ?? [],
         superseded_by_id: null,
         retired_at: input.retired_at ?? null,
         created_at: createdAt,
@@ -286,6 +330,10 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       return record;
     },
 
+    insertKnowledgeMemories(inputs) {
+      return inputs.map((input) => this.insertKnowledgeMemory(input));
+    },
+
     getKnowledgeMemoryById(id) {
       return state.knowledgeMemory.find((item) => item.id === id) ?? null;
     },
@@ -294,6 +342,18 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       return state.knowledgeMemory.filter(
         (item) =>
           matchesScope(item, scope) && item.superseded_by_id === null && item.retired_at === null,
+      );
+    },
+
+    getActiveKnowledgeMemoryPaginated(scope, options) {
+      return paginateItems(
+        state.knowledgeMemory.filter(
+          (item) =>
+            matchesScope(item, scope) &&
+            item.superseded_by_id === null &&
+            item.retired_at === null,
+        ),
+        options,
       );
     },
 
@@ -378,6 +438,8 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         slot_key: input.slot_key ?? null,
         is_negated: input.is_negated ?? false,
         confidence: input.confidence,
+        confidence_score: input.confidence_score ?? 0.5,
+        verification_status: input.verification_status ?? 'unverified',
         source_text: input.source_text ?? null,
         decision: input.decision,
         created_knowledge_id: input.created_knowledge_id ?? null,

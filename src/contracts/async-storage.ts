@@ -11,6 +11,8 @@ import type {
   NewWorkItem,
   NewTurn,
   NewWorkingMemory,
+  PaginationOptions,
+  PaginatedResult,
   SearchOptions,
   SearchResult,
   TimeRange,
@@ -29,8 +31,13 @@ import type {
  */
 export interface AsyncStorageAdapter {
   insertTurn(input: NewTurn): Promise<Turn>;
+  insertTurns(inputs: NewTurn[]): Promise<Turn[]>;
   getTurnById(id: number): Promise<Turn | null>;
   getActiveTurns(scope: MemoryScope): Promise<Turn[]>;
+  getActiveTurnsPaginated(
+    scope: MemoryScope,
+    options?: PaginationOptions,
+  ): Promise<PaginatedResult<Turn>>;
   getTurnsByTimeRange(scope: MemoryScope, range: TimeRange): Promise<Turn[]>;
   searchTurns(
     scope: MemoryScope,
@@ -55,8 +62,13 @@ export interface AsyncStorageAdapter {
   markWorkingMemoryPromoted(id: number, knowledgeMemoryId: number): Promise<void>;
 
   insertKnowledgeMemory(input: NewKnowledgeMemory): Promise<KnowledgeMemory>;
+  insertKnowledgeMemories(inputs: NewKnowledgeMemory[]): Promise<KnowledgeMemory[]>;
   getKnowledgeMemoryById(id: number): Promise<KnowledgeMemory | null>;
   getActiveKnowledgeMemory(scope: MemoryScope): Promise<KnowledgeMemory[]>;
+  getActiveKnowledgeMemoryPaginated(
+    scope: MemoryScope,
+    options?: PaginationOptions,
+  ): Promise<PaginatedResult<KnowledgeMemory>>;
   getActiveKnowledgeCrossScope(
     scope: MemoryScope,
     level: ScopeLevel,

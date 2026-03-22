@@ -1,12 +1,20 @@
 export type ConflictStrategy = 'supersede' | 'keep_both' | 'skip';
 export type ContextMode = 'chat' | 'coding' | 'autonomous_agent' | 'review';
 
+export interface MonitorPatterns {
+  subjectChange: RegExp[];
+  taskReset: RegExp[];
+  acknowledgment: RegExp[];
+  close: RegExp[];
+}
+
 export interface MaintenancePolicy {
   workingMemoryTtlSeconds?: number;
   completedWorkItemTtlSeconds?: number;
   knowledgeStaleAfterSeconds?: number;
   minKnowledgeAccessCount?: number;
   maxActiveKnowledgeItems?: number;
+  consolidateKnowledge?: boolean;
 }
 
 export interface MonitorPolicy {
@@ -26,6 +34,7 @@ export interface MonitorPolicy {
   heavySingleTokenHard?: number;
   heavyCumulativeTokens?: number;
   intraSessionGapSeconds?: number;
+  customPatterns?: Partial<MonitorPatterns>;
 }
 
 export interface ExtractionPolicy {
@@ -51,7 +60,9 @@ export interface ContextPolicy {
   touchSelectedKnowledge?: boolean;
 }
 
-export const DEFAULT_MONITOR_POLICY: Required<MonitorPolicy> = {
+export const DEFAULT_MONITOR_POLICY: Required<Omit<MonitorPolicy, 'customPatterns'>> & {
+  customPatterns: Required<MonitorPatterns>;
+} = {
   softTurnThreshold: 15,
   hardTurnThreshold: 30,
   softTokenThreshold: 3000,
@@ -68,6 +79,12 @@ export const DEFAULT_MONITOR_POLICY: Required<MonitorPolicy> = {
   heavySingleTokenHard: 1200,
   heavyCumulativeTokens: 2400,
   intraSessionGapSeconds: 1800,
+  customPatterns: {
+    subjectChange: [],
+    taskReset: [],
+    acknowledgment: [],
+    close: [],
+  },
 };
 
 export const DEFAULT_EXTRACTION_POLICY: Required<ExtractionPolicy> = {
@@ -99,4 +116,5 @@ export const DEFAULT_MAINTENANCE_POLICY: Required<MaintenancePolicy> = {
   knowledgeStaleAfterSeconds: 60 * 24 * 60 * 60,
   minKnowledgeAccessCount: 1,
   maxActiveKnowledgeItems: 500,
+  consolidateKnowledge: false,
 };

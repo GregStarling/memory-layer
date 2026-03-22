@@ -38,8 +38,11 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
 
   return {
     insertTurn: (input) => Promise.resolve(adapter.insertTurn(input)),
+    insertTurns: (inputs) => Promise.resolve(adapter.insertTurns(inputs)),
     getTurnById: (id) => Promise.resolve(adapter.getTurnById(id)),
     getActiveTurns: (scope) => Promise.resolve(adapter.getActiveTurns(scope)),
+    getActiveTurnsPaginated: (scope, options) =>
+      Promise.resolve(adapter.getActiveTurnsPaginated(scope, options)),
     getTurnsByTimeRange: (scope, range) =>
       Promise.resolve(adapter.getTurnsByTimeRange(scope, range)),
     searchTurns: (scope, query, options) =>
@@ -62,9 +65,13 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
       Promise.resolve(adapter.markWorkingMemoryPromoted(id, knowledgeMemoryId)),
 
     insertKnowledgeMemory: (input) => Promise.resolve(adapter.insertKnowledgeMemory(input)),
+    insertKnowledgeMemories: (inputs) =>
+      Promise.resolve(adapter.insertKnowledgeMemories(inputs)),
     getKnowledgeMemoryById: (id) => Promise.resolve(adapter.getKnowledgeMemoryById(id)),
     getActiveKnowledgeMemory: (scope) =>
       Promise.resolve(adapter.getActiveKnowledgeMemory(scope)),
+    getActiveKnowledgeMemoryPaginated: (scope, options) =>
+      Promise.resolve(adapter.getActiveKnowledgeMemoryPaginated(scope, options)),
     getActiveKnowledgeCrossScope: (scope, level) =>
       Promise.resolve(adapter.getActiveKnowledgeCrossScope(scope, level)),
     getKnowledgeByTimeRange: (scope, range) =>

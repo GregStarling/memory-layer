@@ -1,4 +1,9 @@
 import type { EmbeddingGenerator, EmbeddingVector } from '../contracts/embedding.js';
+import {
+  batchedGenerate,
+  createCachedEmbeddingGenerator,
+  withRetry,
+} from './resilience.js';
 
 export interface OpenAIEmbeddingOptions {
   /** API key. Defaults to OPENAI_API_KEY env var. */
@@ -7,6 +12,10 @@ export interface OpenAIEmbeddingOptions {
   model?: string;
   /** Optional dimensions override (for models that support it). */
   dimensions?: number;
+  maxRetries?: number;
+  retryDelayMs?: number;
+  batchSize?: number;
+  cacheSize?: number;
 }
 
 /**
@@ -47,7 +56,7 @@ export function createOpenAIEmbeddingGenerator(
     return clientPromise;
   }
 
-  return async (texts: string[]): Promise<EmbeddingVector[]> => {
+  const baseGenerator: EmbeddingGenerator = async (texts: string[]): Promise<EmbeddingVector[]> => {
     if (texts.length === 0) return [];
 
     const client = await getClient() as {
@@ -72,4 +81,16 @@ export function createOpenAIEmbeddingGenerator(
       (item) => new Float32Array(item.embedding),
     );
   };
+
+  const cachedGenerator = createCachedEmbeddingGenerator(
+    baseGenerator,
+    options?.cacheSize ?? 256,
+  );
+
+  return async (texts: string[]): Promise<EmbeddingVector[]> =>
+    withRetry(
+      () => batchedGenerate(cachedGenerator, texts, options?.batchSize ?? 32),
+      options?.maxRetries ?? 2,
+      options?.retryDelayMs ?? 250,
+    );
 }

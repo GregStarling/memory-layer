@@ -18,6 +18,13 @@ const KEYWORD_HINTS = [
   'objective',
   'blocker',
 ];
+const PRIORITY_PATTERNS: Array<{ pattern: RegExp; weight: number }> = [
+  { pattern: /\b(prefers?|likes?|wants?|avoid|does not like|doesn't like)\b/i, weight: 1.3 },
+  { pattern: /\b(decided|decision|selected|chose)\b/i, weight: 1.5 },
+  { pattern: /\b(must|must not|cannot|can't|requires?|constraint)\b/i, weight: 1.6 },
+  { pattern: /\b(goal|objective|todo|next|follow up|blocked|pending)\b/i, weight: 1.35 },
+  { pattern: /["'@#]|[A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+)+/, weight: 1.15 },
+];
 
 const STOP_WORDS = new Set([
   'a',
@@ -91,6 +98,13 @@ function keywordDensity(sentence: string): number {
     }
   }
   return density;
+}
+
+function priorityWeight(sentence: string): number {
+  return PRIORITY_PATTERNS.reduce(
+    (weight, entry) => (entry.pattern.test(sentence) ? weight + entry.weight : weight),
+    1,
+  );
 }
 
 function extractQuotedStrings(text: string): string[] {
@@ -171,7 +185,10 @@ export function createExtractiveSummarizer(
           ? 0.35
           : 1;
         const score =
-          positionWeight * uniquenessPenalty * (1 + keywordDensity(sentence) + tokens.length / 20);
+          positionWeight *
+          uniquenessPenalty *
+          priorityWeight(sentence) *
+          (1 + keywordDensity(sentence) + tokens.length / 20);
         scored.push({
           text: sentence,
           score,
@@ -186,6 +203,9 @@ export function createExtractiveSummarizer(
       .reduce<{ items: ScoredSentence[]; tokens: number }>(
         (state, candidate) => {
           if (state.items.length >= maxSentences) return state;
+          if (state.items.some((item) => jaccardOverlap(item.text, candidate.text) > 0.8)) {
+            return state;
+          }
           const tokenEstimate = estimateTokens(candidate.text);
           if (state.tokens + tokenEstimate > tokenBudget && state.items.length > 0) {
             return state;

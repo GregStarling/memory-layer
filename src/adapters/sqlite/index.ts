@@ -17,6 +17,8 @@ import type {
   NewWorkItem,
   NewTurn,
   NewWorkingMemory,
+  PaginationOptions,
+  PaginatedResult,
   SearchOptions,
   SearchResult,
   TimeRange,
@@ -46,6 +48,7 @@ import {
   rowToTurn,
   rowToWorkItem,
   rowToWorkingMemory,
+  serializeNumberArray,
   serializeStringArray,
   type CompactionLogRow,
   type KnowledgeMemoryAuditRow,
@@ -104,6 +107,14 @@ function resolveSearchOptions(options?: SearchOptions): Required<SearchOptions> 
   return {
     limit: options?.limit ?? 10,
     activeOnly: options?.activeOnly ?? true,
+  };
+}
+
+function resolvePaginationOptions(options?: PaginationOptions): Required<PaginationOptions> {
+  return {
+    limit: options?.limit ?? 25,
+    offset: options?.offset ?? 0,
+    cursor: options?.cursor ?? 0,
   };
 }
 
@@ -191,31 +202,79 @@ function createAdapterFromDatabase(
     return rows.map(rowToKnowledgeMemoryAudit);
   }
 
+  function insertValidatedTurn(input: NewTurn): Turn {
+    const scope = validateNewTurn(input);
+    const tokenEstimate = input.token_estimate ?? estimateTokens(input.content);
+    const createdAt = input.created_at ?? nowSeconds();
+    const result = db
+      .prepare(
+        `INSERT INTO turns
+          (session_id, tenant_id, system_id, workspace_id, scope_id, actor, role, content, priority, token_estimate, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.session_id,
+        scope.tenant_id,
+        scope.system_id,
+        scope.workspace_id,
+        scope.scope_id,
+        input.actor,
+        input.role,
+        input.content,
+        input.priority ?? (input.role === 'system' ? 1.5 : 1),
+        tokenEstimate,
+        createdAt,
+      );
+
+    return getTurnById(Number(result.lastInsertRowid))!;
+  }
+
+  function insertValidatedKnowledgeMemory(input: NewKnowledgeMemory): KnowledgeMemory {
+    const scope = validateNewKnowledgeMemory(input);
+    const createdAt = nowSeconds();
+    const result = db
+      .prepare(
+        `INSERT INTO knowledge_memory
+          (tenant_id, system_id, workspace_id, scope_id, fact, fact_type, fact_subject,
+           fact_attribute, fact_value, normalized_fact, slot_key, is_negated, source, confidence,
+           confidence_score, verification_status, verification_notes, source_working_memory_id,
+           source_turn_ids, retired_at, created_at, last_accessed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        scope.tenant_id,
+        scope.system_id,
+        scope.workspace_id,
+        scope.scope_id,
+        input.fact,
+        input.fact_type,
+        input.fact_subject ?? null,
+        input.fact_attribute ?? null,
+        input.fact_value ?? null,
+        input.normalized_fact ?? null,
+        input.slot_key ?? null,
+        input.is_negated ? 1 : 0,
+        input.source,
+        input.confidence,
+        input.confidence_score ?? 0.5,
+        input.verification_status ?? 'unverified',
+        input.verification_notes ?? null,
+        input.source_working_memory_id ?? null,
+        serializeNumberArray(input.source_turn_ids ?? []),
+        input.retired_at ?? null,
+        createdAt,
+        createdAt,
+      );
+    return getKnowledgeMemoryById(Number(result.lastInsertRowid))!;
+  }
+
   return {
     insertTurn(input: NewTurn): Turn {
-      const scope = validateNewTurn(input);
-      const tokenEstimate = input.token_estimate ?? estimateTokens(input.content);
-      const createdAt = input.created_at ?? nowSeconds();
-      const result = db
-        .prepare(
-          `INSERT INTO turns
-            (session_id, tenant_id, system_id, workspace_id, scope_id, actor, role, content, token_estimate, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          input.session_id,
-          scope.tenant_id,
-          scope.system_id,
-          scope.workspace_id,
-          scope.scope_id,
-          input.actor,
-          input.role,
-          input.content,
-          tokenEstimate,
-          createdAt,
-        );
+      return insertValidatedTurn(input);
+    },
 
-      return getTurnById(Number(result.lastInsertRowid))!;
+    insertTurns(inputs): Turn[] {
+      return db.transaction(() => inputs.map((input) => insertValidatedTurn(input)))();
     },
 
     getTurnById,
@@ -229,6 +288,31 @@ function createAdapterFromDatabase(
         )
         .all(...scopeValues(scope)) as Turn[];
       return rows.map(rowToTurn);
+    },
+
+    getActiveTurnsPaginated(scope, options): PaginatedResult<Turn> {
+      const resolved = resolvePaginationOptions(options);
+      const cursorClause = resolved.cursor > 0 ? ' AND id > ?' : '';
+      const offsetClause = resolved.cursor > 0 ? '' : ' OFFSET ?';
+      const rows = db
+        .prepare(
+          `SELECT * FROM turns
+           WHERE ${SCOPE_WHERE} AND archived_at IS NULL${cursorClause}
+           ORDER BY id ASC
+           LIMIT ?${offsetClause}`,
+        )
+        .all(
+          ...scopeValues(scope),
+          ...(resolved.cursor > 0 ? [resolved.cursor] : []),
+          resolved.limit + 1,
+          ...(resolved.cursor > 0 ? [] : [resolved.offset]),
+        ) as Turn[];
+      const pageRows = rows.slice(0, resolved.limit).map(rowToTurn);
+      return {
+        items: pageRows,
+        hasMore: rows.length > resolved.limit,
+        nextCursor: rows.length > resolved.limit ? pageRows[pageRows.length - 1]?.id ?? null : null,
+      };
     },
 
     getTurnsByTimeRange(scope, range): Turn[] {
@@ -403,37 +487,11 @@ function createAdapterFromDatabase(
     },
 
     insertKnowledgeMemory(input: NewKnowledgeMemory): KnowledgeMemory {
-      const scope = validateNewKnowledgeMemory(input);
-      const createdAt = nowSeconds();
-      const result = db
-        .prepare(
-          `INSERT INTO knowledge_memory
-            (tenant_id, system_id, workspace_id, scope_id, fact, fact_type, fact_subject,
-             fact_attribute, fact_value, normalized_fact, slot_key, is_negated, source, confidence,
-             source_working_memory_id, retired_at, created_at, last_accessed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          scope.tenant_id,
-          scope.system_id,
-          scope.workspace_id,
-          scope.scope_id,
-          input.fact,
-          input.fact_type,
-          input.fact_subject ?? null,
-          input.fact_attribute ?? null,
-          input.fact_value ?? null,
-          input.normalized_fact ?? null,
-          input.slot_key ?? null,
-          input.is_negated ? 1 : 0,
-          input.source,
-          input.confidence,
-          input.source_working_memory_id ?? null,
-          input.retired_at ?? null,
-          createdAt,
-          createdAt,
-        );
-      return getKnowledgeMemoryById(Number(result.lastInsertRowid))!;
+      return insertValidatedKnowledgeMemory(input);
+    },
+
+    insertKnowledgeMemories(inputs): KnowledgeMemory[] {
+      return db.transaction(() => inputs.map((input) => insertValidatedKnowledgeMemory(input)))();
     },
 
     getKnowledgeMemoryById,
@@ -447,6 +505,31 @@ function createAdapterFromDatabase(
         )
         .all(...scopeValues(scope)) as KnowledgeMemoryRow[];
       return rows.map(rowToKnowledgeMemory);
+    },
+
+    getActiveKnowledgeMemoryPaginated(scope, options): PaginatedResult<KnowledgeMemory> {
+      const resolved = resolvePaginationOptions(options);
+      const cursorClause = resolved.cursor > 0 ? ' AND id > ?' : '';
+      const offsetClause = resolved.cursor > 0 ? '' : ' OFFSET ?';
+      const rows = db
+        .prepare(
+          `SELECT * FROM knowledge_memory
+           WHERE ${SCOPE_WHERE} AND superseded_by_id IS NULL AND retired_at IS NULL${cursorClause}
+           ORDER BY id ASC
+           LIMIT ?${offsetClause}`,
+        )
+        .all(
+          ...scopeValues(scope),
+          ...(resolved.cursor > 0 ? [resolved.cursor] : []),
+          resolved.limit + 1,
+          ...(resolved.cursor > 0 ? [] : [resolved.offset]),
+        ) as KnowledgeMemoryRow[];
+      const pageRows = rows.slice(0, resolved.limit).map(rowToKnowledgeMemory);
+      return {
+        items: pageRows,
+        hasMore: rows.length > resolved.limit,
+        nextCursor: rows.length > resolved.limit ? pageRows[pageRows.length - 1]?.id ?? null : null,
+      };
     },
 
     getActiveKnowledgeCrossScope(scope, level): KnowledgeMemory[] {
@@ -561,8 +644,9 @@ function createAdapterFromDatabase(
           `INSERT INTO knowledge_memory_audit
             (tenant_id, system_id, workspace_id, scope_id, working_memory_id, fact, fact_type,
              fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated,
-             confidence, source_text, decision, created_knowledge_id, related_knowledge_id, detail, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             confidence, confidence_score, verification_status, source_text, decision,
+             created_knowledge_id, related_knowledge_id, detail, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           scope.tenant_id,
@@ -579,6 +663,8 @@ function createAdapterFromDatabase(
           input.slot_key ?? null,
           input.is_negated ? 1 : 0,
           input.confidence,
+          input.confidence_score ?? 0.5,
+          input.verification_status ?? 'unverified',
           input.source_text ?? null,
           input.decision,
           input.created_knowledge_id ?? null,

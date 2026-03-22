@@ -1,6 +1,6 @@
 import { createMemory, type CreateMemoryOptions } from '../core/quick.js';
 import type { MemoryManager } from '../core/manager.js';
-import type { MemoryScope } from '../contracts/identity.js';
+import { normalizeScope, type MemoryScope } from '../contracts/identity.js';
 import type { FactType, FactConfidence } from '../contracts/types.js';
 
 export interface McpServerConfig {
@@ -91,7 +91,11 @@ const TOOLS: McpTool[] = [
           enum: ['preference', 'entity', 'decision', 'constraint', 'reference'],
           description: 'Fact classification',
         },
-        confidence: { type: 'string', enum: ['high', 'medium'], description: 'Confidence level (default: high)' },
+        confidence: {
+          type: 'string',
+          enum: ['high', 'medium', 'low'],
+          description: 'Confidence level (default: high)',
+        },
       },
       required: ['fact', 'factType'],
     },
@@ -149,6 +153,16 @@ function errorResult(message: string): McpToolResult {
   };
 }
 
+function resolveScopeInput(
+  fallbackScope: string | MemoryScope | undefined,
+  args: Record<string, unknown>,
+): string | MemoryScope {
+  if (args.scope && typeof args.scope === 'object') {
+    return args.scope as MemoryScope;
+  }
+  return fallbackScope ?? 'default';
+}
+
 /**
  * Creates a standalone MCP server handler that exposes memory operations as tools.
  *
@@ -158,20 +172,35 @@ function errorResult(message: string): McpToolResult {
  * For a ready-to-run stdio server, use `startMcpServer()`.
  */
 export function createMcpServerHandler(config: McpServerConfig = {}) {
-  const manager = createMemory({
-    adapter: 'sqlite',
-    path: config.dbPath ?? ':memory:',
-    scope: config.scope ?? 'default',
-    summarizer: config.summarizer ?? 'extractive',
-    extractor: config.extractor ?? 'regex',
-    preset: config.preset,
-  });
+  const managers = new Map<string, MemoryManager>();
+
+  function getManager(scopeInput: string | MemoryScope): MemoryManager {
+    const key =
+      typeof scopeInput === 'string'
+        ? `scope:${scopeInput}`
+        : JSON.stringify(normalizeScope(scopeInput));
+    const existing = managers.get(key);
+    if (existing) return existing;
+    const manager = createMemory({
+      adapter: 'sqlite',
+      path: config.dbPath ?? ':memory:',
+      scope: scopeInput,
+      summarizer: config.summarizer ?? 'extractive',
+      extractor: config.extractor ?? 'regex',
+      preset: config.preset,
+    });
+    managers.set(key, manager);
+    return manager;
+  }
+
+  const manager = getManager(config.scope ?? 'default');
 
   async function callTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
     try {
+      const requestManager = getManager(resolveScopeInput(config.scope, args));
       switch (name) {
         case 'memory_store_turn': {
-          const turn = await manager.processTurn(
+          const turn = await requestManager.processTurn(
             args.role as 'user' | 'assistant' | 'system',
             String(args.content),
             args.actor ? String(args.actor) : undefined,
@@ -179,7 +208,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           return jsonResult({ stored: true, turnId: turn.id });
         }
         case 'memory_store_exchange': {
-          const exchange = await manager.processExchange(
+          const exchange = await requestManager.processExchange(
             String(args.userContent),
             String(args.assistantContent),
           );
@@ -191,7 +220,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           });
         }
         case 'memory_get_context': {
-          const context = await manager.getContext(
+          const context = await requestManager.getContext(
             args.relevanceQuery ? String(args.relevanceQuery) : undefined,
           );
           return jsonResult({
@@ -219,7 +248,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           });
         }
         case 'memory_search': {
-          const results = await manager.search(
+          const results = await requestManager.search(
             String(args.query),
             args.limit ? { limit: Number(args.limit) } : undefined,
           );
@@ -239,7 +268,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           });
         }
         case 'memory_learn_fact': {
-          const fact = await manager.learnFact(
+          const fact = await requestManager.learnFact(
             String(args.fact),
             args.factType as FactType,
             (args.confidence as FactConfidence) ?? 'high',
@@ -247,7 +276,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           return jsonResult({ stored: true, knowledgeId: fact.id });
         }
         case 'memory_track_work': {
-          const item = await manager.trackWorkItem(
+          const item = await requestManager.trackWorkItem(
             String(args.title),
             (args.kind as 'objective' | 'unresolved_work' | 'constraint') ?? 'objective',
             (args.status as 'open' | 'in_progress' | 'blocked' | 'done') ?? 'open',
@@ -256,14 +285,14 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           return jsonResult({ tracked: true, workItemId: item.id });
         }
         case 'memory_force_compact': {
-          const result = await manager.forceCompact();
+          const result = await requestManager.forceCompact();
           return jsonResult({
             compacted: result !== null,
             archivedTurnCount: result?.archivedTurnIds.length ?? 0,
           });
         }
         case 'memory_get_health': {
-          const context = await manager.getContext();
+          const context = await requestManager.getContext();
           return jsonResult({
             activeTurnCount: context.activeTurns.length,
             tokenEstimate: context.tokenEstimate,
@@ -273,7 +302,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           });
         }
         case 'memory_run_maintenance': {
-          const report = await manager.runMaintenance();
+          const report = await requestManager.runMaintenance();
           return jsonResult({
             expiredWorkingMemory: report.expiredWorkingMemoryIds.length,
             retiredKnowledge: report.retiredKnowledgeIds.length,
@@ -293,7 +322,10 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
     callTool,
     manager,
     async close() {
-      await manager.close();
+      for (const cachedManager of managers.values()) {
+        await cachedManager.close();
+      }
+      managers.clear();
     },
   };
 }

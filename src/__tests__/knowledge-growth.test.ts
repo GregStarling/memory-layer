@@ -39,6 +39,8 @@ describe('knowledge growth', () => {
     const created = await extractKnowledge(asyncAdapter, wm.id, scope, createRegexExtractor());
     expect(created.length).toBeGreaterThan(0);
     expect(created.some((fact) => fact.fact_type === 'preference')).toBe(true);
+    expect(created.every((fact) => fact.source_turn_ids.length > 0)).toBe(true);
+    expect(created.some((fact) => fact.verification_status === 'corroborated')).toBe(true);
     expect(adapter.getRecentKnowledgeMemoryAudits(scope)).not.toHaveLength(0);
   });
 

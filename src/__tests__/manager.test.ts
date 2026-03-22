@@ -71,6 +71,29 @@ describe('memory manager', () => {
     await manager.close();
   });
 
+  it('can build temporal snapshots with getContextAt', async () => {
+    const scope = makeScope();
+    const manager = createMemoryManager({
+      adapter,
+      scope,
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      autoCompact: false,
+    });
+
+    await manager.processTurn('user', 'first');
+    const cutoff = Math.floor(Date.now() / 1000);
+    await manager.processTurn('assistant', 'second');
+
+    const context = await manager.getContextAt(cutoff);
+    expect(context.activeTurns.map((turn) => turn.content)).toContain('first');
+    await manager.close();
+  });
+
   it('returns hybrid search results', async () => {
     const manager = createMemoryManager({
       adapter,
@@ -141,10 +164,13 @@ describe('memory manager', () => {
         key_entities: [],
         topic_tags: [],
       }),
+      embeddingAdapter: adapter.embeddings,
+      embeddingGenerator: async () => [new Float32Array([0.5, 0.5])],
     });
 
     const fact = await manager.learnFact('The project uses sqlite', 'reference');
     expect(fact.source).toBe('manual');
+    expect(adapter.embeddings.getEmbedding(fact.id)).not.toBeNull();
     await manager.close();
   });
 

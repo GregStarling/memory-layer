@@ -63,6 +63,14 @@ export function assertMaxEntries(value: string[], name: string, max: number): vo
   }
 }
 
+export function assertNumberRange(value: number, name: string, min: number, max: number): void {
+  if (!Number.isFinite(value) || value < min || value > max) {
+    throw new Error(
+      `Memory validation: '${name}' must be between ${min} and ${max}, got '${value}'`,
+    );
+  }
+}
+
 export function assertTurnRange(startId: number, endId: number): void {
   if (endId < startId) {
     throw new Error(
@@ -117,6 +125,9 @@ export function validateNewTurn(input: NewTurn): NormalizedMemoryScope {
   assertNonEmpty(input.actor, 'actor');
   assertNonEmpty(input.content, 'content');
   assertTurnRole(input.role);
+  if (input.priority !== undefined) {
+    assertNumberRange(input.priority, 'priority', 0, 2);
+  }
   return scope;
 }
 

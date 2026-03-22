@@ -28,6 +28,7 @@ export interface BeforeModelCallInput {
   input: string;
   relevanceQuery?: string;
   format?: FormatOptions;
+  asOf?: number;
 }
 
 export interface BeforeModelCallResult {
@@ -105,7 +106,9 @@ export function createMemoryRuntime(
       const resolved = resolveRuntimeInput(input);
       const [bootstrapPayload, context] = await Promise.all([
         getBootstrapPayload(resolved.relevanceQuery ?? resolved.input, resolved.format),
-        manager.getContext(resolved.relevanceQuery ?? resolved.input),
+        resolved.asOf != null
+          ? manager.getContextAt(resolved.asOf, resolved.relevanceQuery ?? resolved.input)
+          : manager.getContext(resolved.relevanceQuery ?? resolved.input),
       ]);
       const contextPrompt = formatContextForPrompt(context, resolved.format ?? options.format);
       return {

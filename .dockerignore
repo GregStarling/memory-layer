@@ -1,0 +1,10 @@
+coverage
+dist
+node_modules
+data
+*.db
+*.sqlite
+.git
+.github
+.venv
+clients/python/.venv

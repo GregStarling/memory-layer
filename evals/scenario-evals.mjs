@@ -53,9 +53,9 @@ async function runScenarios() {
   const runtime = createMemoryRuntime(manager);
   const mcp = createMemoryMcpAdapter(runtime);
 
-  manager.trackWorkItem('Ship the memory layer', 'objective', 'in_progress');
-  manager.trackWorkItem('Fix retrieval regressions', 'unresolved_work', 'blocked');
-  manager.trackWorkItem('Old completed task', 'objective', 'done');
+  await manager.trackWorkItem('Ship the memory layer', 'objective', 'in_progress');
+  await manager.trackWorkItem('Fix retrieval regressions', 'unresolved_work', 'blocked');
+  await manager.trackWorkItem('Old completed task', 'objective', 'done');
   await runtime.afterModelCall({
     userInput: 'Please remember that we are building a local-first AI memory layer.',
     assistantOutput: 'Understood. I will keep local-first requirements in mind.',
@@ -64,13 +64,13 @@ async function runScenarios() {
 
   const prepared = await runtime.beforeModelCall('TypeScript local-first');
   const bootstrap = await runtime.startSession('TypeScript');
-  const recall = manager.recall({ start_at: 0, end_at: Math.floor(Date.now() / 1000) + 10 });
+  const recall = await manager.recall({ start_at: 0, end_at: Math.floor(Date.now() / 1000) + 10 });
   const mcpPrepared = await mcp.callTool('memory_prepare_call', {
     input: 'TypeScript local-first',
   });
 
   Date.now = () => new Date('2024-01-10T00:00:00Z').valueOf();
-  const maintenance = manager.runMaintenance({
+  const maintenance = await manager.runMaintenance({
     workingMemoryTtlSeconds: 1,
     completedWorkItemTtlSeconds: 1,
     knowledgeStaleAfterSeconds: 1,
@@ -123,7 +123,7 @@ async function runScenarios() {
     ),
   );
 
-  manager.close();
+  await manager.close();
 
   if (enforce && !passed) {
     process.exit(1);

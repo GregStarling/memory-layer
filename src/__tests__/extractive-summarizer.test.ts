@@ -46,4 +46,16 @@ describe('extractive summarizer', () => {
       topic_tags: [],
     });
   });
+
+  it('prioritizes constraints and decisions under tighter budgets', async () => {
+    const summarizer = createExtractiveSummarizer({ tokenBudget: 40, maxSentences: 2 });
+    const result = await summarizer([
+      makeTurn(1, 'We chatted casually about tooling for a while.'),
+      makeTurn(2, 'The project must stay local-first.'),
+      makeTurn(3, 'We decided to keep SQLite as the default store.'),
+    ]);
+
+    expect(result.summary).toContain('must stay local-first');
+    expect(result.summary).toContain('decided');
+  });
 });

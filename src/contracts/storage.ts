@@ -11,6 +11,8 @@ import type {
   NewWorkItem,
   NewTurn,
   NewWorkingMemory,
+  PaginationOptions,
+  PaginatedResult,
   SearchOptions,
   SearchResult,
   TimeRange,
@@ -21,8 +23,10 @@ import type {
 
 export interface StorageAdapter {
   insertTurn(input: NewTurn): Turn;
+  insertTurns(inputs: NewTurn[]): Turn[];
   getTurnById(id: number): Turn | null;
   getActiveTurns(scope: MemoryScope): Turn[];
+  getActiveTurnsPaginated(scope: MemoryScope, options?: PaginationOptions): PaginatedResult<Turn>;
   getTurnsByTimeRange(scope: MemoryScope, range: TimeRange): Turn[];
   searchTurns(scope: MemoryScope, query: string, options?: SearchOptions): SearchResult<Turn>[];
   archiveTurn(id: number, archivedAt: number, compactionLogId: number): void;
@@ -43,8 +47,13 @@ export interface StorageAdapter {
   markWorkingMemoryPromoted(id: number, knowledgeMemoryId: number): void;
 
   insertKnowledgeMemory(input: NewKnowledgeMemory): KnowledgeMemory;
+  insertKnowledgeMemories(inputs: NewKnowledgeMemory[]): KnowledgeMemory[];
   getKnowledgeMemoryById(id: number): KnowledgeMemory | null;
   getActiveKnowledgeMemory(scope: MemoryScope): KnowledgeMemory[];
+  getActiveKnowledgeMemoryPaginated(
+    scope: MemoryScope,
+    options?: PaginationOptions,
+  ): PaginatedResult<KnowledgeMemory>;
   getActiveKnowledgeCrossScope(scope: MemoryScope, level: ScopeLevel): KnowledgeMemory[];
   getKnowledgeByTimeRange(scope: MemoryScope, range: TimeRange): KnowledgeMemory[];
   searchKnowledge(

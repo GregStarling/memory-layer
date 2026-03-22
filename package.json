@@ -5,6 +5,14 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "homepage": "https://github.com/your-org/memory-layer#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/your-org/memory-layer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-org/memory-layer/issues"
+  },
   "bin": {
     "memory-layer": "./bin/memory-server.mjs"
   },
@@ -37,19 +45,44 @@
       "import": "./dist/embeddings/voyage.js",
       "types": "./dist/embeddings/voyage.d.ts"
     },
+    "./embeddings/local": {
+      "import": "./dist/embeddings/local.js",
+      "types": "./dist/embeddings/local.d.ts"
+    },
+    "./embeddings/resilience": {
+      "import": "./dist/embeddings/resilience.js",
+      "types": "./dist/embeddings/resilience.d.ts"
+    },
     "./adapters/postgres": {
       "import": "./dist/adapters/postgres/index.js",
       "types": "./dist/adapters/postgres/index.d.ts"
     },
     "./server": {
+      "import": "./dist/server/index.js",
+      "types": "./dist/server/index.d.ts"
+    },
+    "./server/http": {
+      "import": "./dist/server/http-server.js",
+      "types": "./dist/server/http-server.d.ts"
+    },
+    "./server/mcp": {
       "import": "./dist/server/mcp-server.js",
       "types": "./dist/server/mcp-server.d.ts"
+    },
+    "./integrations/langchain": {
+      "import": "./dist/integrations/langchain.js",
+      "types": "./dist/integrations/langchain.d.ts"
+    },
+    "./integrations/vercel-ai": {
+      "import": "./dist/integrations/vercel-ai.js",
+      "types": "./dist/integrations/vercel-ai.d.ts"
     }
   },
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "lint": "tsc --noEmit",
     "benchmark:search": "npm run build && node benchmarks/search-benchmark.mjs",
     "benchmark:semantic": "npm run build && node benchmarks/semantic-benchmark.mjs",
@@ -60,6 +93,7 @@
     "export:memory": "node scripts/export-memory.mjs",
     "import:memory": "node scripts/import-memory.mjs",
     "pack:check": "npm pack --dry-run",
+    "release:check": "npm run lint && npm run test:coverage && npm run eval:gate && npm run pack:check",
     "prepublishOnly": "npm run lint && npm test && npm run build && npm run pack:check"
   },
   "dependencies": {
@@ -78,6 +112,7 @@
     }
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "^2.1.9",
     "@types/better-sqlite3": "^7.6.8",
     "@types/node": "^22.0.0",
     "typescript": "^5.5.0",
@@ -88,7 +123,10 @@
     "!dist/__tests__",
     "!dist/__tests__/**",
     "bin",
+    "docs",
+    "openapi.yaml",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "license": "MIT",

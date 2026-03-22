@@ -81,4 +81,43 @@ describe('maintenance workflow', () => {
     ).toHaveLength(0);
     expect(adapter.getActiveKnowledgeMemory(scope).map((item) => item.id)).toEqual([retained.id]);
   });
+
+  it('consolidates duplicate slot groups when enabled', async () => {
+    const scope = makeScope();
+    const older = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'The user prefers Vim',
+      fact_type: 'preference',
+      fact_subject: 'user',
+      fact_attribute: 'preference',
+      fact_value: 'vim',
+      normalized_fact: 'the user prefers vim',
+      slot_key: 'user:preference:editor',
+      source: 'manual',
+      confidence: 'medium',
+      confidence_score: 0.6,
+    });
+    const newer = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'The user prefers Neovim',
+      fact_type: 'preference',
+      fact_subject: 'user',
+      fact_attribute: 'preference',
+      fact_value: 'neovim',
+      normalized_fact: 'the user prefers neovim',
+      slot_key: 'user:preference:editor',
+      source: 'manual',
+      confidence: 'high',
+      confidence_score: 0.9,
+    });
+
+    const report = await runMaintenance(asyncAdapter, scope, {
+      consolidateKnowledge: true,
+      knowledgeStaleAfterSeconds: Number.MAX_SAFE_INTEGER,
+      maxActiveKnowledgeItems: 10,
+    });
+
+    expect(report.retiredKnowledgeIds).toContain(older.id);
+    expect(adapter.getKnowledgeMemoryById(newer.id)?.retired_at).toBeNull();
+  });
 });

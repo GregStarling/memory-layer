@@ -84,6 +84,33 @@ describe('MCP server handler', () => {
     expect(report.deletedWorkItems).toBe(0);
   });
 
+  it('supports scope overrides per tool call', async () => {
+    handler = createMcpServerHandler();
+
+    await handler.callTool('memory_learn_fact', {
+      fact: 'Thread A fact',
+      factType: 'reference',
+      scope: { tenant_id: 'acme', system_id: 'assistant', scope_id: 'thread-a' },
+    });
+    await handler.callTool('memory_learn_fact', {
+      fact: 'Thread B fact',
+      factType: 'reference',
+      scope: { tenant_id: 'acme', system_id: 'assistant', scope_id: 'thread-b' },
+    });
+
+    const resultA = await handler.callTool('memory_search', {
+      query: 'fact',
+      scope: { tenant_id: 'acme', system_id: 'assistant', scope_id: 'thread-a' },
+    });
+    const resultB = await handler.callTool('memory_search', {
+      query: 'fact',
+      scope: { tenant_id: 'acme', system_id: 'assistant', scope_id: 'thread-b' },
+    });
+
+    expect(JSON.parse(resultA.content[0].text).knowledge[0].fact).toContain('Thread A');
+    expect(JSON.parse(resultB.content[0].text).knowledge[0].fact).toContain('Thread B');
+  });
+
   it('returns error for unknown tools', async () => {
     handler = createMcpServerHandler();
 

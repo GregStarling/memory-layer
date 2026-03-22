@@ -17,11 +17,13 @@ interface CompactionLogRow extends Omit<CompactionLog, 'model_call_made'> {
   model_call_made: number;
 }
 
-interface KnowledgeMemoryRow extends Omit<KnowledgeMemory, 'is_negated'> {
+interface KnowledgeMemoryRow extends Omit<KnowledgeMemory, 'is_negated' | 'source_turn_ids'> {
   is_negated: number;
+  source_turn_ids: string;
 }
 
-interface KnowledgeMemoryAuditRow extends Omit<KnowledgeMemoryAudit, 'is_negated'> {
+interface KnowledgeMemoryAuditRow
+  extends Omit<KnowledgeMemoryAudit, 'is_negated'> {
   is_negated: number;
 }
 
@@ -36,6 +38,21 @@ function parseJsonArray(json: string): string[] {
 
 export function serializeStringArray(values: string[]): string {
   return JSON.stringify(values);
+}
+
+export function serializeNumberArray(values: number[]): string {
+  return JSON.stringify(values);
+}
+
+function parseJsonNumberArray(json: string): number[] {
+  try {
+    const parsed = JSON.parse(json);
+    return Array.isArray(parsed)
+      ? parsed.filter((value) => Number.isInteger(value)).map((value) => Number(value))
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 /** Identity — exists so all row types pass through a mapper consistently. */
@@ -56,6 +73,7 @@ export function rowToKnowledgeMemory(row: KnowledgeMemoryRow): KnowledgeMemory {
   return {
     ...row,
     is_negated: row.is_negated === 1,
+    source_turn_ids: parseJsonNumberArray(row.source_turn_ids),
   };
 }
 
