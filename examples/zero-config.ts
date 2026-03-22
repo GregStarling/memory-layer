@@ -1,4 +1,4 @@
-import { createMemory } from 'memory-layer';
+import { createMemory } from 'ai-memory-layer';
 
 async function main(): Promise<void> {
   // Zero-config mode is pure-JS and ephemeral by default.

@@ -1,7 +1,7 @@
 import {
   createMemoryRuntime,
   createOpenAIMemoryManager,
-} from 'memory-layer';
+} from 'ai-memory-layer';
 
 async function main(): Promise<void> {
   const sharedWorkspace = 'repo-memory';

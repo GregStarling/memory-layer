@@ -11,7 +11,7 @@ import {
   createMemory,
   createMemoryRuntime,
   createStreamCollector,
-} from 'memory-layer';
+} from 'ai-memory-layer';
 
 const manager = createMemory({
   adapter: 'sqlite',

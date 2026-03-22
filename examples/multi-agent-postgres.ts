@@ -4,7 +4,7 @@
  * Demonstrates two agents sharing a single PostgreSQL memory store,
  * using cross-scope retrieval to access each other's knowledge.
  */
-import { createExtractiveSummarizer, createMemoryManager, createRegexExtractor } from 'memory-layer';
+import { createExtractiveSummarizer, createMemoryManager, createRegexExtractor } from 'ai-memory-layer';
 import { createPostgresAdapter } from 'memory-layer/adapters/postgres';
 
 async function main() {

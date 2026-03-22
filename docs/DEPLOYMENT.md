@@ -7,7 +7,7 @@
 Use the package directly when your application already runs in Node.js:
 
 ```ts
-import { createMemory } from 'memory-layer';
+import { createMemory } from 'ai-memory-layer';
 
 const memory = createMemory({
   adapter: 'sqlite',

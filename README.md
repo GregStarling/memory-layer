@@ -28,7 +28,7 @@ If you're building an autonomous agent, a coding assistant, or a dark-factory lo
 **memory-layer** is that entire stack as a drop-in package.
 
 ```typescript
-import { createMemory } from 'memory-layer';
+import { createMemory } from 'ai-memory-layer';
 
 const memory = createMemory();
 ```
@@ -42,13 +42,13 @@ That's a working memory system. No API keys. No infrastructure. No configuration
 ### Install
 
 ```bash
-npm install memory-layer
+npm install ai-memory-layer
 ```
 
 ### Zero-Config (in-memory, fully offline)
 
 ```typescript
-import { createMemory } from 'memory-layer';
+import { createMemory } from 'ai-memory-layer';
 
 const memory = createMemory();
 
@@ -157,7 +157,7 @@ The result is a `MemoryContext` object ready to inject into any model call.
 ### Before/After Hooks (recommended)
 
 ```typescript
-import { createMemory, createMemoryRuntime } from 'memory-layer';
+import { createMemory, createMemoryRuntime } from 'ai-memory-layer';
 
 const manager = createMemory({ adapter: 'sqlite', path: './memory.db' });
 const runtime = createMemoryRuntime(manager);
@@ -186,7 +186,7 @@ const { result } = await runtime.wrapModelCall(
 ### Claude Agent SDK
 
 ```typescript
-import { wrapClaudeAgentModel } from 'memory-layer';
+import { wrapClaudeAgentModel } from 'ai-memory-layer';
 
 const run = wrapClaudeAgentModel(runtime, ({ system, messages, tools }) =>
   client.messages.create({ model: 'claude-sonnet-4-20250514', system, messages, tools }),
@@ -199,24 +199,24 @@ const { result } = await run(userInput);
 
 ```typescript
 // OpenAI function tools
-import { createOpenAIMemoryTools } from 'memory-layer';
+import { createOpenAIMemoryTools } from 'ai-memory-layer';
 const tools = createOpenAIMemoryTools(runtime);
 
 // Vercel AI SDK
-import { wrapVercelAIModel } from 'memory-layer';
+import { wrapVercelAIModel } from 'ai-memory-layer';
 const run = wrapVercelAIModel(runtime, ({ system, messages }) =>
   generateText({ system, messages }),
 );
 
 // LangChain memory bridge
-import { createLangChainMemoryBridge } from 'memory-layer';
+import { createLangChainMemoryBridge } from 'ai-memory-layer';
 const langchainMemory = createLangChainMemoryBridge(manager);
 ```
 
 ### Middleware (message-list passthrough)
 
 ```typescript
-import { wrapWithMemory } from 'memory-layer';
+import { wrapWithMemory } from 'ai-memory-layer';
 
 const handler = wrapWithMemory(
   (messages) => callModel(messages),
@@ -228,7 +228,7 @@ const handler = wrapWithMemory(
 ### MCP Server
 
 ```typescript
-import { createMemoryMcpAdapter } from 'memory-layer';
+import { createMemoryMcpAdapter } from 'ai-memory-layer';
 
 const mcp = createMemoryMcpAdapter(runtime);
 // mcp.tools — tool definitions
@@ -605,7 +605,7 @@ const memory = createMemory({
 ### Typed Event Emitter
 
 ```typescript
-import { createMemoryEventEmitter } from 'memory-layer';
+import { createMemoryEventEmitter } from 'ai-memory-layer';
 
 const emitter = createMemoryEventEmitter();
 emitter.on('compaction', (e) => metrics.track('compaction', e.durationMs));
@@ -631,7 +631,7 @@ One memory engine, multiple access patterns:
 
 | Surface | Best For | How to Start |
 |---------|---------|-------------|
-| **Node package** | In-process agents, IDEs | `import { createMemory } from 'memory-layer'` |
+| **Node package** | In-process agents, IDEs | `import { createMemory } from 'ai-memory-layer'` |
 | **HTTP API** | Polyglot services, hosted deployments | `npx memory-layer serve --transport http` |
 | **MCP server** | Tool ecosystems that speak MCP | `npx memory-layer serve --transport mcp` |
 | **CLI** | Inspection, admin, debugging | `npx memory-layer inspect` |
@@ -663,7 +663,7 @@ const memory = createMemory(); // just works
 const memory = createMemory({ embeddingGenerator: 'local' });
 
 // Explicit provider
-import { createOpenAIEmbeddingGenerator } from 'memory-layer';
+import { createOpenAIEmbeddingGenerator } from 'ai-memory-layer';
 const memory = createMemory({
   embeddingGenerator: createOpenAIEmbeddingGenerator({ apiKey: process.env.OPENAI_API_KEY }),
 });

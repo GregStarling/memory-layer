@@ -1,4 +1,4 @@
-import { createLangChainMemoryBridge, createMemory } from 'memory-layer';
+import { createLangChainMemoryBridge, createMemory } from 'ai-memory-layer';
 
 async function main() {
   const manager = createMemory({

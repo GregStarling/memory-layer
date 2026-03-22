@@ -2,7 +2,7 @@ import {
   createMemory,
   createMemoryRuntime,
   wrapClaudeAgentModel,
-} from 'memory-layer';
+} from 'ai-memory-layer';
 
 async function main(): Promise<void> {
   const scope = {

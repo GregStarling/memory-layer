@@ -3,7 +3,7 @@ import {
   createMemoryRuntime,
   prepareVercelAIInput,
   wrapVercelAIModel,
-} from 'memory-layer';
+} from 'ai-memory-layer';
 
 async function fakeGenerateText(input: { system?: string; messages: Array<{ role: string; content: string }> }) {
   return {
