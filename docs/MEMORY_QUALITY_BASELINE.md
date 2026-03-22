@@ -2,7 +2,7 @@
 
 This document records the current release-quality baseline used by the enforced delta report in `evals/memory-quality/baseline.json`.
 
-It is no longer a historical Phase 0 failure snapshot. It is the known-good anchor that future releases must not regress from.
+It is the known-good anchor that future releases must not regress from.
 
 ## Baseline Run
 
@@ -48,14 +48,8 @@ This baseline represents the current release claim:
 - fresh-install no-provider replay still preserves the right local memory contract
 - hosted shared-memory replay still surfaces the right cross-scope knowledge
 
-Because the baseline is now a known-good release anchor, the delta gate has a stricter meaning:
+Because the baseline is a known-good release anchor, the delta gate has a stricter meaning:
 
 - green delta output means the current build has not regressed from the proven release baseline
 - baseline refreshes should only happen after a full hard-gate pass
 - any future baseline change should be treated as a deliberate quality reset, not a convenience update
-
-## Historical Note
-
-The old failing Phase 0 snapshot was valuable during diagnosis, but it no longer serves as the right regression anchor for release proof.
-
-The hard gate now depends on a passing baseline because the purpose of the delta report is to protect a proven 100/100 release state, not to compare against a broken historical system.
