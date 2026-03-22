@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import AsyncIterator, Iterator
 from typing import Any, Optional
 from urllib.parse import urlencode
 
@@ -19,6 +21,7 @@ from .models import (
     KnowledgeInspectionResponse,
     KnowledgeListResponse,
     MaintenanceResponse,
+    MemoryEvent,
     MemoryScope,
     MonitorResponse,
     ReadyResponse,
@@ -67,6 +70,34 @@ def _append_query_params(path: str, params: dict[str, Any]) -> str:
     if not filtered:
         return path
     return f"{path}?{urlencode(filtered)}"
+
+
+def _event_stream_path(
+    event_types: Optional[list[str]],
+    scope_level: str,
+    scope: Optional[MemoryScope],
+    default_scope: Optional[MemoryScope],
+) -> str:
+    params: dict[str, Any] = {
+        "event_types": ",".join(event_types) if event_types else None,
+        "scope_level": scope_level,
+    }
+    resolved_scope = scope or default_scope
+    if resolved_scope:
+        params.update(resolved_scope.to_dict())
+    return _append_query_params("/v1/events", params)
+
+
+def _parse_sse_payload(line: str) -> Optional[MemoryEvent]:
+    if not line.startswith("data:"):
+        return None
+    payload = line[5:].strip()
+    if not payload:
+        return None
+    parsed = json.loads(payload)
+    if not isinstance(parsed, dict):
+        raise MemoryLayerError("memory-layer event stream returned a non-object payload")
+    return MemoryEvent.from_dict(parsed)
 
 
 class MemoryClient:
@@ -120,6 +151,12 @@ class MemoryClient:
 
     def close(self) -> None:
         self._client.close()
+
+    def __enter__(self) -> "MemoryClient":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.close()
 
     def store_turn(
         self,
@@ -307,6 +344,25 @@ class MemoryClient:
     def ready(self) -> ReadyResponse:
         payload = self._request("GET", "/readyz")
         return ReadyResponse.from_dict(payload)
+
+    def stream_events(
+        self,
+        *,
+        event_types: Optional[list[str]] = None,
+        scope_level: str = "scope",
+        scope: Optional[MemoryScope] = None,
+    ) -> Iterator[MemoryEvent]:
+        path = _event_stream_path(event_types, scope_level, scope, self.default_scope)
+        headers = _scope_headers(scope, self.default_scope) or None
+        with self._client.stream("GET", path, headers=headers) as response:
+            if response.is_error:
+                raise MemoryLayerError(
+                    f"memory-layer API error {response.status_code}: {response.text}"
+                )
+            for line in response.iter_lines():
+                event = _parse_sse_payload(line)
+                if event is not None:
+                    yield event
 
     def poll_changes(
         self,
@@ -509,6 +565,12 @@ class AsyncMemoryClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def __aenter__(self) -> "AsyncMemoryClient":
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        await self.aclose()
+
     async def store_turn(
         self,
         role: str,
@@ -695,6 +757,25 @@ class AsyncMemoryClient:
     async def ready(self) -> ReadyResponse:
         payload = await self._request("GET", "/readyz")
         return ReadyResponse.from_dict(payload)
+
+    async def astream_events(
+        self,
+        *,
+        event_types: Optional[list[str]] = None,
+        scope_level: str = "scope",
+        scope: Optional[MemoryScope] = None,
+    ) -> AsyncIterator[MemoryEvent]:
+        path = _event_stream_path(event_types, scope_level, scope, self.default_scope)
+        headers = _scope_headers(scope, self.default_scope) or None
+        async with self._client.stream("GET", path, headers=headers) as response:
+            if response.is_error:
+                raise MemoryLayerError(
+                    f"memory-layer API error {response.status_code}: {response.text}"
+                )
+            async for line in response.aiter_lines():
+                event = _parse_sse_payload(line)
+                if event is not None:
+                    yield event
 
     async def poll_changes(
         self,

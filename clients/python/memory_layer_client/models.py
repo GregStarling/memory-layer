@@ -65,6 +65,25 @@ class StoredExchange:
 
 
 @dataclass(slots=True)
+class MemoryEvent:
+    type: str
+    scope: dict[str, Any]
+    timestamp: int
+    duration_ms: int
+    meta: dict[str, Any]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "MemoryEvent":
+        return cls(
+            type=str(payload["type"]),
+            scope=dict(payload.get("scope", {})),
+            timestamp=int(payload["timestamp"]),
+            duration_ms=int(payload.get("durationMs", 0)),
+            meta=dict(payload.get("meta", {})),
+        )
+
+
+@dataclass(slots=True)
 class ContextResponse:
     current_objective: Optional[str]
     active_turn_count: int
@@ -272,3 +291,18 @@ class ReadyResponse:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ReadyResponse":
         return cls(ok=bool(payload["ok"]), scopes=int(payload["scopes"]))
+
+
+@dataclass(slots=True)
+class PreparedMemoryTurn:
+    user_input: str
+    query: str
+    prompt: str
+    context: ContextResponse
+
+
+@dataclass(slots=True)
+class RuntimeTurnResult:
+    prepared: PreparedMemoryTurn
+    response_text: str
+    exchange: StoredExchange

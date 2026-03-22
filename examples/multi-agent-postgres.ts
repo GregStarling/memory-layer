@@ -4,20 +4,19 @@
  * Demonstrates two agents sharing a single PostgreSQL memory store,
  * using cross-scope retrieval to access each other's knowledge.
  */
-import { createMemoryManager } from 'memory-layer';
+import { createExtractiveSummarizer, createMemoryManager, createRegexExtractor } from 'memory-layer';
 import { createPostgresAdapter } from 'memory-layer/adapters/postgres';
-import { createExtractiveSummarizer } from 'memory-layer';
-import { createRegexExtractor } from 'memory-layer';
-
-// In production, use: import pg from 'pg';
-// const pool = new pg.Pool({ connectionString: 'postgresql://memory:memory@localhost:5432/memory_layer' });
 
 async function main() {
-  // Simulated pool interface (replace with real pg.Pool in production)
-  const pool = {} as import('memory-layer/adapters/postgres').PostgresAdapterOptions & {
-    query: (text: string, values?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>;
-    end: () => Promise<void>;
-  };
+  const connectionString = process.env.MEMORY_DATABASE_URL;
+  if (!connectionString) {
+    throw new Error(
+      'Set MEMORY_DATABASE_URL to a real Postgres connection string before running this example.',
+    );
+  }
+  const pgModule = await import('pg');
+  const Pool = pgModule.Pool ?? pgModule.default?.Pool;
+  const pool = new Pool({ connectionString });
 
   const adapter = createPostgresAdapter(pool);
 
@@ -68,6 +67,7 @@ async function main() {
 
   await researcher.close();
   await builder.close();
+  await pool.end();
 }
 
 main().catch(console.error);

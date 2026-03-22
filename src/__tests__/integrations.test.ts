@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createSQLiteAdapter } from '../adapters/sqlite/index.js';
 import { createMemoryManager } from '../core/manager.js';
 import { createMemoryRuntime } from '../core/runtime.js';
+import { prepareClaudeAgentInput, wrapClaudeAgentModel } from '../integrations/claude-agent.js';
 import { createClaudeMemoryTools } from '../integrations/claude-tools.js';
 import { createLangChainMemoryBridge } from '../integrations/langchain.js';
 import { createMemoryMcpAdapter } from '../integrations/mcp.js';
@@ -67,6 +68,35 @@ describe('protocol integrations', () => {
       assistantOutput: 'hi',
     });
     expect(result).toHaveProperty('exchange');
+    await manager.close();
+  });
+
+  it('wraps Claude-style model calls with prompt preparation and persistence', async () => {
+    const manager = createMemoryManager({
+      adapter,
+      scope: makeScope(),
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      autoCompact: false,
+    });
+    const runtime = createMemoryRuntime(manager);
+    const prepared = await prepareClaudeAgentInput(runtime, 'Remember deployment constraints');
+
+    expect(prepared.tools.some((tool) => tool.name === 'memory_prepare_call')).toBe(true);
+    expect(prepared.messages.at(-1)?.content).toBe('Remember deployment constraints');
+
+    const wrapped = wrapClaudeAgentModel(runtime, async () => ({
+      text: 'I will keep the deployment constraints in memory.',
+    }));
+    const result = await wrapped('Remember deployment constraints');
+
+    expect(result.responseText).toContain('deployment constraints');
+    const context = await manager.getContext('deployment constraints');
+    expect(context.activeTurns.some((turn) => turn.content.includes('deployment constraints'))).toBe(true);
     await manager.close();
   });
 

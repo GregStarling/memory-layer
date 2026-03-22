@@ -37,3 +37,25 @@ async def test_async_client_supports_inspection_and_health(httpx_mock) -> None:
     assert listing.items[0]["id"] == 9
     assert due.due[0]["fact"] == "rollback"
     assert live.ok is True
+
+
+@pytest.mark.asyncio
+async def test_async_client_can_stream_events(httpx_mock) -> None:
+    scope = _scope()
+    httpx_mock.add_response(
+        method="GET",
+        url="http://test/v1/events?event_types=knowledge_change&scope_level=workspace&tenant_id=acme&system_id=executor&scope_id=run-b&workspace_id=factory&collaboration_id=release-42",
+        text='data: {"type":"knowledge_change","scope":{"tenant_id":"acme"},"timestamp":1,"durationMs":0,"meta":{"action":"promote"}}\n\n',
+        headers={"content-type": "text/event-stream"},
+    )
+
+    async with AsyncMemoryClient("http://test", default_scope=scope) as client:
+        events = []
+        async for event in client.astream_events(
+            event_types=["knowledge_change"],
+            scope_level="workspace",
+        ):
+            events.append(event)
+
+    assert events[0].type == "knowledge_change"
+    assert events[0].meta["action"] == "promote"

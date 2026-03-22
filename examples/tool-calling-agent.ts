@@ -1,12 +1,13 @@
 import {
+  createMemory,
   createMemoryRuntime,
-  createOpenAIMemoryManager,
   createOpenAIMemoryTools,
 } from 'memory-layer';
 
 async function main(): Promise<void> {
-  const manager = createOpenAIMemoryManager({
-    dbPath: './data/tool-agent.db',
+  const manager = createMemory({
+    adapter: 'sqlite',
+    path: './data/tool-agent.db',
     scope: {
       tenant_id: 'acme',
       system_id: 'tool-agent',
@@ -26,7 +27,7 @@ async function main(): Promise<void> {
     }),
   );
 
-  manager.close();
+  await manager.close();
 }
 
 void main();

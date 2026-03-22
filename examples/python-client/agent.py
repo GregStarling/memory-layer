@@ -11,9 +11,19 @@ Then run this agent:
 import sys
 sys.path.insert(0, "../../clients/python")
 
-from memory_layer_client import MemoryClient
+from memory_layer_client import MemoryClient, MemoryRuntimeClient, MemoryScope
 
-client = MemoryClient("http://localhost:3100")
+client = MemoryClient(
+    "http://localhost:3100",
+    default_scope=MemoryScope(
+        tenant_id="acme",
+        system_id="python-agent",
+        workspace_id="factory",
+        collaboration_id="release-42",
+        scope_id="run-42",
+    ),
+)
+runtime = MemoryRuntimeClient(client)
 
 
 def agent_loop():
@@ -21,16 +31,19 @@ def agent_loop():
     client.learn_fact("User prefers Python over JavaScript", "preference")
     client.learn_fact("Project uses FastAPI framework", "reference")
 
-    # Simulate a conversation
-    exchanges = [
-        ("What framework should we use?", "Based on your preferences, I recommend FastAPI."),
-        ("Set up the project structure", "I'll create a standard FastAPI layout with routers."),
-        ("Add authentication", "I'll implement JWT-based auth with FastAPI security."),
+    turns = [
+        "What framework should we use?",
+        "Set up the project structure",
+        "Add authentication",
     ]
 
-    for user_msg, assistant_msg in exchanges:
-        result = client.store_exchange(user_msg, assistant_msg)
-        print(f"Stored exchange: {result}")
+    for user_msg in turns:
+        result = runtime.run_turn(
+            user_msg,
+            lambda prepared: f"Using memory for: {prepared.context.current_objective or 'agent work'}",
+        )
+        print(f"Prepared prompt:\n{result.prepared.prompt}\n")
+        print(f"Stored exchange: {result.exchange}")
 
     # Search for relevant knowledge
     results = client.search("framework")

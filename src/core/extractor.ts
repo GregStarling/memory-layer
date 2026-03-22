@@ -392,6 +392,87 @@ function extractDomainFrequencyFacts(
   return facts;
 }
 
+function extractHeuristicFacts(source: string, domainGroups: DomainGroups): ExtractedFact[] {
+  const patterns: Array<{
+    pattern: RegExp;
+    build: (match: RegExpMatchArray) => ExtractedFact | null;
+  }> = [
+    {
+      pattern:
+        /\b(?:the system|the project|the workspace|we)\s+(?:relies on|depends on|is backed by|is powered by|integrates with)\s+([^.?!;]+)/gi,
+      build: (match) => {
+        const value = normalizeFactValue(match[1]);
+        if (!value) return null;
+        return {
+          fact: `The system uses ${value}`,
+          factType: 'reference',
+          confidence: 'high',
+          sourceText: match[0],
+          domainGroups,
+        };
+      },
+    },
+    {
+      pattern:
+        /\b(?:we|the team|the project)\s+(?:migrated from|moved from|replaced)\s+([a-z0-9_.-]+)\s+(?:to|with)\s+([a-z0-9_.-]+)\b/gi,
+      build: (match) => {
+        const fromValue = normalizeFactValue(match[1]);
+        const toValue = normalizeFactValue(match[2]);
+        if (!fromValue || !toValue) return null;
+        return {
+          fact: `The system prefers ${toValue} over ${fromValue}`,
+          factType: 'decision',
+          confidence: 'high',
+          sourceText: match[0],
+          domainGroups,
+        };
+      },
+    },
+    {
+      pattern:
+        /\b(?:keep|stay|remain)\s+([a-z0-9_-]+(?:\s+[a-z0-9_-]+){0,3})\b/gi,
+      build: (match) => {
+        const value = normalizeFactValue(match[1]);
+        if (!value || value.length < 4) return null;
+        return {
+          fact: `The system must remain ${value}`,
+          factType: 'constraint',
+          confidence: 'medium',
+          sourceText: match[0],
+          domainGroups,
+        };
+      },
+    },
+    {
+      pattern:
+        /\b([a-z0-9_.-]+)\s+(?:gives us|gives the system|delivers|provides)\s+(?:better|faster|safer|more reliable)\s+([^.?!;]+)/gi,
+      build: (match) => {
+        const value = normalizeFactValue(match[1]);
+        const context = normalizeFactValue(match[2]);
+        if (!value) return null;
+        return {
+          fact: `The system prefers ${value}${context ? ` for ${context}` : ''}`,
+          factType: 'preference',
+          confidence: 'medium',
+          sourceText: match[0],
+          domainGroups,
+        };
+      },
+    },
+  ];
+
+  const facts: ExtractedFact[] = [];
+  for (const { pattern, build } of patterns) {
+    for (const match of source.matchAll(pattern)) {
+      const fact = build(match);
+      if (fact) {
+        facts.push(fact);
+      }
+    }
+  }
+  return facts;
+}
+
 export function createCompositeExtractor(primary: Extractor, fallback: Extractor): Extractor {
   return async (summary, keyEntities, topicTags) => {
     const [primaryFacts, fallbackFacts] = await Promise.all([
@@ -459,11 +540,27 @@ export function createEnhancedRegexExtractor(options?: { domainGroups?: DomainGr
     const baseFacts = await baseExtractor(summary, keyEntities, topicTags);
     const combined = [summary, ...topicTags].join(' ').replace(/\n+/g, ' ');
     const enhancedFacts = [
+      ...extractHeuristicFacts(combined, mergedDomainGroups),
       ...extractImplicitPreferenceFacts(combined, mergedDomainGroups),
       ...extractDomainFrequencyFacts(combined, mergedDomainGroups),
     ];
 
     return uniqFacts([...baseFacts, ...enhancedFacts]).map((fact) => ({
+      ...fact,
+      domainGroups: fact.domainGroups ?? mergedDomainGroups,
+    }));
+  };
+}
+
+export function createHeuristicExtractor(options?: { domainGroups?: DomainGroups }): Extractor {
+  const mergedDomainGroups = mergeDomainGroups(options?.domainGroups);
+  return async (summary, keyEntities, topicTags) => {
+    const combined = [summary, ...topicTags, ...keyEntities].join(' ').replace(/\n+/g, ' ');
+    return uniqFacts([
+      ...extractHeuristicFacts(combined, mergedDomainGroups),
+      ...extractImplicitPreferenceFacts(combined, mergedDomainGroups),
+      ...extractDomainFrequencyFacts(combined, mergedDomainGroups),
+    ]).map((fact) => ({
       ...fact,
       domainGroups: fact.domainGroups ?? mergedDomainGroups,
     }));

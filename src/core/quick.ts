@@ -9,12 +9,17 @@ import type {
 } from '../contracts/policy.js';
 import type { StorageAdapter } from '../contracts/storage.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
-import { createInMemoryAdapter } from '../adapters/memory/index.js';
+import { createInMemoryAdapter, createInMemoryAdapterWithEmbeddings } from '../adapters/memory/index.js';
 import { createSQLiteAdapter, createSQLiteAdapterWithEmbeddings } from '../adapters/sqlite/index.js';
 import { createLocalEmbeddingGenerator } from '../embeddings/local.js';
 import { createOpenAIEmbeddingGenerator } from '../embeddings/openai.js';
 import { createVoyageEmbeddingGenerator } from '../embeddings/voyage.js';
-import { createRegexExtractor, type Extractor } from './extractor.js';
+import {
+  createCompositeExtractor,
+  createHeuristicExtractor,
+  createRegexExtractor,
+  type Extractor,
+} from './extractor.js';
 import {
   createMemoryManager,
   type MemoryManager,
@@ -28,10 +33,11 @@ import { createExtractiveSummarizer } from '../summarizers/extractive.js';
 import { createOpenAISummarizer } from '../summarizers/openai.js';
 import { createClaudeExtractor, createOpenAIExtractor } from '../summarizers/extractor.js';
 import type { Summarizer } from './orchestrator.js';
+import { emitMemoryEvent } from './telemetry.js';
 
 type QuickAdapterOption = 'sqlite' | 'memory' | StorageAdapter;
 type QuickSummarizerOption = 'claude' | 'openai' | 'extractive' | Summarizer;
-type QuickExtractorOption = 'claude' | 'openai' | 'regex' | Extractor | false;
+type QuickExtractorOption = 'claude' | 'openai' | 'regex' | 'heuristic' | Extractor | false;
 type QuickEmbeddingOption = 'local' | EmbeddingGenerator | false;
 export type MemoryQualityTier = 'offline_default' | 'local_semantic' | 'provider_backed';
 export type MemoryQualityMode =
@@ -197,6 +203,10 @@ function resolveAdapter(
   onEvent?: EventHook,
   qualityTier?: MemoryQualityTier,
 ): { adapter: StorageAdapter; embeddingAdapter?: EmbeddingAdapter } {
+  if (!adapter && path === ':memory:') {
+    const memory = createInMemoryAdapterWithEmbeddings({ logger, onEvent });
+    return { adapter: memory, embeddingAdapter: memory.embeddings };
+  }
   if (!adapter || adapter === 'sqlite') {
     if (
       !qualityTier ||
@@ -211,7 +221,8 @@ function resolveAdapter(
     return { adapter: createSQLiteAdapter(path, { logger, onEvent }) };
   }
   if (adapter === 'memory') {
-    return { adapter: createInMemoryAdapter({ logger, onEvent }) };
+    const memory = createInMemoryAdapterWithEmbeddings({ logger, onEvent });
+    return { adapter: memory, embeddingAdapter: memory.embeddings };
   }
   return { adapter };
 }
@@ -239,7 +250,13 @@ function resolveExtractor(
   if (extractor === false) {
     return undefined;
   }
-  if (!extractor || extractor === 'regex') {
+  if (!extractor) {
+    return createCompositeExtractor(createHeuristicExtractor(), createRegexExtractor());
+  }
+  if (extractor === 'heuristic') {
+    return createHeuristicExtractor();
+  }
+  if (extractor === 'regex') {
     return createRegexExtractor();
   }
   if (extractor === 'claude') {
@@ -277,6 +294,65 @@ function resolveEmbeddingGenerator(
   return undefined;
 }
 
+function resolveCapabilityProfile(input: {
+  options: CreateMemoryOptions & { asyncAdapter?: AsyncStorageAdapter };
+  resolvedAdapter: { adapter?: StorageAdapter; embeddingAdapter?: EmbeddingAdapter };
+  scope: MemoryScope;
+  extractor: Extractor | undefined;
+  embeddingGenerator: EmbeddingGenerator | undefined;
+}): Record<string, unknown> {
+  const storageKind = input.options.asyncAdapter
+    ? 'async_custom'
+    : !input.options.adapter && (input.options.path ?? ':memory:') === ':memory:'
+      ? 'memory'
+      : input.options.adapter === 'memory'
+        ? 'memory'
+        : input.options.adapter === 'sqlite' || input.options.path
+          ? 'sqlite'
+          : 'custom';
+  const extractorTier =
+    input.options.extractor === false
+      ? 'disabled'
+      : input.options.extractor === 'claude' || input.options.extractor === 'openai'
+        ? 'provider'
+        : input.options.extractor === 'regex'
+          ? 'regex_enhanced'
+          : input.options.extractor === 'heuristic' || input.options.extractor == null
+            ? 'local_heuristic'
+            : typeof input.options.extractor === 'function'
+              ? 'custom'
+              : input.extractor
+                ? 'configured'
+                : 'disabled';
+  const embeddingTier =
+    !input.embeddingGenerator && !input.resolvedAdapter.embeddingAdapter
+      ? 'disabled'
+      : process.env.OPENAI_API_KEY || process.env.VOYAGE_API_KEY
+        ? 'provider'
+        : input.embeddingGenerator
+          ? 'local_semantic'
+          : 'storage_only';
+
+  return {
+    qualityMode: resolveQualityMode(input.options),
+    qualityTier: input.options.qualityTier ?? 'offline_default',
+    storageKind,
+    durableStorage:
+      storageKind === 'sqlite' && (input.options.path ?? ':memory:') !== ':memory:',
+    extractorTier,
+    embeddingTier,
+    semanticSearchEnabled: Boolean(input.embeddingGenerator && input.resolvedAdapter.embeddingAdapter),
+    providerBacked:
+      input.options.summarizer === 'claude' ||
+      input.options.summarizer === 'openai' ||
+      input.options.extractor === 'claude' ||
+      input.options.extractor === 'openai' ||
+      embeddingTier === 'provider',
+    localFallbackActive: extractorTier !== 'provider' || embeddingTier !== 'provider',
+    nativeAddonRequiredAtBootstrap: storageKind === 'sqlite',
+  };
+}
+
 export function createMemory(options: CreateMemoryOptions = {}): MemoryManager {
   return createMemoryInternal(options);
 }
@@ -309,8 +385,7 @@ function createMemoryInternal(
     embeddingAdapter,
     options.qualityTier ?? 'offline_default',
   );
-
-  return createMemoryManager({
+  const manager = createMemoryManager({
     ...(options.asyncAdapter
       ? { asyncAdapter: options.asyncAdapter }
       : { adapter: resolvedAdapter.adapter }),
@@ -350,4 +425,20 @@ function createMemoryInternal(
     failurePolicy: options.failurePolicy,
     tokenEstimator: options.tokenEstimator,
   });
+
+  emitMemoryEvent(
+    'capability',
+    scope,
+    { logger: options.logger, onEvent: options.onEvent },
+    0,
+    resolveCapabilityProfile({
+      options,
+      resolvedAdapter,
+      scope,
+      extractor,
+      embeddingGenerator,
+    }),
+  );
+
+  return manager;
 }

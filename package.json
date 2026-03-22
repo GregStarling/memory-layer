@@ -73,6 +73,10 @@
       "import": "./dist/integrations/langchain.js",
       "types": "./dist/integrations/langchain.d.ts"
     },
+    "./integrations/claude-agent": {
+      "import": "./dist/integrations/claude-agent.js",
+      "types": "./dist/integrations/claude-agent.d.ts"
+    },
     "./integrations/vercel-ai": {
       "import": "./dist/integrations/vercel-ai.js",
       "types": "./dist/integrations/vercel-ai.d.ts"
@@ -103,10 +107,6 @@
     "pack:check": "npm pack --dry-run",
     "release:check": "npm run lint && npm run test:coverage && npm run eval:retrieval:enforce && npm run eval:gate && npm run eval:memory-quality:enforce && npm run eval:memory-quality:delta:enforce && npm run python:check && npm run eval:platform-quality:enforce && npm run pack:check",
     "prepublishOnly": "npm run release:check"
-  },
-  "dependencies": {
-    "better-sqlite3": "^11.0.0",
-    "pg": "^8.20.0"
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": "*",
@@ -149,5 +149,9 @@
     "retrieval",
     "rag",
     "agent"
-  ]
+  ],
+  "optionalDependencies": {
+    "better-sqlite3": "^11.10.0",
+    "pg": "^8.20.0"
+  }
 }

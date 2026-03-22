@@ -13,15 +13,19 @@ from .models import (
     KnowledgeInspectionResponse,
     KnowledgeListResponse,
     MaintenanceResponse,
+    MemoryEvent,
     MemoryScope,
     MonitorResponse,
+    PreparedMemoryTurn,
     ReadyResponse,
     ReverificationResponse,
+    RuntimeTurnResult,
     SearchResponse,
     StoredExchange,
     StoredTurn,
     TrustAssessmentResponse,
 )
+from .runtime import AsyncMemoryRuntimeClient, MemoryRuntimeClient, format_prompt
 
 __all__ = [
     "AsyncMemoryClient",
@@ -36,15 +40,21 @@ __all__ = [
     "KnowledgeInspectionResponse",
     "KnowledgeListResponse",
     "MaintenanceResponse",
+    "MemoryEvent",
     "MemoryClient",
     "MemoryLayerError",
     "MemoryScope",
+    "MemoryRuntimeClient",
     "MonitorResponse",
+    "PreparedMemoryTurn",
     "ReadyResponse",
     "ReverificationResponse",
+    "RuntimeTurnResult",
     "SearchResponse",
     "StoredExchange",
     "StoredTurn",
     "TrustAssessmentResponse",
+    "AsyncMemoryRuntimeClient",
+    "format_prompt",
 ]
 __version__ = "2.0.0"

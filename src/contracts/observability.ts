@@ -15,6 +15,7 @@ export const noopLogger: Logger = {
 };
 
 export type MemoryEventType =
+  | 'capability'
   | 'compaction'
   | 'promotion'
   | 'extraction'

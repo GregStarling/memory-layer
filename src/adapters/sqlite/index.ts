@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
+import { createRequire } from 'module';
 
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
 
 import type { EmbeddingAdapter } from '../../contracts/embedding.js';
 import { normalizeScope, scopeValues, type ScopeLevel } from '../../contracts/identity.js';
@@ -71,6 +72,20 @@ import { createSQLiteSchema } from './schema.js';
 
 const SCOPE_WHERE =
   'tenant_id = ? AND system_id = ? AND workspace_id = ? AND collaboration_id = ? AND scope_id = ?';
+const require = createRequire(import.meta.url);
+
+type BetterSqliteConstructor = typeof import('better-sqlite3');
+
+function loadBetterSqlite3(): BetterSqliteConstructor {
+  try {
+    return require('better-sqlite3') as BetterSqliteConstructor;
+  } catch (error) {
+    throw new Error(
+      'memory-layer: SQLite support requires the optional "better-sqlite3" package. Install it with: npm install better-sqlite3',
+      { cause: error },
+    );
+  }
+}
 
 function scopeWhereForLevel(scope: Parameters<typeof normalizeScope>[0], level: ScopeLevel): string {
   const normalized = normalizeScope(scope);
@@ -207,7 +222,8 @@ function openSQLiteDatabase(dbPath: string | ':memory:'): Database.Database {
     }
   }
 
-  const db = new Database(dbPath);
+  const BetterSqlite3 = loadBetterSqlite3();
+  const db = new BetterSqlite3(dbPath);
   createSQLiteSchema(db);
   return db;
 }

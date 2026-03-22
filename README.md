@@ -18,15 +18,25 @@ User Input ──> Turn Storage ──> Compaction ──> Working Memory
 npm install memory-layer
 ```
 
-Optionally install a provider SDK for AI-backed summarization and extraction:
+Optional add-ons:
 
 ```bash
+npm install better-sqlite3        # durable local SQLite storage
+npm install pg                    # hosted Postgres deployments
 npm install @anthropic-ai/sdk   # Claude summarizer + extractor
 # or
 npm install openai              # OpenAI summarizer + extractor
 ```
 
-Without a provider SDK, `memory-layer` uses a zero-dependency extractive summarizer, regex-based extractor, and a local lexical-plus embedding fallback. No API keys required, but this local path should be treated as an honest fallback contract rather than the gold-standard semantic path.
+Without a provider SDK, `memory-layer` uses a pure-JS in-memory default path with an extractive summarizer, regex-based extractor, and a local lexical-plus embedding fallback. No API keys or native build tooling are required for the zero-config path, but this local mode should still be treated as an honest fallback contract rather than the gold-standard semantic path.
+
+Local quality tiers:
+
+- Fallback local: regex extraction plus lexical retrieval only.
+- Strong local: heuristic extraction plus local semantic embeddings, still fully offline.
+- Provider-backed: external summarization/extraction and strongest semantic path.
+
+If you pass `onEvent`, `createMemory()` emits a `capability` event at startup so you can see which tier the current runtime actually resolved to.
 
 ## Quick Start
 
@@ -43,7 +53,7 @@ await memory.processExchange(
 const context = await memory.getContext('local-first');
 ```
 
-This path is intentionally low-friction and now defaults to the safer `balanced_memory` posture for local adoption. In local/no-provider mode, semantic retrieval is a lightweight lexical-plus fallback built from local hashed features. It is good enough for zero-config adoption, but it is not the highest-fidelity retrieval path.
+This path is intentionally low-friction and now defaults to a pure-JS, ephemeral in-memory store plus the safer `balanced_memory` posture for local adoption. In local/no-provider mode, semantic retrieval is a lightweight lexical-plus fallback built from local hashed features. It is good enough for zero-config adoption, but it is not the highest-fidelity retrieval path.
 
 ### Persistent SQLite
 
@@ -54,6 +64,8 @@ const memory = createMemory({
   scope: 'my-agent',
 });
 ```
+
+Use this when you want durable local memory. It requires the optional `better-sqlite3` package.
 
 ### Recommended Gold Path (provider-backed)
 
@@ -357,7 +369,18 @@ const claudeTools = createClaudeMemoryTools(runtime);
 const openaiTools = createOpenAIMemoryTools(runtime);
 ```
 
-### Pattern 7: Vercel AI Wrapper
+### Pattern 7: Claude-Style Agent Wrapper
+
+```typescript
+import { wrapClaudeAgentModel } from 'memory-layer';
+
+const runClaudeTurn = wrapClaudeAgentModel(runtime, ({ system, messages, tools }) =>
+  client.messages.create({ model: 'claude-sonnet-4.5', system, messages, tools })
+);
+const result = await runClaudeTurn(userInput);
+```
+
+### Pattern 8: Vercel AI Wrapper
 
 ```typescript
 import { wrapVercelAIModel } from 'memory-layer';
@@ -368,7 +391,7 @@ const runWithMemory = wrapVercelAIModel(runtime, ({ system, messages }) =>
 const result = await runWithMemory(userInput);
 ```
 
-### Pattern 8: LangChain Bridge
+### Pattern 9: LangChain Bridge
 
 ```typescript
 import { createLangChainMemoryBridge } from 'memory-layer';
@@ -541,12 +564,13 @@ docker run --rm -p 3100:3100 -v "$(pwd)/data:/data" memory-layer
 | `examples/zero-config.ts` | Direct manager | Extractive |
 | `examples/chat-assistant.ts` | Runtime hooks | Claude |
 | `examples/ai-ide.ts` | Runtime + work items | OpenAI |
-| `examples/autonomous-agent.ts` | wrapModelCall | Claude |
-| `examples/tool-calling-agent.ts` | Tool schemas | OpenAI |
+| `examples/autonomous-agent.ts` | Claude-style wrapper | Generic |
+| `examples/tool-calling-agent.ts` | Tool schemas | Generic |
 | `examples/mcp-server.ts` | MCP adapter | Claude |
 | `examples/hosted-service.ts` | Standalone HTTP service | None |
 | `examples/vercel-ai.ts` | Vercel AI wrapper | Generic |
 | `examples/langchain.ts` | LangChain bridge | Generic |
+| `examples/multi-agent-postgres.ts` | Shared Postgres memory | Postgres |
 
 ## Notes
 

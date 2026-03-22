@@ -19,6 +19,8 @@ const memory = createMemory({
 
 This is the lowest-friction option for AI IDEs, copilots, and single-service agents.
 
+The zero-config quick path is pure-JS and ephemeral. For durable local storage, install the optional `better-sqlite3` package and pass `adapter: 'sqlite'` with a file path.
+
 ## Standalone HTTP Service
 
 Run the built-in server when multiple processes need shared memory:
@@ -70,6 +72,8 @@ The server reads and writes on stdio, so it fits directly into MCP-compatible ru
 ## Production Notes
 
 - Use a file-backed SQLite database or Postgres for durable deployments.
+- Install `better-sqlite3` only when you want the durable SQLite path.
+- Install `pg` only when you want the hosted Postgres path.
 - Treat SQLite as the lowest-friction embedded path. Its semantic retrieval is an in-process scan over local embeddings, which is appropriate for local and moderate-sized workloads but not the strongest scaling path.
 - Treat SQLite HTTP/MCP deployments as a single-process service contract. It is the right fit when one runtime owns writes and other components talk to that one service.
 - Use Postgres when multiple processes, workers, or hosted instances need to write shared memory concurrently. That is the operationally safe multi-writer path.

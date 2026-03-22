@@ -42,6 +42,7 @@ import {
   validateNewWorkingMemory,
   validateTimeRange,
 } from '../../core/validation.js';
+import { createInMemoryEmbeddingAdapter } from './embeddings.js';
 
 const SCHEMA_VERSION = 1;
 
@@ -784,4 +785,12 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
 
     close() {},
   };
+}
+
+export function createInMemoryAdapterWithEmbeddings(
+  telemetry?: TelemetryOptions,
+): StorageAdapter & { embeddings: import('../../contracts/embedding.js').EmbeddingAdapter } {
+  const adapter = createInMemoryAdapter(telemetry);
+  const embeddings = createInMemoryEmbeddingAdapter(adapter);
+  return Object.assign(adapter, { embeddings });
 }

@@ -1,6 +1,8 @@
 import { createMemory } from 'memory-layer';
 
 async function main(): Promise<void> {
+  // Zero-config mode is pure-JS and ephemeral by default.
+  // Use { adapter: 'sqlite', path: './data/memory.db' } for durable local storage.
   const memory = createMemory();
 
   await memory.processExchange(

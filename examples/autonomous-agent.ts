@@ -1,6 +1,7 @@
 import {
-  createClaudeMemoryManager,
+  createMemory,
   createMemoryRuntime,
+  wrapClaudeAgentModel,
 } from 'memory-layer';
 
 async function main(): Promise<void> {
@@ -11,8 +12,9 @@ async function main(): Promise<void> {
     scope_id: 'run-2026-03-21',
   };
 
-  const manager = createClaudeMemoryManager({
-    dbPath: './data/autonomous-agent.db',
+  const manager = createMemory({
+    adapter: 'sqlite',
+    path: './data/autonomous-agent.db',
     scope,
     preset: 'autonomous_agent',
   });
@@ -26,17 +28,21 @@ async function main(): Promise<void> {
     ],
   });
 
-  const wrapped = await runtime.wrapModelCall(async (payload) => {
-    console.log(payload.prompt);
-    return 'Logged. I will prefer local, auditable deployment plans.';
-  }, 'The agent must keep deployments local and auditable.');
+  const runAgentTurn = wrapClaudeAgentModel(runtime, async (prepared) => {
+    console.log(prepared.system);
+    console.log(prepared.tools.map((tool) => tool.name));
+    return {
+      text: 'Logged. I will prefer local, auditable deployment plans.',
+    };
+  });
+  const wrapped = await runAgentTurn('The agent must keep deployments local and auditable.');
 
   const search = await manager.search('local auditable');
   console.log(search.knowledge);
   console.log(wrapped.trackedWorkItems);
   console.log(manager.recall({ start_at: 0 }));
 
-  manager.close();
+  await manager.close();
 }
 
 void main();

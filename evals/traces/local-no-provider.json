@@ -1,0 +1,38 @@
+{
+  "name": "fresh_install_local_replay",
+  "query": "local-first TypeScript rollback checklist Postgres",
+  "expectedFacts": [
+    "local-first",
+    "typescript",
+    "postgres"
+  ],
+  "disallowedFacts": [
+    "docker-first"
+  ],
+  "turns": [
+    {
+      "user": "We are trying to keep this rollout local-first while we stabilize the agent runtime.",
+      "assistant": "Understood. I will keep the rollout local-first."
+    },
+    {
+      "user": "The branch is noisy and the logs are messy, but the core rule is still TypeScript over ad-hoc JavaScript edits.",
+      "assistant": "Stored. I will prefer TypeScript for implementation work."
+    },
+    {
+      "user": "One random note: the dashboard is green right now, but that is cosmetic.",
+      "assistant": "Acknowledged. I will not treat the green theme as critical memory."
+    },
+    {
+      "user": "If we need hosted shared memory later, use Postgres for that path instead of sqlite.",
+      "assistant": "Stored. Hosted shared memory should use Postgres."
+    },
+    {
+      "user": "Earlier we talked about Docker-first deployment, but that was wrong. Avoid Docker-first unless there is no alternative.",
+      "assistant": "Understood. I will avoid Docker-first deployment paths."
+    },
+    {
+      "user": "The rollback checklist matters more than the cosmetic theme. Keep the rollback checklist in reach during deploy work.",
+      "assistant": "Stored. I will keep the rollback checklist available during deploy work."
+    }
+  ]
+}

@@ -75,6 +75,21 @@ components:
       properties:
         error:
           type: string
+    MemoryEvent:
+      type: object
+      required: [type, scope, timestamp, durationMs, meta]
+      properties:
+        type:
+          type: string
+        scope:
+          $ref: '#/components/schemas/Scope'
+        timestamp:
+          type: integer
+        durationMs:
+          type: integer
+        meta:
+          type: object
+          additionalProperties: true
     Scope:
       type: object
       required: [tenant_id, system_id, scope_id]
@@ -822,3 +837,7 @@ paths:
             text/event-stream:
               schema:
                 type: string
+              examples:
+                knowledgeChange:
+                  value: |
+                    data: {"type":"knowledge_change","scope":{"tenant_id":"acme","system_id":"agent","scope_id":"run-42"},"timestamp":1710000000000,"durationMs":0,"meta":{"action":"promote"}}

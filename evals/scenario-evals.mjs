@@ -1,10 +1,16 @@
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import {
   createClaudeMemoryManager,
+  createMemory,
   createMemoryMcpAdapter,
   createMemoryRuntime,
 } from '../dist/index.js';
 
 const enforce = process.argv.includes('--enforce');
+const evalsDir = path.dirname(fileURLToPath(import.meta.url));
 
 function assertResult(name, passed, detail) {
   return { name, passed, detail };
@@ -78,6 +84,68 @@ async function runHundredTurnSession({
     };
   } finally {
     await manager.close();
+  }
+}
+
+async function loadReplayTrace(name) {
+  const raw = await readFile(path.join(evalsDir, 'traces', name), 'utf8');
+  return JSON.parse(raw);
+}
+
+async function runLocalReplayTrace() {
+  const trace = await loadReplayTrace('local-no-provider.json');
+  const events = [];
+  const openAiApiKey = process.env.OPENAI_API_KEY;
+  const voyageApiKey = process.env.VOYAGE_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.VOYAGE_API_KEY;
+
+  const memory = createMemory({
+    preset: 'autonomous_agent',
+    policies: {
+      monitor: {
+        floorTurns: 1,
+        floorTokens: 1,
+        softTurnThreshold: 2,
+        hardTurnThreshold: 4,
+        softTokenThreshold: 10,
+        hardTokenThreshold: 20,
+      },
+    },
+    onEvent: (event) => events.push(event),
+  });
+
+  try {
+    for (const turn of trace.turns) {
+      await memory.processExchange(turn.user, turn.assistant);
+    }
+    await memory.forceCompact();
+    const context = await memory.getContext(trace.query);
+    const facts = [
+      ...context.trustedCoreMemory.map((item) => item.fact),
+      ...context.taskRelevantKnowledge.map((item) => item.fact),
+      ...context.provisionalKnowledge.map((item) => item.fact),
+    ];
+    const normalizedFacts = facts.map((fact) => fact.toLowerCase());
+    const capability = events.find((event) => event.type === 'capability');
+    return assertResult(
+      trace.name,
+      trace.expectedFacts.every((fact) =>
+        normalizedFacts.some((item) => item.includes(String(fact).toLowerCase())),
+      ) &&
+        trace.disallowedFacts.every(
+          (fact) => !normalizedFacts.some((item) => item.includes(String(fact).toLowerCase())),
+        ) &&
+        capability?.meta?.providerBacked === false,
+      {
+        facts,
+        capability: capability?.meta ?? null,
+      },
+    );
+  } finally {
+    await memory.close();
+    if (openAiApiKey) process.env.OPENAI_API_KEY = openAiApiKey;
+    if (voyageApiKey) process.env.VOYAGE_API_KEY = voyageApiKey;
   }
 }
 
@@ -204,6 +272,7 @@ async function runScenarios() {
     ...autonomousLongRun.prepared.context.taskRelevantKnowledge.map((item) => item.fact),
     ...autonomousLongRun.prepared.context.provisionalKnowledge.map((item) => item.fact),
   ];
+  const localReplay = await runLocalReplayTrace();
 
   const results = [
     assertResult('zero_config_retrieval', safeRetrievalAvailable, {
@@ -260,6 +329,7 @@ async function runScenarios() {
         facts: autonomousFacts,
       },
     ),
+    localReplay,
   ];
 
   const passed = results.every((result) => result.passed);

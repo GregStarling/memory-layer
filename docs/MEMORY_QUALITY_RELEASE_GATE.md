@@ -14,7 +14,7 @@ npm run python:check
 npm run eval:platform-quality:enforce
 ```
 
-The enforced memory-quality run must pass every threshold. The enforced delta report blocks regressions versus the recorded baseline in `evals/memory-quality/baseline.json`. Refresh that baseline only after a full hard-gate pass so it remains a known-good release anchor instead of a stale historical snapshot. The Python and platform checks prove that hosted HTTP, Node CLI inspection, and Python client surfaces still work against the same running system.
+The enforced memory-quality run must pass every threshold. The enforced delta report blocks regressions versus the recorded baseline in `evals/memory-quality/baseline.json`. Refresh that baseline only after a full hard-gate pass so it remains a known-good release anchor instead of a stale historical snapshot. The Python and platform checks prove that hosted HTTP, Node CLI inspection, Python client surfaces, the fresh-install no-provider replay, and the hosted shared-memory replay all still work against the same product contract.
 
 ## Final Thresholds
 
@@ -58,6 +58,6 @@ Mode reporting is descriptive. The release gate is still the main memory-quality
 - `npm run python:check`
   Verifies the Python package can be installed in a clean virtualenv, built, linted, and tested.
 - `npm run eval:platform-quality:enforce`
-  Starts the hosted server, seeds real memory, verifies hosted inspection routes, verifies the Node inspection CLI, and verifies the Python CLI against the same live service.
+  Starts the hosted server, seeds real memory, verifies hosted inspection routes, verifies the Node inspection CLI, verifies the Python CLI against the same live service, and replays a shared-memory hosted trace across multiple scopes.
 
 The release claim is only defensible when both the engine-quality gate and the platform-quality gate are green.

@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,6 +19,11 @@ async function runCommand(command, args, cwd) {
   return { stdout: stdout.trim(), stderr: stderr.trim() };
 }
 
+async function loadHostedTrace() {
+  const raw = await readFile(path.join(repoRoot, 'evals', 'traces', 'hosted-shared-memory.json'), 'utf8');
+  return JSON.parse(raw);
+}
+
 export async function runPlatformQualityEval() {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'memory-layer-platform-'));
   const dbPath = path.join(tempDir, 'platform.db');
@@ -34,6 +39,7 @@ export async function runPlatformQualityEval() {
   let serverInstance;
 
   try {
+    const hostedTrace = await loadHostedTrace();
     serverInstance = await startHttpServer({
       port: 0,
       dbPath,
@@ -124,6 +130,28 @@ export async function runPlatformQualityEval() {
         )
       : { stdout: '', stderr: 'python client venv missing' };
 
+    for (const item of hostedTrace.facts) {
+      await fetch(`${baseUrl}/v1/facts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fact: item.fact,
+          factType: item.factType,
+          scope: item.scope,
+        }),
+      });
+    }
+
+    const searchScope = hostedTrace.searchScope;
+    const hostedCrossScope = await fetch(
+      `${baseUrl}/v1/search/cross-scope?q=${encodeURIComponent(hostedTrace.crossScopeQuery)}&scope_level=${hostedTrace.scopeLevel}&tenant_id=${searchScope.tenant_id}&system_id=${searchScope.system_id}&workspace_id=${searchScope.workspace_id}&collaboration_id=${searchScope.collaboration_id}&scope_id=${searchScope.scope_id}`,
+    );
+    const hostedCrossScopePayload = await hostedCrossScope.json();
+    const hostedChanges = await fetch(
+      `${baseUrl}/v1/changes?since=${encodeURIComponent(hostedTrace.since)}&scope_level=${hostedTrace.scopeLevel}&tenant_id=${searchScope.tenant_id}&system_id=${searchScope.system_id}&workspace_id=${searchScope.workspace_id}&collaboration_id=${searchScope.collaboration_id}&scope_id=${searchScope.scope_id}`,
+    );
+    const hostedChangesPayload = await hostedChanges.json();
+
     const checks = [
       {
         name: 'hosted_inspect_route',
@@ -147,6 +175,26 @@ export async function runPlatformQualityEval() {
         name: 'python_changes_cli',
         passed: pythonAvailable && pythonChanges.stdout.includes('rollback playbooks'),
         detail: pythonAvailable ? pythonChanges.stdout : pythonChanges.stderr,
+      },
+      {
+        name: 'hosted_shared_memory_cross_scope_replay',
+        passed:
+          hostedCrossScope.ok &&
+          Array.isArray(hostedCrossScopePayload.knowledge) &&
+          hostedCrossScopePayload.knowledge.some((item) =>
+            String(item.fact ?? '').includes(hostedTrace.expectedFact),
+          ),
+        detail: hostedCrossScopePayload,
+      },
+      {
+        name: 'hosted_shared_memory_change_replay',
+        passed:
+          hostedChanges.ok &&
+          Array.isArray(hostedChangesPayload.changes) &&
+          hostedChangesPayload.changes.some((item) =>
+            String(item.fact ?? '').includes(hostedTrace.expectedFact),
+          ),
+        detail: hostedChangesPayload,
       },
     ];
 

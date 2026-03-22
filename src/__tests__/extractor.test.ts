@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   classifyFactRelation,
   createCompositeExtractor,
+  createHeuristicExtractor,
   createEnhancedRegexExtractor,
   createRegexExtractor,
   getContradictionKey,
@@ -124,6 +125,31 @@ describe('extractors', () => {
         (fact) =>
           fact.factType === 'entity' &&
           fact.fact.toLowerCase().includes('react'),
+      ),
+    ).toBe(true);
+  });
+
+  it('extracts dependency and migration facts in heuristic mode', async () => {
+    const extractor = createHeuristicExtractor();
+    const facts = await extractor(
+      'The project relies on PostgreSQL. We migrated from Redis to Postgres. Keep local-first development.',
+      [],
+      [],
+    );
+
+    expect(
+      facts.some(
+        (fact) => fact.factType === 'reference' && fact.fact.toLowerCase().includes('postgresql'),
+      ),
+    ).toBe(true);
+    expect(
+      facts.some(
+        (fact) => fact.factType === 'decision' && fact.fact.toLowerCase().includes('postgres'),
+      ),
+    ).toBe(true);
+    expect(
+      facts.some(
+        (fact) => fact.factType === 'constraint' && fact.fact.toLowerCase().includes('local-first'),
       ),
     ).toBe(true);
   });

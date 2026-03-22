@@ -1,4 +1,30 @@
-import { createMemory } from '../../dist/index.js';
+import { createLocalEmbeddingGenerator, createMemory } from '../../dist/index.js';
+
+function cosine(a, b) {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let index = 0; index < a.length; index += 1) {
+    dot += a[index] * b[index];
+    normA += a[index] * a[index];
+    normB += b[index] * b[index];
+  }
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+async function captureCapabilityMeta(options) {
+  const events = [];
+  const memory = createMemory({
+    adapter: 'memory',
+    onEvent: (event) => events.push(event),
+    ...options,
+  });
+  try {
+    return events.find((event) => event.type === 'capability')?.meta ?? {};
+  } finally {
+    await memory.close();
+  }
+}
 
 async function buildExtractedMemory(mode, turn, summary, fact) {
   const memory = createMemory({
@@ -53,9 +79,21 @@ export async function runQualityModeReport() {
     autoCompact: false,
     autoExtract: false,
   });
-
   try {
     await highConstraint.learnFact('The system must remain local-first.', 'constraint', 'high');
+    const [providerCapability, localSemanticVectors] = await Promise.all([
+      captureCapabilityMeta({
+        summarizer: 'openai',
+        extractor: 'openai',
+        qualityTier: 'provider_backed',
+      }),
+      createLocalEmbeddingGenerator()([
+        'PostgreSQL deployment pipeline',
+        'pg deploy workflow',
+        'Tailwind color palette',
+      ]),
+    ]);
+    const [postgresVector, aliasVector, unrelatedVector] = localSemanticVectors;
     const originalNow = Date.now;
     Date.now = () => new Date('2024-06-01T00:00:00Z').valueOf();
     try {
@@ -69,6 +107,15 @@ export async function runQualityModeReport() {
 
     return {
       recommendedDefault: 'balanced_memory',
+      offlineTiers: {
+        fallbackLocalSemanticAvailable: false,
+        strongLocalAliasSimilarityBeatsNoise:
+          cosine(postgresVector, aliasVector) > cosine(postgresVector, unrelatedVector),
+        providerBackedCapability: {
+          extractorTier: providerCapability.extractorTier ?? null,
+          providerBacked: providerCapability.providerBacked ?? false,
+        },
+      },
       modes: {
         fast_adoption: {
           weaklyGroundedDecisionState: (await fastWeak.recall({ start_at: 0 })).knowledge[0]?.knowledge_state ?? null,
@@ -85,6 +132,10 @@ export async function runQualityModeReport() {
       },
     };
   } finally {
-    await Promise.all([fastWeak.close(), balancedWeak.close(), highConstraint.close()]);
+    await Promise.all([
+      fastWeak.close(),
+      balancedWeak.close(),
+      highConstraint.close(),
+    ]);
   }
 }

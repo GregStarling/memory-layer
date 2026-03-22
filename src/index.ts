@@ -34,8 +34,9 @@ export { createRegexExtractor } from './core/extractor.js';
 export { MEMORY_MANAGER_PRESETS, resolveMemoryManagerPreset } from './core/presets.js';
 
 export { createSQLiteAdapter, createSQLiteAdapterWithEmbeddings } from './adapters/sqlite/index.js';
-export { createInMemoryAdapter } from './adapters/memory/index.js';
+export { createInMemoryAdapter, createInMemoryAdapterWithEmbeddings } from './adapters/memory/index.js';
 export { createClaudeMemoryTools } from './integrations/claude-tools.js';
+export { prepareClaudeAgentInput, wrapClaudeAgentModel } from './integrations/claude-agent.js';
 export { createLangChainMemoryBridge } from './integrations/langchain.js';
 export { createMemoryMcpAdapter } from './integrations/mcp.js';
 export { wrapWithMemory } from './integrations/middleware.js';

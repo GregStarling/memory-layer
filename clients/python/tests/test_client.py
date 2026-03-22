@@ -87,3 +87,24 @@ def test_change_and_reverification_methods(httpx_mock) -> None:
     assert changes.changes[0]["fact"] == "shared memory"
     assert run.reverified_knowledge_ids == [1]
     assert single.state == "trusted"
+
+
+def test_sync_client_can_stream_events(httpx_mock) -> None:
+    scope = _scope()
+    httpx_mock.add_response(
+        method="GET",
+        url="http://test/v1/events?event_types=knowledge_change%2Ccapability&scope_level=workspace&tenant_id=acme&system_id=planner&scope_id=run-a&workspace_id=factory&collaboration_id=release-42",
+        text='data: {"type":"knowledge_change","scope":{"tenant_id":"acme"},"timestamp":1,"durationMs":0,"meta":{"action":"promote"}}\n\n',
+        headers={"content-type": "text/event-stream"},
+    )
+
+    with MemoryClient("http://test", default_scope=scope) as client:
+        events = list(
+            client.stream_events(
+                event_types=["knowledge_change", "capability"],
+                scope_level="workspace",
+            )
+        )
+
+    assert events[0].type == "knowledge_change"
+    assert events[0].meta["action"] == "promote"

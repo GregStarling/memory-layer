@@ -1,0 +1,38 @@
+{
+  "name": "hosted_shared_memory_replay",
+  "since": "2026-03-01T00:00:00Z",
+  "scopeLevel": "workspace",
+  "facts": [
+    {
+      "scope": {
+        "tenant_id": "eval",
+        "system_id": "researcher",
+        "workspace_id": "factory",
+        "collaboration_id": "release-42",
+        "scope_id": "research-run"
+      },
+      "fact": "Shared rollback checklist lives in Postgres-backed workspace memory.",
+      "factType": "decision"
+    },
+    {
+      "scope": {
+        "tenant_id": "eval",
+        "system_id": "builder",
+        "workspace_id": "factory",
+        "collaboration_id": "release-42",
+        "scope_id": "build-run"
+      },
+      "fact": "Builder is waiting on the shared rollback checklist before deploys.",
+      "factType": "constraint"
+    }
+  ],
+  "searchScope": {
+    "tenant_id": "eval",
+    "system_id": "builder",
+    "workspace_id": "factory",
+    "collaboration_id": "release-42",
+    "scope_id": "build-run"
+  },
+  "crossScopeQuery": "rollback checklist",
+  "expectedFact": "Shared rollback checklist lives in Postgres-backed workspace memory."
+}

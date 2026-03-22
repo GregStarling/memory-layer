@@ -98,4 +98,18 @@ describe('createMemory quick factory', () => {
     expect(fetch).toHaveBeenCalled();
     await memory.close();
   });
+
+  it('emits a capability report for the selected local tier', async () => {
+    const events: Array<{ type: string; meta: Record<string, unknown> }> = [];
+    const memory = createMemory({
+      onEvent: (event) => events.push(event),
+    });
+
+    const capabilityEvent = events.find((event) => event.type === 'capability');
+    expect(capabilityEvent?.meta.storageKind).toBe('memory');
+    expect(capabilityEvent?.meta.extractorTier).toBe('local_heuristic');
+    expect(capabilityEvent?.meta.embeddingTier).toBe('local_semantic');
+
+    await memory.close();
+  });
 });

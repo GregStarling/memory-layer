@@ -48,10 +48,17 @@ await manager.runMaintenance();
 
 ## Framework Adapters
 
-The repo now ships reference integrations for:
+The repo now ships tested integrations for:
 
-- Vercel AI SDK middleware-style wrapping
-- LangChain chat-history style memory bridging
-- Python HTTP client helpers for service-oriented deployments
+- Claude-adjacent agent wrapping via `wrapClaudeAgentModel()`
+- OpenAI/Claude tool-call surfaces via `createOpenAIMemoryTools()` and `createClaudeMemoryTools()`
+- Vercel AI SDK middleware-style wrapping via `wrapVercelAIModel()`
+- LangChain chat-history style bridging via `createLangChainMemoryBridge()`
 
-See `src/integrations/` and `clients/python/` for concrete examples.
+Runnable examples:
+
+- `examples/autonomous-agent.ts`: Claude-style lifecycle wrapping without requiring a provider SDK just to understand the flow
+- `examples/tool-calling-agent.ts`: OpenAI-compatible tool surface
+- `examples/langchain.ts`: LangChain memory variable bridge
+- `examples/multi-agent-postgres.ts`: real Postgres-backed shared memory using `MEMORY_DATABASE_URL`
+- `clients/python/`: hosted Python client helpers for service-oriented deployments

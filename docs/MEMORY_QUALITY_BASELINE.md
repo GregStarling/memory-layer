@@ -45,6 +45,8 @@ This baseline represents the current release claim:
 - trust-aware retrieval prefers durable memory correctly
 - long-horizon compaction and maintenance preserve critical memory
 - isolation and cross-scope behavior remain safe by default
+- fresh-install no-provider replay still preserves the right local memory contract
+- hosted shared-memory replay still surfaces the right cross-scope knowledge
 
 Because the baseline is now a known-good release anchor, the delta gate has a stricter meaning:
 
