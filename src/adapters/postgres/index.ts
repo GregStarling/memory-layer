@@ -605,8 +605,8 @@ export function createPostgresAdapter(
     async insertKnowledgeMemory(input) {
       const n = normalizeScope(input);
       const { rows } = await pool.query(
-        `INSERT INTO knowledge_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id, fact, fact_type, knowledge_state, knowledge_class, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated, source, confidence, confidence_score, grounding_strength, evidence_count, trust_score, verification_status, verification_notes, last_verified_at, next_reverification_at, last_confirmed_at, confirmation_count, source_working_memory_id, source_turn_ids, successful_use_count, failed_use_count, disputed_at, dispute_reason, contradiction_score, superseded_at, created_at, last_accessed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $37)
+        `INSERT INTO knowledge_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id, fact, fact_type, knowledge_state, knowledge_class, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated, source, confidence, confidence_score, grounding_strength, evidence_count, trust_score, verification_status, verification_notes, last_verified_at, next_reverification_at, last_confirmed_at, confirmation_count, source_system_id, source_scope_id, source_collaboration_id, source_working_memory_id, source_turn_ids, successful_use_count, failed_use_count, disputed_at, dispute_reason, contradiction_score, superseded_at, retired_at, created_at, last_accessed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $40)
          RETURNING *`,
         [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.fact, input.fact_type,
          input.knowledge_state ?? 'trusted', input.knowledge_class ?? 'project_fact',
@@ -619,10 +619,12 @@ export function createPostgresAdapter(
          input.verification_status ?? 'unverified', input.verification_notes ?? null,
          input.last_verified_at ?? null, input.next_reverification_at ?? null,
          input.last_confirmed_at ?? null, input.confirmation_count ?? 0,
+         input.source_system_id ?? n.system_id, input.source_scope_id ?? n.scope_id,
+         input.source_collaboration_id ?? n.collaboration_id,
          input.source_working_memory_id ?? null, input.source_turn_ids ?? [],
          input.successful_use_count ?? 0, input.failed_use_count ?? 0,
          input.disputed_at ?? null, input.dispute_reason ?? null, input.contradiction_score ?? 0,
-         input.superseded_at ?? null, now()],
+         input.superseded_at ?? null, input.retired_at ?? null, now()],
       );
       return mapKnowledgeMemory(rows[0]);
     },
