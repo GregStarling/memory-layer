@@ -10,9 +10,10 @@ import type {
   WorkingMemory,
 } from '../../contracts/types.js';
 
-interface WorkingMemoryRow extends Omit<WorkingMemory, 'key_entities' | 'topic_tags'> {
+interface WorkingMemoryRow extends Omit<WorkingMemory, 'key_entities' | 'topic_tags' | 'episode_recap'> {
   key_entities: string;
   topic_tags: string;
+  episode_recap: string | null;
 }
 
 interface CompactionLogRow extends Omit<CompactionLog, 'model_call_made'> {
@@ -75,11 +76,20 @@ export function rowToTurn(row: Turn): Turn {
 }
 
 export function rowToWorkingMemory(row: WorkingMemoryRow): WorkingMemory {
+  let episodeRecap = null;
+  if (row.episode_recap) {
+    try {
+      episodeRecap = JSON.parse(row.episode_recap);
+    } catch {
+      episodeRecap = null;
+    }
+  }
   return {
     ...row,
     collaboration_id: row.collaboration_id ?? row.workspace_id,
     key_entities: parseJsonArray(row.key_entities),
     topic_tags: parseJsonArray(row.topic_tags),
+    episode_recap: episodeRecap,
   };
 }
 

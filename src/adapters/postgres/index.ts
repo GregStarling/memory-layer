@@ -177,6 +177,7 @@ function mapWorkingMemory(row: Record<string, unknown>): WorkingMemory {
     compaction_trigger: row.compaction_trigger as WorkingMemory['compaction_trigger'],
     expires_at: row.expires_at != null ? Number(row.expires_at) : null,
     promoted_to_knowledge_id: row.promoted_to_knowledge_id != null ? Number(row.promoted_to_knowledge_id) : null,
+    episode_recap: row.episode_recap != null ? (typeof row.episode_recap === 'string' ? JSON.parse(row.episode_recap) : row.episode_recap) as WorkingMemory['episode_recap'] : null,
     created_at: Number(row.created_at),
     schema_version: Number(row.schema_version ?? 1),
   };
@@ -536,12 +537,13 @@ export function createPostgresAdapter(
     async insertWorkingMemory(input) {
       const n = normalizeScope(input);
       const { rows } = await pool.query(
-        `INSERT INTO working_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, summary, key_entities, topic_tags, turn_id_start, turn_id_end, turn_count, compaction_trigger, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        `INSERT INTO working_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, summary, key_entities, topic_tags, turn_id_start, turn_id_end, turn_count, compaction_trigger, created_at, episode_recap)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
          RETURNING *`,
         [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.session_id, input.summary,
          JSON.stringify(input.key_entities), JSON.stringify(input.topic_tags),
-         input.turn_id_start, input.turn_id_end, input.turn_count, input.compaction_trigger, now()],
+         input.turn_id_start, input.turn_id_end, input.turn_count, input.compaction_trigger, now(),
+         input.episode_recap ? JSON.stringify(input.episode_recap) : null],
       );
       return mapWorkingMemory(rows[0]);
     },

@@ -520,8 +520,8 @@ function createAdapterFromDatabase(
         .prepare(
           `INSERT INTO working_memory
             (session_id, tenant_id, system_id, workspace_id, collaboration_id, scope_id, summary, key_entities, topic_tags,
-             turn_id_start, turn_id_end, turn_count, compaction_trigger, created_at, expires_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             turn_id_start, turn_id_end, turn_count, compaction_trigger, created_at, expires_at, episode_recap)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           input.session_id,
@@ -539,6 +539,7 @@ function createAdapterFromDatabase(
           input.compaction_trigger,
           createdAt,
           expiresAt,
+          input.episode_recap ? JSON.stringify(input.episode_recap) : null,
         );
       return getWorkingMemoryById(Number(result.lastInsertRowid))!;
     },

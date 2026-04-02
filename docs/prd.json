@@ -1,0 +1,1498 @@
+{
+  "goal": "Implement the Ultimate Memory Layer Roadmap: 7 features across 4 phases — episodic recall, cognitive taxonomy, materialized profiles, workspace onboarding, procedural playbooks, typed associations, and session snapshots. Source of truth: docs/ULTIMATE_MEMORY_LAYER_ROADMAP.md.",
+  "fast_checks_default": [
+    "npm run lint",
+    "npm run test",
+    "npm run eval:memory-quality"
+  ],
+  "current_task_id": null,
+  "last_completed_task_id": null,
+  "iteration": 0,
+  "tasks": [
+    {
+      "id": "t1",
+      "desc": "Add episodic recall types to contracts: EpisodeDetailLevel, EpisodeRecap, EpisodeSourceReference, EpisodeSearchOptions, EpisodeSummary, ReflectOptions, ReflectResult, and EPISODE_DETAIL_LEVELS const array.",
+      "acceptance_criteria": [
+        "All 7 interfaces and 1 type alias exported from src/contracts/types.ts",
+        "EPISODE_DETAIL_LEVELS const exported with values ['abstract', 'overview', 'full']",
+        "EpisodeRecap includes sourceType field with 'episodic' | 'declarative' | 'mixed' union",
+        "EpisodeSourceReference.type supports 'turn' | 'working_memory' | 'knowledge'",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/contracts/types.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [],
+      "priority": 0,
+      "lane": "contracts",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t2",
+      "desc": "Create cognitive memory taxonomy contract: CognitiveMemoryType, CognitiveMemoryItem, CognitiveSearchOptions, CognitiveSearchResult types, plus mapKnowledgeClassToCognitive and mapCognitiveToKnowledgeClasses mapping functions.",
+      "acceptance_criteria": [
+        "New file src/contracts/cognitive.ts with all types exported",
+        "CognitiveMemoryType is 'episodic' | 'semantic' | 'procedural' | 'working'",
+        "mapKnowledgeClassToCognitive maps: identity/preference/constraint/project_fact/episodic_fact/strategy/anti_pattern -> semantic, procedure -> procedural",
+        "mapCognitiveToKnowledgeClasses is the inverse mapping",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/contracts/cognitive.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [],
+      "priority": 0,
+      "lane": "contracts",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t3",
+      "desc": "Schema migration v9->v10: add episode_recap column to working_memory in SQLite, Postgres, and in-memory adapters.",
+      "acceptance_criteria": [
+        "CURRENT_SCHEMA_VERSION bumped to 10 in src/adapters/sqlite/schema.ts",
+        "ALTER TABLE working_memory ADD COLUMN episode_recap TEXT in SQLite migration path",
+        "ALTER TABLE working_memory ADD COLUMN episode_recap JSONB in Postgres schema",
+        "In-memory adapter WorkingMemory records support optional episode_recap field",
+        "Existing tests still pass"
+      ],
+      "files": [
+        "src/adapters/sqlite/schema.ts",
+        "src/adapters/postgres/schema.sql",
+        "src/adapters/memory/index.ts"
+      ],
+      "fast_checks": [
+        "npm run test"
+      ],
+      "dependencies": [
+        "t1"
+      ],
+      "priority": 1,
+      "lane": "adapters",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t4",
+      "desc": "Add episodic recap and reflect synthesis prompts to summarizers: EPISODIC_RECAP_SYSTEM_PROMPT and REFLECT_SYNTHESIS_SYSTEM_PROMPT that instruct the model to produce JSON matching EpisodeRecap and ReflectResult.",
+      "acceptance_criteria": [
+        "EPISODIC_RECAP_SYSTEM_PROMPT exported from src/summarizers/prompts.ts",
+        "REFLECT_SYNTHESIS_SYSTEM_PROMPT exported from src/summarizers/prompts.ts",
+        "EPISODIC_RECAP_PROMPT_VERSION and REFLECT_SYNTHESIS_PROMPT_VERSION exported",
+        "Recap prompt instructs structured JSON output: objective, actions, outcomes, artifacts, unresolvedItems",
+        "Reflect prompt instructs cross-memory synthesis with source attribution",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/summarizers/prompts.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [
+        "t1"
+      ],
+      "priority": 1,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t5",
+      "desc": "Core episodic recall module: searchEpisodes, summarizeEpisode, reflect functions that search turns+working memory, produce structured EpisodeSummary recaps with detail levels, and synthesize cross-memory reflections with source attribution.",
+      "acceptance_criteria": [
+        "New file src/core/episodic.ts with 3 exported async functions",
+        "searchEpisodes groups results by session, calls summarizer with episodic recap prompt",
+        "summarizeEpisode supports abstract (objective+outcomes), overview (+actions), full (+artifacts+excerpts) detail levels",
+        "reflect gathers episodic + optionally declarative knowledge, reports sourceType accurately",
+        "All functions preserve source references back to turn/working_memory IDs",
+        "Episode summaries are never silently promoted to trusted knowledge",
+        "Unit tests pass"
+      ],
+      "files": [
+        "src/core/episodic.ts",
+        "src/__tests__/episodic.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t1",
+        "t3",
+        "t4"
+      ],
+      "priority": 2,
+      "lane": "core",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t6",
+      "desc": "Core cognitive facade module: thin layer that delegates to manager.search, manager.searchEpisodes, manager.getContext and maps results into the public CognitiveMemoryType taxonomy.",
+      "acceptance_criteria": [
+        "New file src/core/cognitive.ts",
+        "searchCognitive function accepts CognitiveSearchOptions and returns CognitiveSearchResult",
+        "Results correctly grouped in byType record",
+        "Internal trust/knowledge state preserved in metadata but public type is simplified",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/core/cognitive.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [
+        "t2",
+        "t5"
+      ],
+      "priority": 3,
+      "lane": "core",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": true
+    },
+    {
+      "id": "t7",
+      "desc": "Add episodic + cognitive methods to MemoryManager interface and implementation: searchEpisodes, summarizeEpisode, reflect, searchCognitive.",
+      "acceptance_criteria": [
+        "4 new methods added to MemoryManager interface in src/core/manager.ts",
+        "Implementation delegates to src/core/episodic.ts and src/core/cognitive.ts",
+        "Existing MemoryManager tests still pass",
+        "New methods have unit test coverage"
+      ],
+      "files": [
+        "src/core/manager.ts",
+        "src/__tests__/manager.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t5",
+        "t6"
+      ],
+      "priority": 4,
+      "lane": "core",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t8",
+      "desc": "HTTP endpoints for episodic recall + cognitive search: GET /v1/episodes, POST /v1/episodes/summarize, POST /v1/reflect, GET /v1/memory.",
+      "acceptance_criteria": [
+        "GET /v1/episodes accepts q, session_id, detail, limit query params",
+        "POST /v1/episodes/summarize accepts turnRange and detailLevel in body",
+        "POST /v1/reflect accepts query, detailLevel, includeDeclarative, timeRange in body",
+        "GET /v1/memory accepts q, types (comma-separated), limit for cognitive search",
+        "All endpoints return proper API envelope format",
+        "Existing HTTP tests still pass"
+      ],
+      "files": [
+        "src/server/http-server.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t7"
+      ],
+      "priority": 5,
+      "lane": "server",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t9",
+      "desc": "MCP tools for episodic recall + cognitive: memory_search_episodes, memory_summarize_episode, memory_reflect, memory_search_cognitive.",
+      "acceptance_criteria": [
+        "4 new tools added to TOOLS array in src/server/mcp-server.ts",
+        "Tool schemas match the API signatures from t7",
+        "Tool handlers delegate to manager methods",
+        "Existing MCP tests still pass"
+      ],
+      "files": [
+        "src/server/mcp-server.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t7"
+      ],
+      "priority": 5,
+      "lane": "server",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t10",
+      "desc": "OpenAPI spec additions for episodic + cognitive endpoints: /v1/episodes, /v1/episodes/summarize, /v1/reflect, /v1/memory with full request/response schemas under new episodic and cognitive tags.",
+      "acceptance_criteria": [
+        "4 new paths added to openapi.yaml",
+        "New tags: episodic, cognitive",
+        "Request/response schemas match TypeScript types from t1 and t2",
+        "Spec validates (no YAML errors)"
+      ],
+      "files": [
+        "openapi.yaml"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t7"
+      ],
+      "priority": 5,
+      "lane": "docs",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t11",
+      "desc": "Framework integration tool schemas for episodic + cognitive: add tool definitions to Claude tools and OpenAI tools integrations.",
+      "acceptance_criteria": [
+        "Episodic + cognitive tool schemas added to src/integrations/claude-tools.ts",
+        "Matching OpenAI function tool definitions added to src/integrations/openai-tools.ts",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/integrations/claude-tools.ts",
+        "src/integrations/openai-tools.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [
+        "t7"
+      ],
+      "priority": 5,
+      "lane": "integrations",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t12",
+      "desc": "Export all Phase 1 types and functions from src/index.ts: episodic types, cognitive types, mapping functions.",
+      "acceptance_criteria": [
+        "All episodic types from t1 exported",
+        "All cognitive types and mapping functions from t2 exported",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/index.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [
+        "t7"
+      ],
+      "priority": 5,
+      "lane": "contracts",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t13",
+      "desc": "Python client additions for episodic + cognitive: models (EpisodeRecap, EpisodeSummary, ReflectResult, CognitiveMemoryItem, CognitiveSearchResult) and client methods (search_episodes, summarize_episode, reflect, search_cognitive) on both sync and async clients.",
+      "acceptance_criteria": [
+        "Models added to clients/python/memory_layer_client/models.py",
+        "4 methods added to MemoryClient and AsyncMemoryClient in client.py",
+        "Methods hit correct HTTP endpoints from t8",
+        "Python lint passes (ruff check)"
+      ],
+      "files": [
+        "clients/python/memory_layer_client/models.py",
+        "clients/python/memory_layer_client/client.py"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t8"
+      ],
+      "priority": 6,
+      "lane": "python",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t14",
+      "desc": "Episodic recall evals: new eval module with metrics for episodic_retrieval_precision, episodic_recap_completeness, reflect_source_attribution, episodic_isolation. Register in quality gate and set baselines.",
+      "acceptance_criteria": [
+        "New file evals/memory-quality/episodic-recall.mjs",
+        "4 metrics implemented and passing",
+        "Metrics registered in evals/memory-quality/index.mjs",
+        "Baselines added to evals/memory-quality/baseline.json",
+        "npm run eval:memory-quality passes with all metrics"
+      ],
+      "files": [
+        "evals/memory-quality/episodic-recall.mjs",
+        "evals/memory-quality/index.mjs",
+        "evals/memory-quality/baseline.json"
+      ],
+      "fast_checks": [
+        "npm run eval:memory-quality"
+      ],
+      "dependencies": [
+        "t7"
+      ],
+      "priority": 6,
+      "lane": "evals",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t15",
+      "desc": "Phase 1 verification gate: all existing tests pass, all 14 original metrics 100/100, no regression, new episodic metrics pass, platform quality green.",
+      "acceptance_criteria": [
+        "npm run test passes",
+        "npm run eval:memory-quality passes (original 14 + new 4 metrics)",
+        "npm run eval:memory-quality:delta shows no regression",
+        "npm run eval:platform-quality passes"
+      ],
+      "files": [],
+      "fast_checks": [
+        "npm run test",
+        "npm run eval:memory-quality",
+        "npm run eval:memory-quality:delta",
+        "npm run eval:platform-quality"
+      ],
+      "dependencies": [
+        "t8",
+        "t9",
+        "t10",
+        "t11",
+        "t12",
+        "t13",
+        "t14"
+      ],
+      "priority": 7,
+      "lane": "verification",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t16",
+      "desc": "Profile types contract: ProfileView, ProfileSection, ProfileEntry, Profile, ProfileOptions types in a new src/contracts/profile.ts file.",
+      "acceptance_criteria": [
+        "New file src/contracts/profile.ts with all types exported",
+        "ProfileView is 'user' | 'operator' | 'workspace'",
+        "ProfileSection is 'identity' | 'preferences' | 'communication' | 'constraints' | 'workflows'",
+        "ProfileEntry includes knowledgeId, trustScore, knowledgeState, confidence, lastConfirmedAt",
+        "Profile.sections is Record<ProfileSection, ProfileEntry[]>",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/contracts/profile.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [
+        "t15"
+      ],
+      "priority": 8,
+      "lane": "contracts",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t17",
+      "desc": "Core profile materializer: getProfile and classifyProfileSection functions that query knowledge by scope level, classify into profile sections, return structured Profile.",
+      "acceptance_criteria": [
+        "New file src/core/profile.ts",
+        "getProfile queries knowledge at correct scope level per view (user=scope_id, operator=system_id, workspace=workspace_id)",
+        "classifyProfileSection maps: identity->identity, preference->preferences, constraint->constraints, procedure+strategy->workflows",
+        "Communication-related preferences classified under communication section",
+        "Disputed and retired knowledge excluded by default",
+        "Unit tests pass"
+      ],
+      "files": [
+        "src/core/profile.ts",
+        "src/__tests__/profile.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t16"
+      ],
+      "priority": 9,
+      "lane": "core",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t18",
+      "desc": "Workspace detection module: detectWorkspace, workspaceIdFromGitRemote, workspaceIdFromPath functions for auto-detecting workspace from git remote or directory path.",
+      "acceptance_criteria": [
+        "New file src/core/workspace-detect.ts",
+        "detectWorkspace uses git remote get-url origin with fallback to directory hash",
+        "workspaceIdFromGitRemote produces stable hash from remote URL",
+        "workspaceIdFromPath produces stable hash from absolute path",
+        "Returns null gracefully when not in a git repo",
+        "Unit tests pass"
+      ],
+      "files": [
+        "src/core/workspace-detect.ts",
+        "src/__tests__/workspace-detect.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t15"
+      ],
+      "priority": 8,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t19",
+      "desc": "MemoryManager getProfile method + formatter integration: add getProfile to manager, add optional profile to SessionBootstrap, update formatBootstrapForPrompt to include Profile section.",
+      "acceptance_criteria": [
+        "getProfile(options?: ProfileOptions) added to MemoryManager interface and impl",
+        "SessionBootstrap in src/core/formatter.ts has optional profile field",
+        "formatBootstrapForPrompt includes 'Profile' section when profile data present",
+        "Existing formatter tests still pass"
+      ],
+      "files": [
+        "src/core/manager.ts",
+        "src/core/formatter.ts",
+        "src/core/runtime.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t17"
+      ],
+      "priority": 10,
+      "lane": "core",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t20",
+      "desc": "Add autoDetectWorkspace option to createMemory factory in quick.ts: when true and no explicit workspace_id, call detectWorkspace and merge result.",
+      "acceptance_criteria": [
+        "autoDetectWorkspace?: boolean added to CreateMemoryOptions",
+        "When true and no workspace_id provided, detectWorkspace is called",
+        "Detected workspace_id merged into scope",
+        "When false or workspace_id explicit, detection skipped",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/core/quick.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [
+        "t18"
+      ],
+      "priority": 10,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t21",
+      "desc": "Add autoDetectWorkspace option to MCP and HTTP server configs: auto-detect from process.cwd() when set and no scope provided.",
+      "acceptance_criteria": [
+        "autoDetectWorkspace?: boolean added to McpServerConfig",
+        "autoDetectWorkspace?: boolean added to HttpServerConfig",
+        "When true, detected workspace used as default scope",
+        "Existing server tests still pass"
+      ],
+      "files": [
+        "src/server/mcp-server.ts",
+        "src/server/http-server.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t20"
+      ],
+      "priority": 11,
+      "lane": "server",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t22",
+      "desc": "HTTP endpoint for profile: GET /v1/profile with view, sections, min_trust query params.",
+      "acceptance_criteria": [
+        "GET /v1/profile accepts view, sections (comma-separated), min_trust query params",
+        "Returns Profile object in API envelope",
+        "Defaults to user view when no view specified",
+        "Existing HTTP tests still pass"
+      ],
+      "files": [
+        "src/server/http-server.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t19"
+      ],
+      "priority": 12,
+      "lane": "server",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t23",
+      "desc": "MCP tool for profile: memory_get_profile with view and sections params.",
+      "acceptance_criteria": [
+        "memory_get_profile tool added to MCP server TOOLS array",
+        "Accepts view (enum) and sections (array) params",
+        "Delegates to manager.getProfile",
+        "Existing MCP tests still pass"
+      ],
+      "files": [
+        "src/server/mcp-server.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t19"
+      ],
+      "priority": 12,
+      "lane": "server",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t24",
+      "desc": "OpenAPI spec additions for profile endpoint under new profiles tag.",
+      "acceptance_criteria": [
+        "GET /v1/profile path added to openapi.yaml",
+        "New tag: profiles",
+        "Request/response schemas match Profile types from t16",
+        "Spec validates"
+      ],
+      "files": [
+        "openapi.yaml"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t19"
+      ],
+      "priority": 12,
+      "lane": "docs",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t25",
+      "desc": "Export Phase 2 types from src/index.ts: profile types, workspace detection functions.",
+      "acceptance_criteria": [
+        "All profile types from t16 exported",
+        "DetectedWorkspace and detection functions from t18 exported",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/index.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [
+        "t19",
+        "t20"
+      ],
+      "priority": 12,
+      "lane": "contracts",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t26",
+      "desc": "Python client additions for profile: Profile and ProfileEntry models, get_profile method on sync and async clients.",
+      "acceptance_criteria": [
+        "Profile, ProfileEntry models added to models.py",
+        "get_profile method on MemoryClient and AsyncMemoryClient",
+        "Method hits GET /v1/profile endpoint",
+        "Python lint passes"
+      ],
+      "files": [
+        "clients/python/memory_layer_client/models.py",
+        "clients/python/memory_layer_client/client.py"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t22"
+      ],
+      "priority": 13,
+      "lane": "python",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t27",
+      "desc": "Evals for profiles + workspace: profile_completeness, profile_trust_filtering, profile_provenance metrics, plus workspace_auto_detect scenario.",
+      "acceptance_criteria": [
+        "New file evals/memory-quality/profiles.mjs with 3 metrics",
+        "workspace_auto_detect scenario added to evals/scenario-evals.mjs",
+        "Metrics registered in index.mjs, baselines updated",
+        "All evals pass"
+      ],
+      "files": [
+        "evals/memory-quality/profiles.mjs",
+        "evals/memory-quality/index.mjs",
+        "evals/memory-quality/baseline.json",
+        "evals/scenario-evals.mjs"
+      ],
+      "fast_checks": [
+        "npm run eval:memory-quality"
+      ],
+      "dependencies": [
+        "t19",
+        "t21"
+      ],
+      "priority": 13,
+      "lane": "evals",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t28",
+      "desc": "Phase 2 verification gate: all tests pass, all metrics green, no regression, platform quality green.",
+      "acceptance_criteria": [
+        "npm run test passes",
+        "npm run eval:memory-quality passes (original + Phase 1 + Phase 2 metrics)",
+        "npm run eval:memory-quality:delta shows no regression",
+        "npm run eval:platform-quality passes"
+      ],
+      "files": [],
+      "fast_checks": [
+        "npm run test",
+        "npm run eval:memory-quality",
+        "npm run eval:memory-quality:delta",
+        "npm run eval:platform-quality"
+      ],
+      "dependencies": [
+        "t21",
+        "t22",
+        "t23",
+        "t24",
+        "t25",
+        "t26",
+        "t27"
+      ],
+      "priority": 14,
+      "lane": "verification",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t29",
+      "desc": "Playbook types: PlaybookStatus, Playbook, NewPlaybook, PlaybookRevision, NewPlaybookRevision, PLAYBOOK_STATUSES const in src/contracts/types.ts.",
+      "acceptance_criteria": [
+        "All playbook types and interfaces exported from src/contracts/types.ts",
+        "Playbook extends NormalizedMemoryScope with all specified fields",
+        "NewPlaybook extends MemoryScope with required title/description/instructions",
+        "PlaybookRevision includes playbook_id, instructions, revision_reason, source_session_id",
+        "PLAYBOOK_STATUSES const exported",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/contracts/types.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [
+        "t28"
+      ],
+      "priority": 15,
+      "lane": "contracts",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t30",
+      "desc": "Schema migration v10->v11: playbooks table with FTS5 + triggers, playbook_revisions table with FK, scoping columns and indexes. SQLite, Postgres, in-memory.",
+      "acceptance_criteria": [
+        "CURRENT_SCHEMA_VERSION bumped to 11",
+        "playbooks table created with all columns matching Playbook interface",
+        "playbooks_fts virtual table with triggers following turns_fts pattern",
+        "playbook_revisions table with FK to playbooks(id) ON DELETE CASCADE",
+        "idx_pb_scope index on scoping columns",
+        "Postgres schema.sql has equivalent table definitions",
+        "In-memory adapter has playbooks and playbookRevisions arrays",
+        "Existing tests still pass"
+      ],
+      "files": [
+        "src/adapters/sqlite/schema.ts",
+        "src/adapters/postgres/schema.sql",
+        "src/adapters/memory/index.ts"
+      ],
+      "fast_checks": [
+        "npm run test"
+      ],
+      "dependencies": [
+        "t29"
+      ],
+      "priority": 16,
+      "lane": "adapters",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t31",
+      "desc": "Storage adapter contracts for playbooks: add insertPlaybook, getPlaybookById, getActivePlaybooks, searchPlaybooks, updatePlaybook, recordPlaybookUse, insertPlaybookRevision, getPlaybookRevisions to StorageAdapter and AsyncStorageAdapter interfaces.",
+      "acceptance_criteria": [
+        "8 new methods added to StorageAdapter in src/contracts/storage.ts",
+        "8 matching async methods added to AsyncStorageAdapter in src/contracts/async-storage.ts",
+        "Method signatures match Playbook/NewPlaybook/PlaybookRevision types",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/contracts/storage.ts",
+        "src/contracts/async-storage.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [
+        "t29"
+      ],
+      "priority": 16,
+      "lane": "contracts",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t32",
+      "desc": "Implement playbook storage adapter methods in all 3 adapters (SQLite, Postgres, in-memory) and sync-to-async wrapper.",
+      "acceptance_criteria": [
+        "SQLite adapter implements all 8 playbook methods with FTS5 search",
+        "Postgres adapter implements all 8 playbook methods",
+        "In-memory adapter implements all 8 playbook methods",
+        "sync-to-async.ts wraps all new sync methods",
+        "All adapters pass existing tests"
+      ],
+      "files": [
+        "src/adapters/sqlite/index.ts",
+        "src/adapters/postgres/index.ts",
+        "src/adapters/memory/index.ts",
+        "src/adapters/sync-to-async.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t30",
+        "t31"
+      ],
+      "priority": 17,
+      "lane": "adapters",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t33",
+      "desc": "Core playbook logic: createPlaybookFromTask (gathers session turns, summarizes into structured instructions), revisePlaybook, findRelevantPlaybooks.",
+      "acceptance_criteria": [
+        "New file src/core/playbook.ts with 3 exported async functions",
+        "createPlaybookFromTask gathers session turns + working memory, calls summarizer",
+        "revisePlaybook stores revision and updates playbook instructions",
+        "findRelevantPlaybooks uses FTS + scope search with relevance ranking",
+        "Unit tests pass"
+      ],
+      "files": [
+        "src/core/playbook.ts",
+        "src/__tests__/playbook.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t32"
+      ],
+      "priority": 18,
+      "lane": "core",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t34",
+      "desc": "Context builder + formatter integration for playbooks: add relevantPlaybooks to MemoryContext, search for up to 3 relevant playbooks in buildMemoryContext, add Relevant Playbooks section to formatter.",
+      "acceptance_criteria": [
+        "relevantPlaybooks: Playbook[] added to MemoryContext interface",
+        "buildMemoryContext searches for relevant playbooks when query available (max 3)",
+        "Formatter includes 'Relevant Playbooks' section in output",
+        "Default is empty array (backwards compatible)",
+        "Existing context tests still pass"
+      ],
+      "files": [
+        "src/core/context.ts",
+        "src/core/formatter.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t33"
+      ],
+      "priority": 19,
+      "lane": "core",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t35",
+      "desc": "MemoryManager playbook methods: createPlaybook, createPlaybookFromTask, revisePlaybook, getPlaybook, listPlaybooks, searchPlaybooks, recordPlaybookUse.",
+      "acceptance_criteria": [
+        "7 new methods added to MemoryManager interface and implementation",
+        "Methods delegate to src/core/playbook.ts and adapter",
+        "Existing manager tests still pass",
+        "New methods have unit test coverage"
+      ],
+      "files": [
+        "src/core/manager.ts",
+        "src/__tests__/manager.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t34"
+      ],
+      "priority": 20,
+      "lane": "core",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t36",
+      "desc": "HTTP endpoints for playbooks: POST /v1/playbooks, GET /v1/playbooks, GET /v1/playbooks/:id, PUT /v1/playbooks/:id, POST /v1/playbooks/:id/revise, POST /v1/playbooks/:id/use, POST /v1/playbooks/from-task.",
+      "acceptance_criteria": [
+        "7 routes added to HTTP server",
+        "All return proper API envelope format",
+        "CRUD operations work correctly",
+        "Existing HTTP tests still pass"
+      ],
+      "files": [
+        "src/server/http-server.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t35"
+      ],
+      "priority": 21,
+      "lane": "server",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t37",
+      "desc": "MCP tools for playbooks: memory_create_playbook, memory_search_playbooks, memory_revise_playbook.",
+      "acceptance_criteria": [
+        "3 new tools added to MCP server",
+        "Tool schemas match manager method signatures",
+        "Existing MCP tests still pass"
+      ],
+      "files": [
+        "src/server/mcp-server.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t35"
+      ],
+      "priority": 21,
+      "lane": "server",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t38",
+      "desc": "OpenAPI spec + exports for playbooks: new playbooks tag with all 7 endpoints, export playbook types from index.ts.",
+      "acceptance_criteria": [
+        "7 new paths under playbooks tag in openapi.yaml",
+        "Request/response schemas match Playbook types",
+        "All playbook types exported from src/index.ts",
+        "Spec validates"
+      ],
+      "files": [
+        "openapi.yaml",
+        "src/index.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [
+        "t35"
+      ],
+      "priority": 21,
+      "lane": "docs",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t39",
+      "desc": "Python client for playbooks: Playbook and PlaybookRevision models, create_playbook, search_playbooks, get_playbook, revise_playbook, record_playbook_use, create_playbook_from_task methods.",
+      "acceptance_criteria": [
+        "Models added to models.py",
+        "6 methods added to sync and async clients",
+        "Methods hit correct HTTP endpoints from t36",
+        "Python lint passes"
+      ],
+      "files": [
+        "clients/python/memory_layer_client/models.py",
+        "clients/python/memory_layer_client/client.py"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t36"
+      ],
+      "priority": 22,
+      "lane": "python",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t40",
+      "desc": "Playbook evals: playbook_creation_quality, playbook_retrieval_relevance, playbook_revision_continuity metrics.",
+      "acceptance_criteria": [
+        "New file evals/memory-quality/playbooks.mjs",
+        "3 metrics implemented and passing",
+        "Registered in index.mjs, baselines updated",
+        "npm run eval:memory-quality passes"
+      ],
+      "files": [
+        "evals/memory-quality/playbooks.mjs",
+        "evals/memory-quality/index.mjs",
+        "evals/memory-quality/baseline.json"
+      ],
+      "fast_checks": [
+        "npm run eval:memory-quality"
+      ],
+      "dependencies": [
+        "t35"
+      ],
+      "priority": 22,
+      "lane": "evals",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t41",
+      "desc": "Association types: AssociationType, AssociationTargetKind, Association, NewAssociation, ASSOCIATION_TYPES, ASSOCIATION_TARGET_KINDS in src/contracts/types.ts.",
+      "acceptance_criteria": [
+        "All association types exported from src/contracts/types.ts",
+        "AssociationType is 8-value union: related_to, supports, contradicts, supersedes, depends_on, solves, applies_to, derived_from",
+        "AssociationTargetKind is: knowledge, playbook, working_memory, work_item",
+        "Association extends NormalizedMemoryScope with source/target kind+id, type, confidence, auto_generated",
+        "Both const arrays exported",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/contracts/types.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [
+        "t35"
+      ],
+      "priority": 23,
+      "lane": "contracts",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t42",
+      "desc": "Schema migration v11->v12: associations table with unique constraint, source/target indexes, scope index. SQLite, Postgres, in-memory.",
+      "acceptance_criteria": [
+        "CURRENT_SCHEMA_VERSION bumped to 12",
+        "associations table with UNIQUE(source_kind, source_id, target_kind, target_id, association_type)",
+        "idx_assoc_source and idx_assoc_target indexes",
+        "idx_assoc_scope index on scoping columns",
+        "Postgres equivalent in schema.sql",
+        "In-memory adapter has associations array",
+        "Existing tests still pass"
+      ],
+      "files": [
+        "src/adapters/sqlite/schema.ts",
+        "src/adapters/postgres/schema.sql",
+        "src/adapters/memory/index.ts"
+      ],
+      "fast_checks": [
+        "npm run test"
+      ],
+      "dependencies": [
+        "t41"
+      ],
+      "priority": 24,
+      "lane": "adapters",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t43",
+      "desc": "Storage adapter contracts + implementations for associations: insertAssociation, getAssociationsFrom, getAssociationsTo, deleteAssociation in all adapters.",
+      "acceptance_criteria": [
+        "4 methods added to StorageAdapter and AsyncStorageAdapter interfaces",
+        "Implemented in SQLite, Postgres, in-memory adapters",
+        "sync-to-async.ts updated",
+        "All adapter tests pass"
+      ],
+      "files": [
+        "src/contracts/storage.ts",
+        "src/contracts/async-storage.ts",
+        "src/adapters/sqlite/index.ts",
+        "src/adapters/postgres/index.ts",
+        "src/adapters/memory/index.ts",
+        "src/adapters/sync-to-async.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t42"
+      ],
+      "priority": 25,
+      "lane": "adapters",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t44",
+      "desc": "Core associations module: traverseAssociations (BFS, maxDepth=2, maxNodes=20) and autoDetectAssociations (creates supports/contradicts/related_to edges during extraction).",
+      "acceptance_criteria": [
+        "New file src/core/associations.ts",
+        "traverseAssociations does bounded BFS traversal returning AssociationGraph {nodes, edges}",
+        "maxDepth defaults to 2, maxNodes defaults to 20",
+        "autoDetectAssociations creates edges based on semantic similarity and contradiction detection",
+        "Unit tests verify traversal bounds are respected"
+      ],
+      "files": [
+        "src/core/associations.ts",
+        "src/__tests__/associations.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t43"
+      ],
+      "priority": 26,
+      "lane": "core",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t45",
+      "desc": "Orchestrator integration: call autoDetectAssociations after extractKnowledge, create supersedes association on supersedeKnowledgeMemory.",
+      "acceptance_criteria": [
+        "autoDetectAssociations called in orchestrator after new knowledge created",
+        "supersedes association created when knowledge is superseded",
+        "Existing orchestrator tests still pass"
+      ],
+      "files": [
+        "src/core/orchestrator.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t44"
+      ],
+      "priority": 27,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t46",
+      "desc": "Context builder enhancement: single-hop association expansion for supports and related_to edges, add associatedKnowledge field to MemoryContext.",
+      "acceptance_criteria": [
+        "associatedKnowledge: KnowledgeMemory[] added to MemoryContext",
+        "buildMemoryContext does single-hop expansion via supports + related_to associations",
+        "Only includes associations above minimum threshold",
+        "Default is empty array (backwards compatible)",
+        "Existing context tests still pass"
+      ],
+      "files": [
+        "src/core/context.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t44"
+      ],
+      "priority": 27,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t47",
+      "desc": "MemoryManager association methods: addAssociation, getAssociations, traverseAssociations, removeAssociation.",
+      "acceptance_criteria": [
+        "4 new methods added to MemoryManager interface and implementation",
+        "traverseAssociations returns AssociationGraph",
+        "getAssociations returns {from, to} structure",
+        "Existing manager tests still pass"
+      ],
+      "files": [
+        "src/core/manager.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t45",
+        "t46"
+      ],
+      "priority": 28,
+      "lane": "core",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t48",
+      "desc": "HTTP + MCP + OpenAPI + exports for associations: POST/GET/DELETE /v1/associations endpoints, POST /v1/associations/traverse, memory_get_associations MCP tool, associations tag in OpenAPI, exports from index.ts.",
+      "acceptance_criteria": [
+        "4 HTTP routes added (POST, GET /:kind/:id, POST /traverse, DELETE /:id)",
+        "memory_get_associations MCP tool with traverse option",
+        "New associations tag in openapi.yaml",
+        "Association types exported from src/index.ts",
+        "Existing server tests still pass"
+      ],
+      "files": [
+        "src/server/http-server.ts",
+        "src/server/mcp-server.ts",
+        "openapi.yaml",
+        "src/index.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t47"
+      ],
+      "priority": 29,
+      "lane": "server",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t49",
+      "desc": "Python client for associations: Association and AssociationGraph models, add_association, get_associations, traverse_associations, remove_association methods.",
+      "acceptance_criteria": [
+        "Models added to models.py",
+        "4 methods on sync and async clients",
+        "Methods hit correct HTTP endpoints",
+        "Python lint passes"
+      ],
+      "files": [
+        "clients/python/memory_layer_client/models.py",
+        "clients/python/memory_layer_client/client.py"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t48"
+      ],
+      "priority": 30,
+      "lane": "python",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t50",
+      "desc": "Association evals: association_auto_detection, association_traversal_bounds, association_retrieval_boost metrics.",
+      "acceptance_criteria": [
+        "New file evals/memory-quality/associations.mjs",
+        "3 metrics implemented and passing",
+        "Registered in index.mjs, baselines updated",
+        "npm run eval:memory-quality passes"
+      ],
+      "files": [
+        "evals/memory-quality/associations.mjs",
+        "evals/memory-quality/index.mjs",
+        "evals/memory-quality/baseline.json"
+      ],
+      "fast_checks": [
+        "npm run eval:memory-quality"
+      ],
+      "dependencies": [
+        "t47"
+      ],
+      "priority": 30,
+      "lane": "evals",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t51",
+      "desc": "Phase 3 verification gate: all tests pass, all metrics green, no regression, platform quality green.",
+      "acceptance_criteria": [
+        "npm run test passes",
+        "npm run eval:memory-quality passes (all metrics through Phase 3)",
+        "npm run eval:memory-quality:delta shows no regression",
+        "npm run eval:platform-quality passes"
+      ],
+      "files": [],
+      "fast_checks": [
+        "npm run test",
+        "npm run eval:memory-quality",
+        "npm run eval:memory-quality:delta",
+        "npm run eval:platform-quality"
+      ],
+      "dependencies": [
+        "t36",
+        "t37",
+        "t38",
+        "t39",
+        "t40",
+        "t48",
+        "t49",
+        "t50"
+      ],
+      "priority": 31,
+      "lane": "verification",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t52",
+      "desc": "Snapshot types: SessionSnapshot and SnapshotRuntimeOptions interfaces in src/core/runtime.ts.",
+      "acceptance_criteria": [
+        "SessionSnapshot with snapshotId, bootstrap, context, frozenAt, optional profile",
+        "SnapshotRuntimeOptions extends MemoryRuntimeOptions with snapshotMode boolean",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/core/runtime.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [
+        "t51"
+      ],
+      "priority": 32,
+      "lane": "core",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t53",
+      "desc": "Runtime snapshot implementation: when snapshotMode true, startSession/resumeSession captures frozen snapshot, beforeModelCall returns cached, afterModelCall writes durably. New refreshSnapshot and getSnapshot methods.",
+      "acceptance_criteria": [
+        "createMemoryRuntime accepts SnapshotRuntimeOptions",
+        "startSession/resumeSession captures SessionSnapshot when snapshotMode true",
+        "beforeModelCall returns cached snapshot context (not live)",
+        "afterModelCall still writes turns to durable storage",
+        "refreshSnapshot re-captures and replaces cached snapshot",
+        "getSnapshot returns current snapshot or null",
+        "Default (snapshotMode false) behavior unchanged",
+        "Unit tests cover snapshot stability and live writes"
+      ],
+      "files": [
+        "src/core/runtime.ts",
+        "src/__tests__/runtime.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t52"
+      ],
+      "priority": 33,
+      "lane": "core",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    },
+    {
+      "id": "t54",
+      "desc": "HTTP endpoints for session snapshots: POST /v1/sessions/:sessionId/snapshot, GET /v1/sessions/:sessionId/snapshot, POST /v1/sessions/:sessionId/refresh.",
+      "acceptance_criteria": [
+        "3 routes added for capture, get, refresh",
+        "Returns SessionSnapshot in API envelope",
+        "Existing HTTP tests still pass"
+      ],
+      "files": [
+        "src/server/http-server.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t53"
+      ],
+      "priority": 34,
+      "lane": "server",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t55",
+      "desc": "MCP tool for snapshots: memory_snapshot with action param (capture/refresh/status).",
+      "acceptance_criteria": [
+        "memory_snapshot tool added to MCP server",
+        "Accepts action enum: capture, refresh, status",
+        "Existing MCP tests still pass"
+      ],
+      "files": [
+        "src/server/mcp-server.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t53"
+      ],
+      "priority": 34,
+      "lane": "server",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t56",
+      "desc": "Framework integration snapshot passthrough: pass snapshotMode option through claude-agent, vercel-ai, middleware integrations.",
+      "acceptance_criteria": [
+        "snapshotMode option accepted and passed through in claude-agent.ts",
+        "snapshotMode option accepted and passed through in vercel-ai.ts",
+        "snapshotMode option accepted and passed through in middleware.ts",
+        "Existing integration tests still pass"
+      ],
+      "files": [
+        "src/integrations/claude-agent.ts",
+        "src/integrations/vercel-ai.ts",
+        "src/integrations/middleware.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t53"
+      ],
+      "priority": 34,
+      "lane": "integrations",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t57",
+      "desc": "Export Phase 4 types from src/index.ts: SessionSnapshot, SnapshotRuntimeOptions.",
+      "acceptance_criteria": [
+        "SessionSnapshot and SnapshotRuntimeOptions exported",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/index.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [
+        "t53"
+      ],
+      "priority": 34,
+      "lane": "contracts",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t58",
+      "desc": "Snapshot evals: snapshot_stability, snapshot_live_writes, snapshot_refresh metrics.",
+      "acceptance_criteria": [
+        "New file evals/memory-quality/snapshots.mjs",
+        "snapshot_stability: 10 consecutive beforeModelCall returns identical context",
+        "snapshot_live_writes: turns persist during snapshot mode",
+        "snapshot_refresh: refreshSnapshot picks up new knowledge",
+        "Registered in index.mjs, baselines updated"
+      ],
+      "files": [
+        "evals/memory-quality/snapshots.mjs",
+        "evals/memory-quality/index.mjs",
+        "evals/memory-quality/baseline.json"
+      ],
+      "fast_checks": [
+        "npm run eval:memory-quality"
+      ],
+      "dependencies": [
+        "t53"
+      ],
+      "priority": 34,
+      "lane": "evals",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t59",
+      "desc": "Python client for snapshots: capture_snapshot, refresh_snapshot, get_snapshot methods on runtime client.",
+      "acceptance_criteria": [
+        "SessionSnapshot model added to models.py",
+        "3 methods on MemoryRuntimeClient and AsyncMemoryRuntimeClient",
+        "Methods hit correct HTTP endpoints from t54",
+        "Python lint passes"
+      ],
+      "files": [
+        "clients/python/memory_layer_client/models.py",
+        "clients/python/memory_layer_client/client.py"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t54"
+      ],
+      "priority": 35,
+      "lane": "python",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": false
+    },
+    {
+      "id": "t60",
+      "desc": "Phase 4 verification + final release gate: all tests, all evals, all metrics, platform quality, memory quality delta, full release:check.",
+      "acceptance_criteria": [
+        "npm run test passes",
+        "npm run eval:memory-quality passes (~26 metrics all green)",
+        "npm run eval:memory-quality:delta shows no regression from baseline",
+        "npm run eval:platform-quality passes",
+        "npm run release:check passes (full gate)"
+      ],
+      "files": [],
+      "fast_checks": [
+        "npm run release:check"
+      ],
+      "dependencies": [
+        "t54",
+        "t55",
+        "t56",
+        "t57",
+        "t58",
+        "t59"
+      ],
+      "priority": 36,
+      "lane": "verification",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": false
+    }
+  ]
+}

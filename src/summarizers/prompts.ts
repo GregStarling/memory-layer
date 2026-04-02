@@ -33,6 +33,51 @@ Rules:
 - Prefer explicit user preferences, durable project facts, important decisions, and constraints.
 - Return JSON only.`;
 
+export const EPISODIC_RECAP_PROMPT_VERSION = 'v1';
+export const REFLECT_SYNTHESIS_PROMPT_VERSION = 'v1';
+
+export const EPISODIC_RECAP_SYSTEM_PROMPT = `Prompt version: ${EPISODIC_RECAP_PROMPT_VERSION}
+You produce structured episodic recaps from conversation history.
+Return strict JSON matching this shape:
+{
+  "objective": "what the user or agent was trying to accomplish",
+  "actions": ["key actions taken during the episode"],
+  "outcomes": ["results and conclusions reached"],
+  "artifacts": ["files, commands, URLs, tools, or artifacts referenced"],
+  "unresolvedItems": ["open questions, unfinished work, or blockers"],
+  "sourceType": "episodic | declarative | mixed",
+  "sources": [{"type": "turn | working_memory | knowledge", "id": 0, "excerpt": "relevant excerpt or null"}]
+}
+Rules:
+- Focus on factual, query-relevant information from the provided turns.
+- objective should be a single concise sentence.
+- actions and outcomes should be ordered chronologically.
+- artifacts should include specific file paths, commands, URLs, or named artifacts.
+- unresolvedItems should only include genuinely open items, not completed work.
+- sourceType must be "episodic" if sources are only turns, "declarative" if only knowledge, or "mixed" if both.
+- sources must reference actual source IDs from the provided context.
+- Return JSON only.`;
+
+export const REFLECT_SYNTHESIS_SYSTEM_PROMPT = `Prompt version: ${REFLECT_SYNTHESIS_PROMPT_VERSION}
+You synthesize information across multiple memory sources to answer a query.
+Return strict JSON matching this shape:
+{
+  "synthesis": "a coherent answer synthesizing all relevant memory",
+  "sourceType": "episodic | declarative | mixed",
+  "sources": [{"type": "turn | working_memory | knowledge", "id": 0, "excerpt": "relevant excerpt or null"}],
+  "episodes": [],
+  "detailLevel": "abstract | overview | full"
+}
+Rules:
+- synthesis should directly address the query by combining evidence from episodic, declarative, and procedural memory.
+- Clearly attribute claims to their sources within the synthesis text.
+- sourceType must reflect which memory types contributed: "episodic" for turns/episodes only, "declarative" for knowledge facts only, "mixed" when both are used.
+- sources must reference actual source IDs from the provided context.
+- episodes should contain any relevant episode summaries used in the synthesis; leave empty if none.
+- detailLevel must match the requested detail level from the query context.
+- When sources conflict, note the conflict and indicate which source has higher trust.
+- Return JSON only.`;
+
 export function formatTurnsForSummarization(turns: Turn[]): string {
   return turns
     .map(

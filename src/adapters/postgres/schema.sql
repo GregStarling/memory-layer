@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS working_memory (
   created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
 );
 
+ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS episode_recap JSONB;
+
 CREATE INDEX IF NOT EXISTS idx_wm_scope ON working_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
 CREATE INDEX IF NOT EXISTS idx_wm_session ON working_memory (session_id);
 CREATE INDEX IF NOT EXISTS idx_wm_status ON working_memory (status);

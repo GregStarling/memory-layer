@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-export const CURRENT_SCHEMA_VERSION = 9;
+export const CURRENT_SCHEMA_VERSION = 10;
 
 export function createSQLiteSchema(database: Database.Database): void {
   database.pragma('journal_mode = WAL');
@@ -391,6 +391,12 @@ export function createSQLiteSchema(database: Database.Database): void {
     } catch {
       // Best-effort backfill for upgraded databases.
     }
+  }
+
+  try {
+    database.exec('ALTER TABLE working_memory ADD COLUMN episode_recap TEXT');
+  } catch {
+    // Column already exists on upgraded databases.
   }
 
   database

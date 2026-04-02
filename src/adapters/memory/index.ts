@@ -293,6 +293,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         created_at: createdAt,
         expires_at: input.expires_at ?? createdAt + 86400,
         promoted_to_knowledge_id: null,
+        episode_recap: input.episode_recap ?? null,
         schema_version: SCHEMA_VERSION,
       };
       state.workingMemory.push(record);

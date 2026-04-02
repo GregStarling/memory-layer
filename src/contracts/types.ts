@@ -60,6 +60,7 @@ export type CompactionState =
   | 'compacting';
 export type WorkItemKind = 'objective' | 'unresolved_work' | 'constraint';
 export type WorkItemStatus = 'open' | 'in_progress' | 'blocked' | 'done';
+export type EpisodeDetailLevel = 'abstract' | 'overview' | 'full';
 
 export const TURN_ROLES: readonly TurnRole[] = ['user', 'assistant', 'system'];
 export const COMPACTION_TRIGGERS: readonly CompactionTrigger[] = [
@@ -154,6 +155,11 @@ export const WORK_ITEM_STATUSES: readonly WorkItemStatus[] = [
   'blocked',
   'done',
 ];
+export const EPISODE_DETAIL_LEVELS: readonly EpisodeDetailLevel[] = [
+  'abstract',
+  'overview',
+  'full',
+];
 
 export interface Turn extends NormalizedMemoryScope {
   id: number;
@@ -192,6 +198,7 @@ export interface WorkingMemory extends NormalizedMemoryScope {
   created_at: number;
   expires_at: number | null;
   promoted_to_knowledge_id: number | null;
+  episode_recap: EpisodeRecap | null;
   schema_version: number;
 }
 
@@ -205,6 +212,7 @@ export interface NewWorkingMemory extends MemoryScope {
   turn_count: number;
   compaction_trigger: CompactionTrigger;
   expires_at?: number | null;
+  episode_recap?: EpisodeRecap | null;
 }
 
 export interface KnowledgeMemory extends NormalizedMemoryScope {
@@ -524,4 +532,52 @@ export interface NewWorkItem extends MemoryScope {
   status?: WorkItemStatus;
   source_working_memory_id?: number | null;
   created_at?: number;
+}
+
+export interface EpisodeSourceReference {
+  type: 'turn' | 'working_memory' | 'knowledge';
+  id: number;
+  excerpt: string | null;
+}
+
+export interface EpisodeRecap {
+  objective: string;
+  actions: string[];
+  outcomes: string[];
+  artifacts: string[];
+  unresolvedItems: string[];
+  sourceType: 'episodic' | 'declarative' | 'mixed';
+  sources: EpisodeSourceReference[];
+}
+
+export interface EpisodeSearchOptions {
+  query: string;
+  detailLevel?: EpisodeDetailLevel;
+  limit?: number;
+  timeRange?: TimeRange;
+}
+
+export interface EpisodeSummary {
+  sessionId: string;
+  recap: EpisodeRecap;
+  detailLevel: EpisodeDetailLevel;
+  turnRange: { start: number; end: number };
+  createdAt: number;
+}
+
+export interface ReflectOptions {
+  query: string;
+  detailLevel?: EpisodeDetailLevel;
+  includeEpisodic?: boolean;
+  includeDeclarative?: boolean;
+  limit?: number;
+  timeRange?: TimeRange;
+}
+
+export interface ReflectResult {
+  synthesis: string;
+  sourceType: 'episodic' | 'declarative' | 'mixed';
+  sources: EpisodeSourceReference[];
+  episodes: EpisodeSummary[];
+  detailLevel: EpisodeDetailLevel;
 }

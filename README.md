@@ -14,6 +14,7 @@
   <a href="#python">Python</a> &nbsp;&bull;&nbsp;
   <a href="#api-reference">API</a> &nbsp;&bull;&nbsp;
   <a href="#configuration">Config</a> &nbsp;&bull;&nbsp;
+  <a href="docs/ULTIMATE_MEMORY_LAYER_ROADMAP.md">Roadmap</a> &nbsp;&bull;&nbsp;
   <a href="docs/DEPLOYMENT.md">Deploy</a>
 </p>
 
