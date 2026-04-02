@@ -12,10 +12,13 @@ export interface CognitiveMemoryItem {
   id: number;
   type: CognitiveMemoryType;
   fact: string;
-  trustScore: number;
-  knowledgeClass: KnowledgeClass;
   createdAt: number;
   lastAccessedAt: number;
+  metadata: {
+    trustScore: number;
+    knowledgeClass: KnowledgeClass;
+    knowledgeState?: string;
+  };
 }
 
 export interface CognitiveSearchOptions {
@@ -26,9 +29,14 @@ export interface CognitiveSearchOptions {
   activeOnly?: boolean;
 }
 
-export interface CognitiveSearchResult {
+export interface CognitiveSearchHit {
   item: CognitiveMemoryItem;
   rank: number;
+}
+
+export interface CognitiveSearchResult {
+  byType: Record<CognitiveMemoryType, CognitiveSearchHit[]>;
+  all: CognitiveSearchHit[];
 }
 
 // -- Mapping functions --

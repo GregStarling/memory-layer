@@ -3,6 +3,7 @@ import type { StorageAdapter } from '../contracts/storage.js';
 import type {
   CognitiveMemoryItem,
   CognitiveMemoryType,
+  CognitiveSearchHit,
   CognitiveSearchOptions,
   CognitiveSearchResult,
 } from '../contracts/cognitive.js';
@@ -17,20 +18,18 @@ import type {
   WorkingMemory,
 } from '../contracts/types.js';
 
-export interface CognitiveGrouped {
-  byType: Record<CognitiveMemoryType, CognitiveSearchResult[]>;
-  all: CognitiveSearchResult[];
-}
-
 function knowledgeToCognitiveItem(km: KnowledgeMemory): CognitiveMemoryItem {
   return {
     id: km.id,
     type: mapKnowledgeClassToCognitive(km.knowledge_class),
     fact: km.fact,
-    trustScore: km.trust_score,
-    knowledgeClass: km.knowledge_class,
     createdAt: km.created_at,
     lastAccessedAt: km.last_accessed_at,
+    metadata: {
+      trustScore: km.trust_score,
+      knowledgeClass: km.knowledge_class,
+      knowledgeState: km.knowledge_state,
+    },
   };
 }
 
@@ -39,15 +38,17 @@ function workingMemoryToCognitiveItem(wm: WorkingMemory): CognitiveMemoryItem {
     id: wm.id,
     type: 'working',
     fact: wm.summary,
-    trustScore: 1,
-    knowledgeClass: 'project_fact',
     createdAt: wm.created_at,
     lastAccessedAt: wm.created_at,
+    metadata: {
+      trustScore: 1,
+      knowledgeClass: 'project_fact',
+    },
   };
 }
 
-function groupByType(results: CognitiveSearchResult[]): Record<CognitiveMemoryType, CognitiveSearchResult[]> {
-  const grouped: Record<CognitiveMemoryType, CognitiveSearchResult[]> = {
+function groupByType(results: CognitiveSearchHit[]): Record<CognitiveMemoryType, CognitiveSearchHit[]> {
+  const grouped: Record<CognitiveMemoryType, CognitiveSearchHit[]> = {
     episodic: [],
     semantic: [],
     procedural: [],
@@ -59,16 +60,28 @@ function groupByType(results: CognitiveSearchResult[]): Record<CognitiveMemoryTy
   return grouped;
 }
 
+function computeWorkingMemoryRank(wm: WorkingMemory, query: string): number {
+  const queryLower = query.toLowerCase();
+  let score = 0;
+  const summaryLower = wm.summary.toLowerCase();
+  if (summaryLower.includes(queryLower)) score += 1.0;
+  const tagMatches = wm.topic_tags.filter((t) => t.toLowerCase().includes(queryLower)).length;
+  score += tagMatches * 0.3;
+  const entityMatches = wm.key_entities.filter((e) => e.toLowerCase().includes(queryLower)).length;
+  score += entityMatches * 0.3;
+  return score;
+}
+
 export function searchCognitive(
   adapter: StorageAdapter,
   scope: MemoryScope,
   options: CognitiveSearchOptions,
-): CognitiveGrouped {
+): CognitiveSearchResult {
   const limit = options.limit ?? 20;
+  const activeOnly = options.activeOnly ?? true;
   const requestedTypes = options.types ?? (['episodic', 'semantic', 'procedural', 'working'] as CognitiveMemoryType[]);
 
-  const all: CognitiveSearchResult[] = [];
-  let rank = 0;
+  const all: CognitiveSearchHit[] = [];
 
   // Semantic and procedural: search knowledge memory
   const knowledgeTypes = requestedTypes.filter((t) => t === 'semantic' || t === 'procedural');
@@ -76,7 +89,7 @@ export function searchCognitive(
     const knowledgeClasses = knowledgeTypes.flatMap(mapCognitiveToKnowledgeClasses);
     const searchOpts: SearchOptions = {
       limit,
-      activeOnly: options.activeOnly ?? true,
+      activeOnly,
       minimumTrustScore: options.minimumTrustScore,
       knowledgeClasses: knowledgeClasses.length > 0 ? knowledgeClasses : undefined,
     };
@@ -85,23 +98,22 @@ export function searchCognitive(
     for (const hit of hits) {
       all.push({
         item: knowledgeToCognitiveItem(hit.item),
-        rank: hit.rank ?? rank++,
+        rank: hit.rank ?? 0,
       });
     }
   }
 
-  // Working: search active working memory
+  // Working: search working memory with computed relevance scores
   if (requestedTypes.includes('working')) {
-    const wmList = adapter.getActiveWorkingMemory(scope);
+    const wmList = activeOnly
+      ? adapter.getActiveWorkingMemory(scope)
+      : adapter.getWorkingMemoryByTimeRange(scope, { start_at: 0, end_at: Math.floor(Date.now() / 1000) });
     for (const wm of wmList) {
-      // Basic relevance filter: check if query terms appear in summary
-      const queryLower = options.query.toLowerCase();
-      if (wm.summary.toLowerCase().includes(queryLower) ||
-          wm.topic_tags.some((t) => t.toLowerCase().includes(queryLower)) ||
-          wm.key_entities.some((e) => e.toLowerCase().includes(queryLower))) {
+      const score = computeWorkingMemoryRank(wm, options.query);
+      if (score > 0) {
         all.push({
           item: workingMemoryToCognitiveItem(wm),
-          rank: rank++,
+          rank: score,
         });
       }
     }
@@ -117,18 +129,20 @@ export function searchCognitive(
           id: turn.id,
           type: 'episodic',
           fact: turn.content,
-          trustScore: 1,
-          knowledgeClass: 'episodic_fact',
           createdAt: turn.created_at,
           lastAccessedAt: turn.created_at,
+          metadata: {
+            trustScore: 1,
+            knowledgeClass: 'episodic_fact',
+          },
         },
-        rank: hit.rank ?? rank++,
+        rank: hit.rank ?? 0,
       });
     }
   }
 
-  // Sort by rank, then trim to limit
-  all.sort((a, b) => a.rank - b.rank);
+  // Sort descending by rank (higher = more relevant), then trim to limit
+  all.sort((a, b) => b.rank - a.rank);
   const trimmed = all.slice(0, limit);
 
   return {
