@@ -1,5 +1,5 @@
 {
-  "goal": "Implement the Ultimate Memory Layer Roadmap: 7 features across 4 phases — episodic recall, cognitive taxonomy, materialized profiles, workspace onboarding, procedural playbooks, typed associations, and session snapshots. Source of truth: docs/ULTIMATE_MEMORY_LAYER_ROADMAP.md.",
+  "goal": "Implement the Ultimate Memory Layer Roadmap: 7 features across 4 phases \u2014 episodic recall, cognitive taxonomy, materialized profiles, workspace onboarding, procedural playbooks, typed associations, and session snapshots. Source of truth: docs/ULTIMATE_MEMORY_LAYER_ROADMAP.md.",
   "fast_checks_default": [
     "npm run lint",
     "npm run test",
@@ -208,7 +208,7 @@
       "lane": "server",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t9",
@@ -230,7 +230,7 @@
       "lane": "server",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t10",
@@ -252,7 +252,7 @@
       "lane": "docs",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t11",
@@ -276,7 +276,7 @@
       "lane": "integrations",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t12",
@@ -299,7 +299,7 @@
       "lane": "contracts",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t13",
@@ -322,7 +322,7 @@
       "lane": "python",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t14",

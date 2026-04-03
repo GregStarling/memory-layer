@@ -8,6 +8,8 @@ servers:
 tags:
   - name: ingestion
   - name: retrieval
+  - name: episodic
+  - name: cognitive
   - name: maintenance
   - name: observability
 components:
@@ -264,6 +266,149 @@ components:
           type: boolean
         scopes:
           type: integer
+    EpisodeSourceReference:
+      type: object
+      required: [type, id, excerpt]
+      properties:
+        type:
+          type: string
+          enum: [turn, working_memory, knowledge]
+        id:
+          type: integer
+        excerpt:
+          type: string
+          nullable: true
+    EpisodeRecap:
+      type: object
+      required: [objective, actions, outcomes, artifacts, unresolvedItems, sourceType, sources]
+      properties:
+        objective:
+          type: string
+        actions:
+          type: array
+          items:
+            type: string
+        outcomes:
+          type: array
+          items:
+            type: string
+        artifacts:
+          type: array
+          items:
+            type: string
+        unresolvedItems:
+          type: array
+          items:
+            type: string
+        sourceType:
+          type: string
+          enum: [episodic, declarative, mixed]
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/EpisodeSourceReference'
+    EpisodeSummary:
+      type: object
+      required: [sessionId, recap, detailLevel, turnRange, createdAt]
+      properties:
+        sessionId:
+          type: string
+        recap:
+          $ref: '#/components/schemas/EpisodeRecap'
+        detailLevel:
+          type: string
+          enum: [abstract, overview, full]
+        turnRange:
+          type: object
+          required: [start, end]
+          properties:
+            start:
+              type: integer
+            end:
+              type: integer
+        createdAt:
+          type: integer
+    ReflectResult:
+      type: object
+      required: [synthesis, sourceType, sources, episodes, detailLevel]
+      properties:
+        synthesis:
+          type: string
+        sourceType:
+          type: string
+          enum: [episodic, declarative, mixed]
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/EpisodeSourceReference'
+        episodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/EpisodeSummary'
+        detailLevel:
+          type: string
+          enum: [abstract, overview, full]
+    CognitiveMemoryItem:
+      type: object
+      required: [id, type, fact, createdAt, lastAccessedAt, metadata]
+      properties:
+        id:
+          type: integer
+        type:
+          type: string
+          enum: [episodic, semantic, procedural, working]
+        fact:
+          type: string
+        createdAt:
+          type: integer
+        lastAccessedAt:
+          type: integer
+        metadata:
+          type: object
+          required: [trustScore, knowledgeClass]
+          properties:
+            trustScore:
+              type: number
+            knowledgeClass:
+              type: string
+            knowledgeState:
+              type: string
+    CognitiveSearchHit:
+      type: object
+      required: [item, rank]
+      properties:
+        item:
+          $ref: '#/components/schemas/CognitiveMemoryItem'
+        rank:
+          type: number
+    CognitiveSearchResult:
+      type: object
+      required: [byType, all]
+      properties:
+        byType:
+          type: object
+          required: [episodic, semantic, procedural, working]
+          properties:
+            episodic:
+              type: array
+              items:
+                $ref: '#/components/schemas/CognitiveSearchHit'
+            semantic:
+              type: array
+              items:
+                $ref: '#/components/schemas/CognitiveSearchHit'
+            procedural:
+              type: array
+              items:
+                $ref: '#/components/schemas/CognitiveSearchHit'
+            working:
+              type: array
+              items:
+                $ref: '#/components/schemas/CognitiveSearchHit'
+        all:
+          type: array
+          items:
+            $ref: '#/components/schemas/CognitiveSearchHit'
 security:
   - bearerAuth: []
 paths:
@@ -396,6 +541,165 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SearchResponse'
+        '400':
+          description: Missing search query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/episodes:
+    get:
+      tags: [episodic]
+      summary: Search episodic memory across sessions
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Search query
+        - name: detail
+          in: query
+          schema:
+            type: string
+            enum: [abstract, overview, full]
+          description: Detail level for episode summaries
+        - name: limit
+          in: query
+          schema:
+            type: integer
+          description: Maximum number of episodes to return
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Episode search results
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [episodes]
+                properties:
+                  episodes:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/EpisodeSummary'
+        '400':
+          description: Missing search query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/episodes/summarize:
+    post:
+      tags: [episodic]
+      summary: Summarize a specific session episode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_id]
+              properties:
+                session_id:
+                  type: string
+                  description: Session ID to summarize
+                detailLevel:
+                  type: string
+                  enum: [abstract, overview, full]
+                  description: Detail level for the summary
+                scope:
+                  $ref: '#/components/schemas/Scope'
+      responses:
+        '200':
+          description: Episode summary
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [episode]
+                properties:
+                  episode:
+                    $ref: '#/components/schemas/EpisodeSummary'
+  /v1/reflect:
+    post:
+      tags: [episodic]
+      summary: Synthesize information across episodic and declarative memory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                  description: Reflection query
+                detailLevel:
+                  type: string
+                  enum: [abstract, overview, full]
+                includeDeclarative:
+                  type: boolean
+                  description: Include declarative knowledge in synthesis
+                includeEpisodic:
+                  type: boolean
+                  description: Include episodic memory in synthesis
+                timeRange:
+                  type: object
+                  properties:
+                    start_at:
+                      type: integer
+                      description: Unix timestamp lower bound
+                    end_at:
+                      type: integer
+                      description: Unix timestamp upper bound
+                scope:
+                  $ref: '#/components/schemas/Scope'
+      responses:
+        '200':
+          description: Reflection result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReflectResult'
+  /v1/memory:
+    get:
+      tags: [cognitive]
+      summary: Search memory using the cognitive taxonomy
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Search query
+        - name: types
+          in: query
+          schema:
+            type: string
+          description: Comma-separated cognitive types (episodic, semantic, procedural, working)
+        - name: limit
+          in: query
+          schema:
+            type: integer
+          description: Maximum number of results
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Cognitive search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CognitiveSearchResult'
         '400':
           description: Missing search query
           content:
