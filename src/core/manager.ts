@@ -27,6 +27,10 @@ import type {
   PaginatedResult,
   SearchOptions,
   SearchResult,
+  EpisodeSearchOptions,
+  EpisodeSummary,
+  ReflectOptions,
+  ReflectResult,
   TimeRange,
   Turn,
   TurnRole,
@@ -57,6 +61,13 @@ import {
   getDueReverificationKnowledge,
   resolveMaintenancePolicy,
 } from './knowledge-lifecycle.js';
+import type {
+  CognitiveSearchOptions,
+  CognitiveSearchResult,
+} from '../contracts/cognitive.js';
+import type { StructuredGenerationClient } from '../summarizers/client.js';
+import { searchEpisodes, summarizeEpisode, reflect } from './episodic.js';
+import { searchCognitive } from './cognitive.js';
 import { normalizeScope } from '../contracts/identity.js';
 
 export interface MemoryManagerConfig {
@@ -91,6 +102,7 @@ export interface MemoryManagerConfig {
     embeddings?: CircuitBreakerOptions;
   };
   redactText?: (input: { kind: 'turn' | 'fact' | 'work_item'; text: string }) => string;
+  structuredClient?: StructuredGenerationClient;
 }
 
 export interface MemoryManager {
@@ -143,6 +155,10 @@ export interface MemoryManager {
     demotedKnowledgeIds: number[];
   }>;
   runMaintenance(policy?: MaintenancePolicy): Promise<MaintenanceReport>;
+  searchEpisodes(options: EpisodeSearchOptions): Promise<EpisodeSummary[]>;
+  summarizeEpisode(sessionId: string, options?: { detailLevel?: EpisodeSummary['detailLevel'] }): Promise<EpisodeSummary>;
+  reflect(options: ReflectOptions): Promise<ReflectResult>;
+  searchCognitive(options: CognitiveSearchOptions): Promise<CognitiveSearchResult>;
   close(): Promise<void>;
 }
 
@@ -959,6 +975,51 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         demotedKnowledgeCount: report.demotedKnowledgeIds.length,
       });
       return report;
+    },
+
+    async searchEpisodes(options) {
+      if (!config.structuredClient) {
+        throw new Error('searchEpisodes requires a structuredClient in MemoryManagerConfig');
+      }
+      return searchEpisodes(
+        { adapter: asyncAdapter, scope: config.scope, client: config.structuredClient },
+        options,
+      );
+    },
+
+    async summarizeEpisode(sessionId, options) {
+      if (!config.structuredClient) {
+        throw new Error('summarizeEpisode requires a structuredClient in MemoryManagerConfig');
+      }
+      const detailLevel = options?.detailLevel ?? 'overview';
+      // Fetch both active and all session working memories to include post-compaction data
+      const activeTurns = await asyncAdapter.getActiveTurns(config.scope, sessionId);
+      const allSessionWm = await asyncAdapter.getWorkingMemoryBySession(sessionId, config.scope);
+      // If active turns are empty (compacted), retrieve archived turns from working memory turn ranges
+      let turns = activeTurns;
+      if (turns.length === 0 && allSessionWm.length > 0) {
+        const minStart = Math.min(...allSessionWm.map((wm) => wm.turn_id_start));
+        const maxEnd = Math.max(...allSessionWm.map((wm) => wm.turn_id_end));
+        turns = await asyncAdapter.getArchivedTurnRange(sessionId, minStart, maxEnd, config.scope);
+      }
+      return summarizeEpisode(
+        { adapter: asyncAdapter, scope: config.scope, client: config.structuredClient },
+        { turns, workingMemories: allSessionWm, sessionId, detailLevel, client: config.structuredClient },
+      );
+    },
+
+    async reflect(options) {
+      if (!config.structuredClient) {
+        throw new Error('reflect requires a structuredClient in MemoryManagerConfig');
+      }
+      return reflect(
+        { adapter: asyncAdapter, scope: config.scope, client: config.structuredClient },
+        options,
+      );
+    },
+
+    async searchCognitive(options) {
+      return searchCognitive(asyncAdapter, config.scope, options);
     },
 
     async close() {

@@ -6,6 +6,7 @@ import { createMemoryManager } from '../core/manager.js';
 import { createClaudeMemoryManager } from '../core/provider-managers.js';
 import { createRegexExtractor } from '../core/extractor.js';
 import { makeScope } from './test-helpers.js';
+import type { StructuredGenerationClient } from '../summarizers/client.js';
 
 describe('memory manager', () => {
   let adapter: ReturnType<typeof createSQLiteAdapterWithEmbeddings>;
@@ -533,5 +534,146 @@ describe('memory manager', () => {
     await manager.processTurn('assistant', 'new turn after a long gap');
     expect(adapter.getActiveWorkingMemory(scope).length).toBeGreaterThan(0);
     await manager.close();
+  });
+
+  describe('episodic and cognitive methods', () => {
+    function createMockStructuredClient(): StructuredGenerationClient {
+      return {
+        async generate(req) {
+          if (req.systemPrompt.includes('episodic recaps')) {
+            return JSON.stringify({
+              objective: 'Discussed Rust preferences',
+              actions: ['stated preference for Rust'],
+              outcomes: ['preference recorded'],
+              artifacts: [],
+              unresolvedItems: [],
+              sourceType: 'episodic',
+              sources: [{ type: 'turn', id: 1, excerpt: 'I prefer Rust' }],
+            });
+          }
+          return JSON.stringify({
+            synthesis: 'The user prefers Rust for memory systems.',
+            sourceType: 'mixed',
+            sources: [
+              { type: 'turn', id: 1, excerpt: 'I prefer Rust' },
+              { type: 'knowledge', id: 1, excerpt: 'prefers Rust' },
+            ],
+            episodes: [],
+            detailLevel: 'overview',
+          });
+        },
+      };
+    }
+
+    it('searchEpisodes returns episode summaries', async () => {
+      const manager = createMemoryManager({
+        adapter,
+        scope: makeScope(),
+        sessionId: 'session-1',
+        summarizer: async () => ({
+          summary: 'User prefers Rust.',
+          key_entities: ['Rust'],
+          topic_tags: ['preferences'],
+        }),
+        autoCompact: false,
+        structuredClient: createMockStructuredClient(),
+      });
+
+      await manager.processTurn('user', 'I prefer Rust for memory systems.');
+      await manager.processTurn('assistant', 'Understood, Rust is a great choice.');
+
+      const episodes = await manager.searchEpisodes({ query: 'Rust' });
+      expect(episodes.length).toBeGreaterThanOrEqual(1);
+      expect(episodes[0].recap.objective).toBeTruthy();
+      expect(episodes[0].sessionId).toBeTruthy();
+      await manager.close();
+    });
+
+    it('summarizeEpisode returns a summary for a session', async () => {
+      const manager = createMemoryManager({
+        adapter,
+        scope: makeScope(),
+        sessionId: 'session-1',
+        summarizer: async () => ({
+          summary: 'User prefers Rust.',
+          key_entities: ['Rust'],
+          topic_tags: ['preferences'],
+        }),
+        autoCompact: false,
+        structuredClient: createMockStructuredClient(),
+      });
+
+      await manager.processTurn('user', 'I prefer Rust for memory systems.');
+
+      const summary = await manager.summarizeEpisode('session-1', { detailLevel: 'abstract' });
+      expect(summary.detailLevel).toBe('abstract');
+      expect(summary.sessionId).toBe('session-1');
+      expect(summary.recap.objective).toBeTruthy();
+      await manager.close();
+    });
+
+    it('reflect synthesizes across memory types', async () => {
+      const manager = createMemoryManager({
+        adapter,
+        scope: makeScope(),
+        sessionId: 'session-1',
+        summarizer: async () => ({
+          summary: 'User prefers Rust.',
+          key_entities: ['Rust'],
+          topic_tags: ['preferences'],
+        }),
+        autoCompact: false,
+        structuredClient: createMockStructuredClient(),
+      });
+
+      await manager.processTurn('user', 'I prefer Rust for memory systems.');
+      await manager.learnFact('User prefers Rust', 'preference', 'high');
+
+      const result = await manager.reflect({ query: 'Rust' });
+      expect(result.synthesis).toBeTruthy();
+      expect(result.sourceType).toBeTruthy();
+      expect(result.detailLevel).toBe('overview');
+      await manager.close();
+    });
+
+    it('searchCognitive groups results by cognitive type', async () => {
+      const manager = createMemoryManager({
+        adapter,
+        scope: makeScope(),
+        sessionId: 'session-1',
+        summarizer: async () => ({
+          summary: 'User prefers Rust.',
+          key_entities: ['Rust'],
+          topic_tags: ['preferences'],
+        }),
+        autoCompact: false,
+      });
+
+      await manager.processTurn('user', 'I prefer Rust for memory systems.');
+      await manager.learnFact('User prefers Rust', 'preference', 'high');
+
+      const result = await manager.searchCognitive({ query: 'Rust' });
+      expect(result.byType).toBeDefined();
+      expect(result.all.length).toBeGreaterThan(0);
+      expect(['episodic', 'semantic', 'procedural', 'working']).toContain(result.all[0].item.type);
+      await manager.close();
+    });
+
+    it('searchEpisodes throws without structuredClient', async () => {
+      const manager = createMemoryManager({
+        adapter,
+        scope: makeScope(),
+        sessionId: 'session-1',
+        summarizer: async () => ({
+          summary: 'summary',
+          key_entities: [],
+          topic_tags: [],
+        }),
+        autoCompact: false,
+      });
+
+      await expect(manager.searchEpisodes({ query: 'test' })).rejects.toThrow('structuredClient');
+      await manager.close();
+    });
   });
 });

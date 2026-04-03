@@ -134,7 +134,7 @@
       "lane": "core",
       "parallel_safe": false,
       "tranche_safe": false,
-      "done": false
+      "done": true
     },
     {
       "id": "t6",
@@ -184,7 +184,7 @@
       "lane": "core",
       "parallel_safe": false,
       "tranche_safe": false,
-      "done": false
+      "done": true
     },
     {
       "id": "t8",

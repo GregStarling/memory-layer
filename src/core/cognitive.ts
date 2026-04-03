@@ -1,5 +1,5 @@
 import type { MemoryScope } from '../contracts/identity.js';
-import type { StorageAdapter } from '../contracts/storage.js';
+import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type {
   CognitiveMemoryItem,
   CognitiveMemoryType,
@@ -72,11 +72,11 @@ function computeWorkingMemoryRank(wm: WorkingMemory, query: string): number {
   return score;
 }
 
-export function searchCognitive(
-  adapter: StorageAdapter,
+export async function searchCognitive(
+  adapter: AsyncStorageAdapter,
   scope: MemoryScope,
   options: CognitiveSearchOptions,
-): CognitiveSearchResult {
+): Promise<CognitiveSearchResult> {
   const limit = options.limit ?? 20;
   const activeOnly = options.activeOnly ?? true;
   const requestedTypes = options.types ?? (['episodic', 'semantic', 'procedural', 'working'] as CognitiveMemoryType[]);
@@ -94,7 +94,7 @@ export function searchCognitive(
       knowledgeClasses: knowledgeClasses.length > 0 ? knowledgeClasses : undefined,
     };
 
-    const hits: SearchResult<KnowledgeMemory>[] = adapter.searchKnowledge(scope, options.query, searchOpts);
+    const hits: SearchResult<KnowledgeMemory>[] = await adapter.searchKnowledge(scope, options.query, searchOpts);
     for (const hit of hits) {
       all.push({
         item: knowledgeToCognitiveItem(hit.item),
@@ -106,8 +106,8 @@ export function searchCognitive(
   // Working: search working memory with computed relevance scores
   if (requestedTypes.includes('working')) {
     const wmList = activeOnly
-      ? adapter.getActiveWorkingMemory(scope)
-      : adapter.getWorkingMemoryByTimeRange(scope, { start_at: 0, end_at: Math.floor(Date.now() / 1000) });
+      ? await adapter.getActiveWorkingMemory(scope)
+      : await adapter.getWorkingMemoryByTimeRange(scope, { start_at: 0, end_at: Math.floor(Date.now() / 1000) });
     for (const wm of wmList) {
       const score = computeWorkingMemoryRank(wm, options.query);
       if (score > 0) {
@@ -121,7 +121,7 @@ export function searchCognitive(
 
   // Episodic: search turns and map to cognitive items
   if (requestedTypes.includes('episodic')) {
-    const turnHits = adapter.searchTurns(scope, options.query, { limit });
+    const turnHits = await adapter.searchTurns(scope, options.query, { limit });
     for (const hit of turnHits) {
       const turn = hit.item;
       all.push({

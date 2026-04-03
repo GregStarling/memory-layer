@@ -1,5 +1,5 @@
 import type { MemoryScope } from '../contracts/identity.js';
-import type { StorageAdapter } from '../contracts/storage.js';
+import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type {
   EpisodeDetailLevel,
   EpisodeRecap,
@@ -20,7 +20,7 @@ import {
 } from '../summarizers/prompts.js';
 
 export interface EpisodicDeps {
-  adapter: StorageAdapter;
+  adapter: AsyncStorageAdapter;
   scope: MemoryScope;
   client: StructuredGenerationClient;
 }
@@ -131,16 +131,20 @@ export async function searchEpisodes(
   const detailLevel = options.detailLevel ?? 'overview';
   const limit = options.limit ?? 10;
 
-  const turnHits = adapter.searchTurns(scope, options.query, { limit: limit * 5 });
+  const turnHits = await adapter.searchTurns(scope, options.query, { limit: limit * 5 });
 
   // Scope working memory to sessions found in turn hits to avoid leaking unrelated sessions
   const hitSessionIds = new Set(turnHits.map((h) => h.item.session_id));
-  const wmList = options.timeRange
-    ? adapter.getWorkingMemoryByTimeRange(scope, options.timeRange)
-        .filter((wm) => hitSessionIds.has(wm.session_id))
-    : Array.from(hitSessionIds).flatMap(
-        (sid) => adapter.getActiveWorkingMemory(scope, sid),
-      );
+  let wmList: WorkingMemory[];
+  if (options.timeRange) {
+    const allWm = await adapter.getWorkingMemoryByTimeRange(scope, options.timeRange);
+    wmList = allWm.filter((wm) => hitSessionIds.has(wm.session_id));
+  } else {
+    const wmPromises = Array.from(hitSessionIds).map(
+      (sid) => adapter.getActiveWorkingMemory(scope, sid),
+    );
+    wmList = (await Promise.all(wmPromises)).flat();
+  }
 
   const groups = groupBySession(turnHits, wmList);
   const summaries: EpisodeSummary[] = [];
@@ -226,16 +230,20 @@ export async function reflect(
   let hasDeclarative = false;
 
   if (includeEpisodic) {
-    const turnHits = adapter.searchTurns(scope, options.query, { limit: limit * 5 });
+    const turnHits = await adapter.searchTurns(scope, options.query, { limit: limit * 5 });
 
     // Scope working memory to sessions found in turn hits to avoid leaking unrelated sessions
     const hitSessionIds = new Set(turnHits.map((h) => h.item.session_id));
-    const wmList = options.timeRange
-      ? adapter.getWorkingMemoryByTimeRange(scope, options.timeRange)
-          .filter((wm) => hitSessionIds.has(wm.session_id))
-      : Array.from(hitSessionIds).flatMap(
-          (sid) => adapter.getActiveWorkingMemory(scope, sid),
-        );
+    let wmList: WorkingMemory[];
+    if (options.timeRange) {
+      const allWm = await adapter.getWorkingMemoryByTimeRange(scope, options.timeRange);
+      wmList = allWm.filter((wm) => hitSessionIds.has(wm.session_id));
+    } else {
+      const wmPromises = Array.from(hitSessionIds).map(
+        (sid) => adapter.getActiveWorkingMemory(scope, sid),
+      );
+      wmList = (await Promise.all(wmPromises)).flat();
+    }
 
     if (turnHits.length > 0 || wmList.length > 0) {
       hasEpisodic = true;
@@ -255,7 +263,7 @@ export async function reflect(
   }
 
   if (includeDeclarative) {
-    const knowledgeHits = adapter.searchKnowledge(scope, options.query, { limit });
+    const knowledgeHits = await adapter.searchKnowledge(scope, options.query, { limit });
     if (knowledgeHits.length > 0) {
       hasDeclarative = true;
       contextParts.push('\nDeclarative memory (trusted knowledge):');

@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createSQLiteAdapter } from '../adapters/sqlite/index.js';
+import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
+import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type { StorageAdapter } from '../contracts/storage.js';
 import type { MemoryScope } from '../contracts/identity.js';
 import type { StructuredGenerationClient } from '../summarizers/client.js';
@@ -30,10 +32,12 @@ function createMockClient(response: Record<string, unknown>): StructuredGenerati
 
 describe('episodic recall', () => {
   let adapter: StorageAdapter;
+  let asyncAdapter: AsyncStorageAdapter;
   const s = scope();
 
   beforeEach(() => {
     adapter = createSQLiteAdapter(':memory:');
+    asyncAdapter = wrapSyncAdapter(adapter);
     // Seed turns
     adapter.insertTurn({
       ...s,
@@ -101,7 +105,7 @@ describe('episodic recall', () => {
       });
 
       const results = await searchEpisodes(
-        { adapter, scope: s, client },
+        { adapter: asyncAdapter, scope: s, client },
         { query: 'deploy', detailLevel: 'overview' },
       );
 
@@ -131,7 +135,7 @@ describe('episodic recall', () => {
       });
 
       const results = await searchEpisodes(
-        { adapter, scope: s, client },
+        { adapter: asyncAdapter, scope: s, client },
         { query: 'deploy' },
       );
 
@@ -160,7 +164,7 @@ describe('episodic recall', () => {
       const wm = adapter.getActiveWorkingMemory(s, 'sess-1');
 
       const result = await summarizeEpisode(
-        { adapter, scope: s, client },
+        { adapter: asyncAdapter, scope: s, client },
         {
           turns,
           workingMemories: wm,
@@ -189,7 +193,7 @@ describe('episodic recall', () => {
       const turns = adapter.getActiveTurns(s, 'sess-1');
 
       const result = await summarizeEpisode(
-        { adapter, scope: s, client },
+        { adapter: asyncAdapter, scope: s, client },
         {
           turns,
           workingMemories: [],
@@ -222,7 +226,7 @@ describe('episodic recall', () => {
       const wm = adapter.getActiveWorkingMemory(s, 'sess-1');
 
       const result = await summarizeEpisode(
-        { adapter, scope: s, client },
+        { adapter: asyncAdapter, scope: s, client },
         {
           turns,
           workingMemories: wm,
@@ -268,7 +272,7 @@ describe('episodic recall', () => {
       };
 
       const result = await reflect(
-        { adapter, scope: s, client },
+        { adapter: asyncAdapter, scope: s, client },
         { query: 'staging', includeEpisodic: true, includeDeclarative: true },
       );
 
@@ -304,7 +308,7 @@ describe('episodic recall', () => {
       };
 
       const result = await reflect(
-        { adapter, scope: s, client },
+        { adapter: asyncAdapter, scope: s, client },
         { query: 'deploy', includeEpisodic: true, includeDeclarative: false },
       );
 
@@ -325,7 +329,7 @@ describe('episodic recall', () => {
       };
 
       const result = await reflect(
-        { adapter, scope: s, client },
+        { adapter: asyncAdapter, scope: s, client },
         { query: 'port', includeEpisodic: false, includeDeclarative: true },
       );
 
@@ -357,7 +361,7 @@ describe('episodic recall', () => {
       };
 
       const result = await reflect(
-        { adapter, scope: s, client },
+        { adapter: asyncAdapter, scope: s, client },
         { query: 'deploy' },
       );
 
@@ -379,7 +383,7 @@ describe('episodic recall', () => {
       const knowledgeBefore = adapter.getActiveKnowledgeMemory(s);
 
       await searchEpisodes(
-        { adapter, scope: s, client },
+        { adapter: asyncAdapter, scope: s, client },
         { query: 'deploy' },
       );
 
