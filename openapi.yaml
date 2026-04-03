@@ -10,6 +10,7 @@ tags:
   - name: retrieval
   - name: episodic
   - name: cognitive
+  - name: profiles
   - name: maintenance
   - name: observability
 components:
@@ -409,6 +410,58 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/CognitiveSearchHit'
+    ProfileEntry:
+      type: object
+      required: [knowledgeId, fact, trustScore, knowledgeState, confidence, lastConfirmedAt]
+      properties:
+        knowledgeId:
+          type: integer
+        fact:
+          type: string
+        trustScore:
+          type: number
+        knowledgeState:
+          type: string
+          enum: [candidate, provisional, trusted, disputed, retired]
+        confidence:
+          type: string
+          enum: [high, medium, low]
+        lastConfirmedAt:
+          type: integer
+          nullable: true
+    Profile:
+      type: object
+      required: [view, sections, generatedAt]
+      properties:
+        view:
+          type: string
+          enum: [user, operator, workspace]
+        sections:
+          type: object
+          required: [identity, preferences, communication, constraints, workflows]
+          properties:
+            identity:
+              type: array
+              items:
+                $ref: '#/components/schemas/ProfileEntry'
+            preferences:
+              type: array
+              items:
+                $ref: '#/components/schemas/ProfileEntry'
+            communication:
+              type: array
+              items:
+                $ref: '#/components/schemas/ProfileEntry'
+            constraints:
+              type: array
+              items:
+                $ref: '#/components/schemas/ProfileEntry'
+            workflows:
+              type: array
+              items:
+                $ref: '#/components/schemas/ProfileEntry'
+        generatedAt:
+          type: integer
 security:
   - bearerAuth: []
 paths:
@@ -569,6 +622,16 @@ paths:
           schema:
             type: integer
           description: Maximum number of episodes to return
+        - name: start_at
+          in: query
+          schema:
+            type: integer
+          description: Unix timestamp lower bound for time range filter
+        - name: end_at
+          in: query
+          schema:
+            type: integer
+          description: Unix timestamp upper bound for time range filter
         - $ref: '#/components/parameters/ScopeTenant'
         - $ref: '#/components/parameters/ScopeSystem'
         - $ref: '#/components/parameters/ScopeWorkspace'
@@ -649,6 +712,9 @@ paths:
                 includeEpisodic:
                   type: boolean
                   description: Include episodic memory in synthesis
+                limit:
+                  type: integer
+                  description: Maximum number of sources to include
                 timeRange:
                   type: object
                   properties:
@@ -688,6 +754,16 @@ paths:
           schema:
             type: integer
           description: Maximum number of results
+        - name: minimumTrustScore
+          in: query
+          schema:
+            type: number
+          description: Minimum trust score filter
+        - name: activeOnly
+          in: query
+          schema:
+            type: boolean
+          description: Only return active memories (default true)
         - $ref: '#/components/parameters/ScopeTenant'
         - $ref: '#/components/parameters/ScopeSystem'
         - $ref: '#/components/parameters/ScopeWorkspace'
@@ -706,6 +782,44 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /v1/profile:
+    get:
+      tags: [profiles]
+      summary: Get a materialized profile view for the current scope
+      parameters:
+        - name: view
+          in: query
+          schema:
+            type: string
+            enum: [user, operator, workspace]
+          description: Profile view type (default user)
+        - name: minimumTrustScore
+          in: query
+          schema:
+            type: number
+          description: Minimum trust score filter
+        - name: includeDisputed
+          in: query
+          schema:
+            type: boolean
+          description: Include disputed knowledge entries (default false)
+        - name: sections
+          in: query
+          schema:
+            type: string
+          description: Comma-separated profile sections to include
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Materialized profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
   /v1/facts:
     post:
       tags: [ingestion]

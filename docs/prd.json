@@ -1,5 +1,5 @@
 {
-  "goal": "Implement the Ultimate Memory Layer Roadmap: 7 features across 4 phases \u2014 episodic recall, cognitive taxonomy, materialized profiles, workspace onboarding, procedural playbooks, typed associations, and session snapshots. Source of truth: docs/ULTIMATE_MEMORY_LAYER_ROADMAP.md.",
+  "goal": "Implement the Ultimate Memory Layer Roadmap: 7 features across 4 phases — episodic recall, cognitive taxonomy, materialized profiles, workspace onboarding, procedural playbooks, typed associations, and session snapshots. Source of truth: docs/ULTIMATE_MEMORY_LAYER_ROADMAP.md.",
   "fast_checks_default": [
     "npm run lint",
     "npm run test",
@@ -13,7 +13,7 @@
       "id": "t1",
       "desc": "Add episodic recall types to contracts: EpisodeDetailLevel, EpisodeRecap, EpisodeSourceReference, EpisodeSearchOptions, EpisodeSummary, ReflectOptions, ReflectResult, and EPISODE_DETAIL_LEVELS const array.",
       "acceptance_criteria": [
-        "All 7 interfaces and 1 type alias exported from src/contracts/types.ts",
+        "All 6 interfaces and 1 type alias exported from src/contracts/types.ts",
         "EPISODE_DETAIL_LEVELS const exported with values ['abstract', 'overview', 'full']",
         "EpisodeRecap includes sourceType field with 'episodic' | 'declarative' | 'mixed' union",
         "EpisodeSourceReference.type supports 'turn' | 'working_memory' | 'knowledge'",
@@ -190,8 +190,8 @@
       "id": "t8",
       "desc": "HTTP endpoints for episodic recall + cognitive search: GET /v1/episodes, POST /v1/episodes/summarize, POST /v1/reflect, GET /v1/memory.",
       "acceptance_criteria": [
-        "GET /v1/episodes accepts q, session_id, detail, limit query params",
-        "POST /v1/episodes/summarize accepts turnRange and detailLevel in body",
+        "GET /v1/episodes accepts q, detail, limit query params",
+        "POST /v1/episodes/summarize accepts session_id and detailLevel in body",
         "POST /v1/reflect accepts query, detailLevel, includeDeclarative, timeRange in body",
         "GET /v1/memory accepts q, types (comma-separated), limit for cognitive search",
         "All endpoints return proper API envelope format",
@@ -349,7 +349,7 @@
       "lane": "evals",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t15",
@@ -380,7 +380,7 @@
       "lane": "verification",
       "parallel_safe": false,
       "tranche_safe": false,
-      "done": false
+      "done": true
     },
     {
       "id": "t16",
@@ -406,7 +406,7 @@
       "lane": "contracts",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t17",
@@ -431,7 +431,7 @@
       "lane": "core",
       "parallel_safe": false,
       "tranche_safe": false,
-      "done": false
+      "done": true
     },
     {
       "id": "t18",
@@ -456,7 +456,7 @@
       "lane": "core",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t19",
@@ -480,7 +480,7 @@
       "lane": "core",
       "parallel_safe": false,
       "tranche_safe": false,
-      "done": false
+      "done": true
     },
     {
       "id": "t20",
@@ -505,7 +505,7 @@
       "lane": "core",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t21",
@@ -528,7 +528,7 @@
       "lane": "server",
       "parallel_safe": false,
       "tranche_safe": false,
-      "done": false
+      "done": true
     },
     {
       "id": "t22",
@@ -550,7 +550,7 @@
       "lane": "server",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t23",
@@ -572,7 +572,7 @@
       "lane": "server",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t24",
@@ -594,7 +594,7 @@
       "lane": "docs",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t25",
@@ -618,7 +618,7 @@
       "lane": "contracts",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t26",
@@ -641,7 +641,7 @@
       "lane": "python",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t27",
