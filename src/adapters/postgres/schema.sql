@@ -228,4 +228,65 @@ CREATE TRIGGER trg_turns_search
   BEFORE INSERT OR UPDATE ON turns
   FOR EACH ROW EXECUTE FUNCTION turns_search_trigger();
 
+CREATE TABLE IF NOT EXISTS playbooks (
+  id SERIAL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  system_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL DEFAULT '',
+  collaboration_id TEXT NOT NULL DEFAULT '',
+  scope_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL,
+  instructions TEXT NOT NULL,
+  references_json JSONB NOT NULL DEFAULT '[]',
+  templates JSONB NOT NULL DEFAULT '[]',
+  scripts JSONB NOT NULL DEFAULT '[]',
+  assets JSONB NOT NULL DEFAULT '[]',
+  tags JSONB NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'deprecated', 'archived')),
+  source_session_id TEXT,
+  source_working_memory_id INTEGER REFERENCES working_memory(id),
+  revision_count INTEGER NOT NULL DEFAULT 0,
+  last_used_at INTEGER,
+  use_count INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER),
+  updated_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER),
+  schema_version INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_pb_scope ON playbooks (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
+
+-- Full-text search on playbooks
+ALTER TABLE playbooks ADD COLUMN IF NOT EXISTS search_vector TSVECTOR;
+CREATE INDEX IF NOT EXISTS idx_pb_fts ON playbooks USING GIN (search_vector);
+
+CREATE OR REPLACE FUNCTION playbooks_search_trigger()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.search_vector := to_tsvector('english', COALESCE(NEW.title, '') || ' ' || COALESCE(NEW.description, '') || ' ' || COALESCE(NEW.instructions, ''));
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_pb_search ON playbooks;
+CREATE TRIGGER trg_pb_search
+  BEFORE INSERT OR UPDATE ON playbooks
+  FOR EACH ROW EXECUTE FUNCTION playbooks_search_trigger();
+
+CREATE TABLE IF NOT EXISTS playbook_revisions (
+  id SERIAL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  system_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL DEFAULT '',
+  collaboration_id TEXT NOT NULL DEFAULT '',
+  scope_id TEXT NOT NULL,
+  playbook_id INTEGER NOT NULL REFERENCES playbooks(id) ON DELETE CASCADE,
+  instructions TEXT NOT NULL,
+  revision_reason TEXT NOT NULL,
+  source_session_id TEXT,
+  created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pbr_playbook ON playbook_revisions (playbook_id, created_at DESC);
+
 INSERT INTO schema_version (version) VALUES (1) ON CONFLICT DO NOTHING;

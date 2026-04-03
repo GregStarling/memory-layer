@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-export const CURRENT_SCHEMA_VERSION = 10;
+export const CURRENT_SCHEMA_VERSION = 11;
 
 export function createSQLiteSchema(database: Database.Database): void {
   database.pragma('journal_mode = WAL');
@@ -398,6 +398,69 @@ export function createSQLiteSchema(database: Database.Database): void {
   } catch {
     // Column already exists on upgraded databases.
   }
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS playbooks (
+      id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id                TEXT    NOT NULL,
+      system_id                TEXT    NOT NULL,
+      workspace_id             TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id         TEXT    NOT NULL DEFAULT 'default',
+      scope_id                 TEXT    NOT NULL,
+      title                    TEXT    NOT NULL,
+      description              TEXT    NOT NULL,
+      instructions             TEXT    NOT NULL,
+      references_json          TEXT    NOT NULL DEFAULT '[]',
+      templates                TEXT    NOT NULL DEFAULT '[]',
+      scripts                  TEXT    NOT NULL DEFAULT '[]',
+      assets                   TEXT    NOT NULL DEFAULT '[]',
+      tags                     TEXT    NOT NULL DEFAULT '[]',
+      status                   TEXT    NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'deprecated', 'archived')),
+      source_session_id        TEXT,
+      source_working_memory_id INTEGER REFERENCES working_memory(id),
+      revision_count           INTEGER NOT NULL DEFAULT 0,
+      last_used_at             INTEGER,
+      use_count                INTEGER NOT NULL DEFAULT 0,
+      created_at               INTEGER NOT NULL,
+      updated_at               INTEGER NOT NULL,
+      schema_version           INTEGER NOT NULL DEFAULT 1
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pb_scope ON playbooks(tenant_id, system_id, workspace_id, collaboration_id, scope_id);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS playbooks_fts USING fts5(
+      title, description, instructions, content=playbooks, content_rowid=id
+    );
+
+    CREATE TRIGGER IF NOT EXISTS pb_ai AFTER INSERT ON playbooks BEGIN
+      INSERT INTO playbooks_fts(rowid, title, description, instructions) VALUES (new.id, new.title, new.description, new.instructions);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS pb_au AFTER UPDATE ON playbooks BEGIN
+      INSERT INTO playbooks_fts(playbooks_fts, rowid, title, description, instructions) VALUES ('delete', old.id, old.title, old.description, old.instructions);
+      INSERT INTO playbooks_fts(rowid, title, description, instructions) VALUES (new.id, new.title, new.description, new.instructions);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS pb_ad AFTER DELETE ON playbooks BEGIN
+      INSERT INTO playbooks_fts(playbooks_fts, rowid, title, description, instructions) VALUES ('delete', old.id, old.title, old.description, old.instructions);
+    END;
+
+    CREATE TABLE IF NOT EXISTS playbook_revisions (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id         TEXT    NOT NULL,
+      system_id         TEXT    NOT NULL,
+      workspace_id      TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id  TEXT    NOT NULL DEFAULT 'default',
+      scope_id          TEXT    NOT NULL,
+      playbook_id       INTEGER NOT NULL REFERENCES playbooks(id) ON DELETE CASCADE,
+      instructions      TEXT    NOT NULL,
+      revision_reason   TEXT    NOT NULL,
+      source_session_id TEXT,
+      created_at        INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pbr_playbook ON playbook_revisions(playbook_id, created_at DESC);
+  `);
 
   database
     .prepare(
