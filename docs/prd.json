@@ -970,7 +970,7 @@
       "lane": "python",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t40",
@@ -1022,7 +1022,7 @@
       "lane": "contracts",
       "parallel_safe": false,
       "tranche_safe": false,
-      "done": false
+      "done": true
     },
     {
       "id": "t42",
@@ -1051,7 +1051,7 @@
       "lane": "adapters",
       "parallel_safe": false,
       "tranche_safe": false,
-      "done": false
+      "done": true
     },
     {
       "id": "t43",
@@ -1078,7 +1078,7 @@
       "lane": "adapters",
       "parallel_safe": false,
       "tranche_safe": false,
-      "done": false
+      "done": true
     },
     {
       "id": "t44",
@@ -1102,7 +1102,7 @@
       "lane": "core",
       "parallel_safe": false,
       "tranche_safe": false,
-      "done": false
+      "done": true
     },
     {
       "id": "t45",
@@ -1123,7 +1123,7 @@
       "lane": "core",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t46",
@@ -1146,7 +1146,7 @@
       "lane": "core",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t47",

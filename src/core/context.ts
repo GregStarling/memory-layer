@@ -4,7 +4,9 @@ import type { EventHook, Logger } from '../contracts/observability.js';
 import type { ContextMode, ContextPolicy } from '../contracts/policy.js';
 import { DEFAULT_CONTEXT_POLICY } from '../contracts/policy.js';
 import type {
+  Association,
   KnowledgeMemory,
+  Playbook,
   SearchResult,
   Turn,
   WorkItem,
@@ -30,6 +32,7 @@ export interface ContextAssemblyOptions {
   onEvent?: EventHook;
   tokenEstimator?: TokenEstimator;
   asOf?: number;
+  associationMinConfidence?: number;
 }
 
 export interface KnowledgeSelectionReason {
@@ -61,6 +64,8 @@ export interface MemoryContext {
   activeObjectives: WorkItem[];
   activeState: string[];
   unresolvedWork: string[];
+  relevantPlaybooks?: Playbook[];
+  associatedKnowledge: KnowledgeMemory[];
   knowledgeSelectionReasons: KnowledgeSelectionReason[];
   tokenEstimate: number;
 }
@@ -177,6 +182,7 @@ function computeContextTokenEstimate(
   relevantKnowledge: KnowledgeMemory[],
   recentSummaries: WorkingMemory[],
   tokenEstimator: TokenEstimator = estimateTokens,
+  playbooks: Playbook[] = [],
 ): number {
   const turnTokens = activeTurns.reduce((acc, turn) => acc + turn.token_estimate, 0);
   const workingTokens = workingMemory
@@ -192,8 +198,12 @@ function computeContextTokenEstimate(
     (acc, summary) => acc + tokenEstimator(summary.summary),
     0,
   );
+  const playbookTokens = playbooks.reduce(
+    (acc, pb) => acc + tokenEstimator(pb.title) + tokenEstimator(pb.description) + tokenEstimator(pb.instructions),
+    0,
+  );
 
-  return turnTokens + workingTokens + knowledgeTokens + summaryTokens;
+  return turnTokens + workingTokens + knowledgeTokens + summaryTokens + playbookTokens;
 }
 
 function dropLowestPriorityTurn(activeTurns: Turn[]): Turn[] {
@@ -506,6 +516,42 @@ export async function buildMemoryContext(
     ).knowledgeSelectionReasons,
   ];
 
+  const relevantPlaybooks: Playbook[] = options?.relevanceQuery
+    ? (await adapter.searchPlaybooks(normalizedScope, options.relevanceQuery, { limit: 3, activeOnly: true }))
+        .map((hit) => hit.item)
+    : [];
+
+  // Single-hop association expansion via supports + related_to edges
+  const associationMinConfidence = options?.associationMinConfidence ?? 0.3;
+  const selectedIds = new Set(relevantKnowledge.map((k) => k.id));
+  const associatedKnowledge: KnowledgeMemory[] = [];
+  if (relevantKnowledge.length > 0) {
+    const assocPromises = relevantKnowledge.map((k) =>
+      adapter.getAssociationsFrom('knowledge', k.id, normalizedScope),
+    );
+    const allAssocs: Association[][] = await Promise.all(assocPromises);
+    const targetIds = new Set<number>();
+    for (const assocs of allAssocs) {
+      for (const a of assocs) {
+        if (
+          (a.association_type === 'supports' || a.association_type === 'related_to') &&
+          a.target_kind === 'knowledge' &&
+          a.confidence >= associationMinConfidence &&
+          !selectedIds.has(a.target_id) &&
+          !targetIds.has(a.target_id)
+        ) {
+          targetIds.add(a.target_id);
+        }
+      }
+    }
+    for (const targetId of targetIds) {
+      const km = await adapter.getKnowledgeMemoryById(targetId);
+      if (km && km.knowledge_state !== 'retired') {
+        associatedKnowledge.push(km);
+      }
+    }
+  }
+
   let trimmedSummaries = [...recentSummaries];
   let tokenEstimate = computeContextTokenEstimate(
     activeTurns,
@@ -513,6 +559,7 @@ export async function buildMemoryContext(
     relevantKnowledge,
     trimmedSummaries,
     tokenEstimator,
+    relevantPlaybooks,
   );
 
   while (tokenEstimate > policy.tokenBudget && activeTurns.length > 0) {
@@ -523,6 +570,7 @@ export async function buildMemoryContext(
       relevantKnowledge,
       trimmedSummaries,
       tokenEstimator,
+      relevantPlaybooks,
     );
   }
 
@@ -534,6 +582,7 @@ export async function buildMemoryContext(
       relevantKnowledge,
       trimmedSummaries,
       tokenEstimator,
+      relevantPlaybooks,
     );
   }
 
@@ -553,6 +602,7 @@ export async function buildMemoryContext(
       relevantKnowledge,
       trimmedSummaries,
       tokenEstimator,
+      relevantPlaybooks,
     );
   }
 
@@ -600,6 +650,8 @@ export async function buildMemoryContext(
     currentObjective,
     activeObjectives,
     activeState,
+    relevantPlaybooks,
+    associatedKnowledge,
     unresolvedWork,
     knowledgeSelectionReasons,
     tokenEstimate,
