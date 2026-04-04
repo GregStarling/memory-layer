@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { runContradictionEvals } from './contradictions.mjs';
 import { runEpisodicRecallEvals } from './episodic-recall.mjs';
 import { runFidelityEvals } from './fidelity.mjs';
+import { runAssociationEvals } from './associations.mjs';
 import { runPlaybookEvals } from './playbooks.mjs';
 import { runProfileEvals } from './profiles.mjs';
 import { runFalseMemoryEvals } from './false-memory.mjs';
@@ -33,6 +34,7 @@ export async function runMemoryQualityEvals(options = {}) {
     runEpisodicRecallEvals({ diagnostic }),
     runProfileEvals({ diagnostic }),
     runPlaybookEvals({ diagnostic }),
+    runAssociationEvals({ diagnostic }),
   ]);
   const merged = mergeScenarioOutputs(outputs);
   const result = {

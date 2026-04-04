@@ -25,6 +25,9 @@
     "profileProvenance": 1,
     "playbookCreationQuality": 1,
     "playbookRetrievalRelevance": 1,
-    "playbookRevisionContinuity": 1
+    "playbookRevisionContinuity": 1,
+    "associationAutoDetection": 1,
+    "associationTraversalBounds": 1,
+    "associationRetrievalBoost": 1
   }
 }
