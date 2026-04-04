@@ -15,6 +15,16 @@
     "memoryIsolationAccuracy": 1,
     "provisionalLeakRate": 0,
     "postCompactionFidelityScore": 1,
-    "postMaintenanceFidelityScore": 1
+    "postMaintenanceFidelityScore": 1,
+    "episodicRetrievalPrecision": 1,
+    "episodicRecapCompleteness": 1,
+    "reflectSourceAttribution": 1,
+    "episodicIsolation": 1,
+    "profileCompleteness": 1,
+    "profileTrustFiltering": 1,
+    "profileProvenance": 1,
+    "playbookCreationQuality": 1,
+    "playbookRetrievalRelevance": 1,
+    "playbookRevisionContinuity": 1
   }
 }

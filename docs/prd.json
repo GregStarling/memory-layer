@@ -1,5 +1,5 @@
 {
-  "goal": "Implement the Ultimate Memory Layer Roadmap: 7 features across 4 phases — episodic recall, cognitive taxonomy, materialized profiles, workspace onboarding, procedural playbooks, typed associations, and session snapshots. Source of truth: docs/ULTIMATE_MEMORY_LAYER_ROADMAP.md.",
+  "goal": "Implement the Ultimate Memory Layer Roadmap: 7 features across 4 phases \u2014 episodic recall, cognitive taxonomy, materialized profiles, workspace onboarding, procedural playbooks, typed associations, and session snapshots. Source of truth: docs/ULTIMATE_MEMORY_LAYER_ROADMAP.md.",
   "fast_checks_default": [
     "npm run lint",
     "npm run test",
@@ -441,7 +441,7 @@
         "detectWorkspace uses git remote get-url origin with fallback to directory hash",
         "workspaceIdFromGitRemote produces stable hash from remote URL",
         "workspaceIdFromPath produces stable hash from absolute path",
-        "Returns null gracefully when not in a git repo",
+        "Falls back to directory path hash when not in a git repo",
         "Unit tests pass"
       ],
       "files": [
@@ -601,7 +601,7 @@
       "desc": "Export Phase 2 types from src/index.ts: profile types, workspace detection functions.",
       "acceptance_criteria": [
         "All profile types from t16 exported",
-        "DetectedWorkspace and detection functions from t18 exported",
+        "Workspace detection functions from t18 exported (detectWorkspace, workspaceIdFromGitRemote, workspaceIdFromPath)",
         "npm run lint passes"
       ],
       "files": [
@@ -669,7 +669,7 @@
       "lane": "evals",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t28",
@@ -700,7 +700,7 @@
       "lane": "verification",
       "parallel_safe": false,
       "tranche_safe": false,
-      "done": false
+      "done": true
     },
     {
       "id": "t29",
@@ -726,7 +726,7 @@
       "lane": "contracts",
       "parallel_safe": false,
       "tranche_safe": false,
-      "done": false
+      "done": true
     },
     {
       "id": "t30",
@@ -756,7 +756,7 @@
       "lane": "adapters",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t31",
@@ -781,7 +781,7 @@
       "lane": "contracts",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t32",
@@ -808,7 +808,7 @@
       "lane": "adapters",
       "parallel_safe": false,
       "tranche_safe": false,
-      "done": false
+      "done": true
     },
     {
       "id": "t33",
@@ -832,7 +832,7 @@
       "lane": "core",
       "parallel_safe": false,
       "tranche_safe": false,
-      "done": false
+      "done": true
     },
     {
       "id": "t34",
@@ -856,7 +856,7 @@
       "lane": "core",
       "parallel_safe": false,
       "tranche_safe": false,
-      "done": false
+      "done": true
     },
     {
       "id": "t35",
@@ -879,7 +879,7 @@
       "lane": "core",
       "parallel_safe": false,
       "tranche_safe": false,
-      "done": false
+      "done": true
     },
     {
       "id": "t36",
@@ -901,7 +901,7 @@
       "lane": "server",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t37",
@@ -922,7 +922,7 @@
       "lane": "server",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t38",
@@ -947,7 +947,7 @@
       "lane": "docs",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t39",
@@ -996,7 +996,7 @@
       "lane": "evals",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t41",

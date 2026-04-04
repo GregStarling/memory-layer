@@ -3,7 +3,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { runContradictionEvals } from './contradictions.mjs';
+import { runEpisodicRecallEvals } from './episodic-recall.mjs';
 import { runFidelityEvals } from './fidelity.mjs';
+import { runPlaybookEvals } from './playbooks.mjs';
+import { runProfileEvals } from './profiles.mjs';
 import { runFalseMemoryEvals } from './false-memory.mjs';
 import { runLongHorizonEvals } from './long-horizon.mjs';
 import { runPlatformQualityEval } from '../platform-quality/index.mjs';
@@ -27,6 +30,9 @@ export async function runMemoryQualityEvals(options = {}) {
     runFalseMemoryEvals({ diagnostic }),
     runFidelityEvals({ diagnostic }),
     runLongHorizonEvals({ diagnostic }),
+    runEpisodicRecallEvals({ diagnostic }),
+    runProfileEvals({ diagnostic }),
+    runPlaybookEvals({ diagnostic }),
   ]);
   const merged = mergeScenarioOutputs(outputs);
   const result = {

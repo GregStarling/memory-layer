@@ -130,7 +130,20 @@ export type {
   TimeRange,
   WorkItem,
   NewWorkItem,
+  EpisodeDetailLevel,
+  EpisodeRecap,
+  EpisodeSourceReference,
+  EpisodeSearchOptions,
+  EpisodeSummary,
+  ReflectOptions,
+  ReflectResult,
+  PlaybookStatus,
+  Playbook,
+  NewPlaybook,
+  PlaybookRevision,
+  NewPlaybookRevision,
 } from './contracts/types.js';
+export { EPISODE_DETAIL_LEVELS } from './contracts/types.js';
 export type {
   CompactionAction,
   DriftSignalType,
@@ -193,3 +206,33 @@ export type { VercelAIPreparedInput, VercelAIWrapOptions } from './integrations/
 export type { StreamCollector } from './core/streaming.js';
 export type { McpServerConfig } from './server/mcp-server.js';
 export type { HttpServerConfig } from './server/http-server.js';
+export type {
+  CognitiveMemoryType,
+  CognitiveMemoryItem,
+  CognitiveSearchOptions,
+  CognitiveSearchHit,
+  CognitiveSearchResult,
+} from './contracts/cognitive.js';
+export {
+  mapKnowledgeClassToCognitive,
+  mapCognitiveToKnowledgeClasses,
+} from './contracts/cognitive.js';
+export { searchEpisodes, summarizeEpisode, reflect } from './core/episodic.js';
+export type { EpisodicDeps } from './core/episodic.js';
+export { searchCognitive } from './core/cognitive.js';
+export type {
+  ProfileView,
+  ProfileSection,
+  ProfileEntry,
+  Profile,
+  ProfileOptions,
+} from './contracts/profile.js';
+export {
+  detectWorkspace,
+  workspaceIdFromGitRemote,
+  workspaceIdFromPath,
+} from './core/workspace-detect.js';
+export {
+  getProfile,
+  classifyProfileSection,
+} from './core/profile.js';

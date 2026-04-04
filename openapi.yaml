@@ -11,6 +11,7 @@ tags:
   - name: episodic
   - name: cognitive
   - name: profiles
+  - name: playbooks
   - name: maintenance
   - name: observability
 components:
@@ -422,7 +423,7 @@ components:
           type: number
         knowledgeState:
           type: string
-          enum: [candidate, provisional, trusted, disputed, retired]
+          enum: [candidate, provisional, trusted, disputed, superseded, retired]
         confidence:
           type: string
           enum: [high, medium, low]
@@ -462,6 +463,124 @@ components:
                 $ref: '#/components/schemas/ProfileEntry'
         generatedAt:
           type: integer
+    Playbook:
+      type: object
+      required: [id, title, description, instructions, references, templates, scripts, assets, tags, status, revision_count, use_count, created_at, updated_at, schema_version]
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        description:
+          type: string
+        instructions:
+          type: string
+        references:
+          type: array
+          items:
+            type: string
+        templates:
+          type: array
+          items:
+            type: string
+        scripts:
+          type: array
+          items:
+            type: string
+        assets:
+          type: array
+          items:
+            type: string
+        tags:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+          enum: [draft, active, deprecated, archived]
+        source_session_id:
+          type: string
+          nullable: true
+        source_working_memory_id:
+          type: integer
+          nullable: true
+        revision_count:
+          type: integer
+        last_used_at:
+          type: integer
+          nullable: true
+        use_count:
+          type: integer
+        created_at:
+          type: integer
+        updated_at:
+          type: integer
+        schema_version:
+          type: integer
+    NewPlaybookRequest:
+      type: object
+      required: [title, description, instructions]
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        instructions:
+          type: string
+        references:
+          type: array
+          items:
+            type: string
+        templates:
+          type: array
+          items:
+            type: string
+        scripts:
+          type: array
+          items:
+            type: string
+        assets:
+          type: array
+          items:
+            type: string
+        tags:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+          enum: [draft, active, deprecated, archived]
+        source_session_id:
+          type: string
+        source_working_memory_id:
+          type: integer
+        scope:
+          $ref: '#/components/schemas/Scope'
+    PlaybookRevision:
+      type: object
+      required: [id, playbook_id, instructions, revision_reason, created_at]
+      properties:
+        id:
+          type: integer
+        playbook_id:
+          type: integer
+        instructions:
+          type: string
+        revision_reason:
+          type: string
+        source_session_id:
+          type: string
+          nullable: true
+        created_at:
+          type: integer
+    PlaybookSearchHit:
+      type: object
+      required: [item, rank]
+      properties:
+        item:
+          $ref: '#/components/schemas/Playbook'
+        rank:
+          type: number
 security:
   - bearerAuth: []
 paths:
@@ -793,7 +912,7 @@ paths:
             type: string
             enum: [user, operator, workspace]
           description: Profile view type (default user)
-        - name: minimumTrustScore
+        - name: min_trust
           in: query
           schema:
             type: number
@@ -819,7 +938,215 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Profile'
+                type: object
+                required: [profile]
+                properties:
+                  profile:
+                    $ref: '#/components/schemas/Profile'
+  /v1/playbooks:
+    get:
+      tags: [playbooks]
+      summary: List active playbooks
+      parameters:
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Active playbooks
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [playbooks]
+                properties:
+                  playbooks:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Playbook'
+    post:
+      tags: [playbooks]
+      summary: Create a new playbook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewPlaybookRequest'
+      responses:
+        '201':
+          description: Playbook created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Playbook'
+  /v1/playbooks/search:
+    get:
+      tags: [playbooks]
+      summary: Search playbooks by query
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Search query
+        - name: limit
+          in: query
+          schema:
+            type: integer
+          description: Maximum results
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PlaybookSearchHit'
+        '400':
+          description: Missing search query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/playbooks/from-task:
+    post:
+      tags: [playbooks]
+      summary: Create a playbook from a completed task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sessionId]
+              properties:
+                sessionId:
+                  type: string
+                  description: Session ID containing the task to extract
+                title:
+                  type: string
+                tags:
+                  type: array
+                  items:
+                    type: string
+                scope:
+                  $ref: '#/components/schemas/Scope'
+      responses:
+        '201':
+          description: Playbook created from task
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Playbook'
+  /v1/playbooks/{playbookId}:
+    get:
+      tags: [playbooks]
+      summary: Get a playbook by ID
+      parameters:
+        - name: playbookId
+          in: path
+          required: true
+          schema:
+            type: integer
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Playbook details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Playbook'
+        '404':
+          description: Playbook not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/playbooks/{playbookId}/revise:
+    post:
+      tags: [playbooks]
+      summary: Revise a playbook's instructions
+      parameters:
+        - name: playbookId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [instructions, revision_reason]
+              properties:
+                instructions:
+                  type: string
+                  description: New instructions
+                revision_reason:
+                  type: string
+                  description: Reason for the revision
+                source_session_id:
+                  type: string
+                scope:
+                  $ref: '#/components/schemas/Scope'
+      responses:
+        '200':
+          description: Revised playbook with revision record
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [playbook, revision]
+                properties:
+                  playbook:
+                    $ref: '#/components/schemas/Playbook'
+                  revision:
+                    $ref: '#/components/schemas/PlaybookRevision'
+  /v1/playbooks/{playbookId}/use:
+    post:
+      tags: [playbooks]
+      summary: Record a playbook usage
+      parameters:
+        - name: playbookId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Usage recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        '404':
+          description: Playbook not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /v1/facts:
     post:
       tags: [ingestion]
