@@ -8,20 +8,27 @@ import type { EmbeddingAdapter } from '../../contracts/embedding.js';
 import { normalizeScope, scopeValues, type ScopeLevel } from '../../contracts/identity.js';
 import type { StorageAdapter } from '../../contracts/storage.js';
 import type {
+  Association,
+  AssociationTargetKind,
   CompactionLog,
   ContextMonitor,
   KnowledgeCandidate,
   KnowledgeEvidence,
   KnowledgeMemory,
   KnowledgeMemoryAudit,
+  NewAssociation,
   NewCompactionLog,
   NewKnowledgeCandidate,
   NewKnowledgeEvidence,
   NewKnowledgeMemoryAudit,
   NewKnowledgeMemory,
+  NewPlaybook,
+  NewPlaybookRevision,
   NewWorkItem,
   NewTurn,
   NewWorkingMemory,
+  Playbook,
+  PlaybookRevision,
   PaginationOptions,
   PaginatedResult,
   SearchOptions,
@@ -56,11 +63,14 @@ import {
   rowToKnowledgeMemory,
   rowToKnowledgeMemoryAudit,
   rowToTurn,
+  rowToPlaybook,
+  rowToPlaybookRevision,
   rowToWorkItem,
   rowToWorkingMemory,
   serializeNumberArray,
   serializeStringArray,
   type CompactionLogRow,
+  type PlaybookRow,
   type KnowledgeCandidateRow,
   type KnowledgeEvidenceRow,
   type KnowledgeMemoryAuditRow,
@@ -1266,6 +1276,157 @@ function createAdapterFromDatabase(
         )
         .all(...scopeValues(scope), limit) as CompactionLogRow[];
       return rows.map(rowToCompactionLog);
+    },
+
+    insertPlaybook(input: NewPlaybook): Playbook {
+      const scope = normalizeScope(input);
+      const now = nowSeconds();
+      const result = db
+        .prepare(
+          `INSERT INTO playbooks
+            (tenant_id, system_id, workspace_id, collaboration_id, scope_id, title, description, instructions,
+             references_json, templates, scripts, assets, tags, status, source_session_id, source_working_memory_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          scope.tenant_id, scope.system_id, scope.workspace_id, scope.collaboration_id, scope.scope_id,
+          input.title, input.description, input.instructions,
+          serializeStringArray(input.references ?? []), serializeStringArray(input.templates ?? []),
+          serializeStringArray(input.scripts ?? []), serializeStringArray(input.assets ?? []),
+          serializeStringArray(input.tags ?? []), input.status ?? 'draft',
+          input.source_session_id ?? null, input.source_working_memory_id ?? null,
+          input.created_at ?? now, now,
+        );
+      return this.getPlaybookById(Number(result.lastInsertRowid))!;
+    },
+    getPlaybookById(id: number): Playbook | null {
+      const row = db.prepare('SELECT * FROM playbooks WHERE id = ?').get(id) as PlaybookRow | undefined;
+      return row ? rowToPlaybook(row) : null;
+    },
+    getActivePlaybooks(scope): Playbook[] {
+      const rows = db
+        .prepare(`SELECT * FROM playbooks WHERE ${SCOPE_WHERE} AND status IN ('draft', 'active') ORDER BY id DESC`)
+        .all(...scopeValues(scope)) as PlaybookRow[];
+      return rows.map(rowToPlaybook);
+    },
+    searchPlaybooks(scope, query, options): SearchResult<Playbook>[] {
+      const limit = options?.limit ?? 20;
+      const activeOnly = options?.activeOnly ?? true;
+      const safeQuery = toSafeFtsQuery(query);
+      if (!safeQuery) return [];
+      const statusFilter = activeOnly
+        ? `AND p.status NOT IN ('archived', 'deprecated')`
+        : '';
+      try {
+        const rows = db
+          .prepare(
+            `SELECT p.* FROM playbooks p
+             INNER JOIN playbooks_fts f ON f.rowid = p.id
+             WHERE p.${SCOPE_WHERE} ${statusFilter}
+             AND playbooks_fts MATCH ?
+             ORDER BY rank LIMIT ?`,
+          )
+          .all(...scopeValues(scope), safeQuery, limit) as PlaybookRow[];
+        return rows.map((row, index) => ({ item: rowToPlaybook(row), rank: index }));
+      } catch {
+        return [];
+      }
+    },
+    updatePlaybook(id, patch): Playbook | null {
+      const sets: string[] = [];
+      const values: unknown[] = [];
+      if (patch.title != null) { sets.push('title = ?'); values.push(patch.title); }
+      if (patch.description != null) { sets.push('description = ?'); values.push(patch.description); }
+      if (patch.instructions != null) { sets.push('instructions = ?'); values.push(patch.instructions); }
+      if (patch.references != null) { sets.push('references_json = ?'); values.push(serializeStringArray(patch.references)); }
+      if (patch.templates != null) { sets.push('templates = ?'); values.push(serializeStringArray(patch.templates)); }
+      if (patch.scripts != null) { sets.push('scripts = ?'); values.push(serializeStringArray(patch.scripts)); }
+      if (patch.assets != null) { sets.push('assets = ?'); values.push(serializeStringArray(patch.assets)); }
+      if (patch.tags != null) { sets.push('tags = ?'); values.push(serializeStringArray(patch.tags)); }
+      if (patch.status != null) { sets.push('status = ?'); values.push(patch.status); }
+      if (sets.length === 0) return this.getPlaybookById(id);
+      sets.push('updated_at = ?');
+      values.push(nowSeconds());
+      values.push(id);
+      db.prepare(`UPDATE playbooks SET ${sets.join(', ')} WHERE id = ?`).run(...values);
+      return this.getPlaybookById(id);
+    },
+    recordPlaybookUse(id: number): void {
+      db.prepare('UPDATE playbooks SET use_count = use_count + 1, last_used_at = ? WHERE id = ?').run(nowSeconds(), id);
+    },
+    insertPlaybookRevision(input: NewPlaybookRevision): PlaybookRevision {
+      const playbook = this.getPlaybookById(input.playbook_id);
+      if (!playbook) {
+        throw new Error(`Playbook ${input.playbook_id} not found`);
+      }
+      const now = nowSeconds();
+      const result = db
+        .prepare(
+          `INSERT INTO playbook_revisions
+            (tenant_id, system_id, workspace_id, collaboration_id, scope_id, playbook_id, instructions, revision_reason, source_session_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          playbook.tenant_id, playbook.system_id, playbook.workspace_id, playbook.collaboration_id, playbook.scope_id,
+          input.playbook_id, input.instructions, input.revision_reason,
+          input.source_session_id ?? null, input.created_at ?? now,
+        );
+      db.prepare('UPDATE playbooks SET revision_count = revision_count + 1 WHERE id = ?').run(input.playbook_id);
+      const row = db.prepare('SELECT * FROM playbook_revisions WHERE id = ?').get(Number(result.lastInsertRowid)) as PlaybookRevision;
+      return rowToPlaybookRevision(row);
+    },
+    getPlaybookRevisions(playbookId: number): PlaybookRevision[] {
+      const rows = db
+        .prepare('SELECT * FROM playbook_revisions WHERE playbook_id = ? ORDER BY created_at DESC')
+        .all(playbookId) as PlaybookRevision[];
+      return rows.map(rowToPlaybookRevision);
+    },
+
+    insertAssociation(input: NewAssociation): Association {
+      const scope = normalizeScope(input);
+      const now = nowSeconds();
+      const result = db
+        .prepare(
+          `INSERT INTO associations
+            (tenant_id, system_id, workspace_id, collaboration_id, scope_id,
+             source_kind, source_id, target_kind, target_id, association_type, confidence, auto_generated, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          scope.tenant_id, scope.system_id, scope.workspace_id, scope.collaboration_id, scope.scope_id,
+          input.source_kind, input.source_id, input.target_kind, input.target_id,
+          input.association_type, input.confidence ?? 0.5, input.auto_generated ? 1 : 0,
+          input.created_at ?? now,
+        );
+      const row = db.prepare('SELECT * FROM associations WHERE id = ?').get(Number(result.lastInsertRowid)) as any;
+      return {
+        ...row,
+        collaboration_id: row.collaboration_id ?? row.workspace_id,
+        auto_generated: row.auto_generated === 1,
+      };
+    },
+    getAssociationsFrom(kind: AssociationTargetKind, id: number, scope) {
+      const rows = db
+        .prepare(`SELECT * FROM associations WHERE source_kind = ? AND source_id = ? AND ${SCOPE_WHERE} ORDER BY id DESC`)
+        .all(kind, id, ...scopeValues(scope)) as any[];
+      return rows.map((row) => ({
+        ...row,
+        collaboration_id: row.collaboration_id ?? row.workspace_id,
+        auto_generated: row.auto_generated === 1,
+      }));
+    },
+    getAssociationsTo(kind: AssociationTargetKind, id: number, scope) {
+      const rows = db
+        .prepare(`SELECT * FROM associations WHERE target_kind = ? AND target_id = ? AND ${SCOPE_WHERE} ORDER BY id DESC`)
+        .all(kind, id, ...scopeValues(scope)) as any[];
+      return rows.map((row) => ({
+        ...row,
+        collaboration_id: row.collaboration_id ?? row.workspace_id,
+        auto_generated: row.auto_generated === 1,
+      }));
+    },
+    deleteAssociation(id: number): void {
+      db.prepare('DELETE FROM associations WHERE id = ?').run(id);
     },
 
     transaction<T>(fn: () => T): T {

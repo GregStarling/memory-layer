@@ -183,6 +183,7 @@ function computeContextTokenEstimate(
   recentSummaries: WorkingMemory[],
   tokenEstimator: TokenEstimator = estimateTokens,
   playbooks: Playbook[] = [],
+  associatedKnowledge: KnowledgeMemory[] = [],
 ): number {
   const turnTokens = activeTurns.reduce((acc, turn) => acc + turn.token_estimate, 0);
   const workingTokens = workingMemory
@@ -202,8 +203,12 @@ function computeContextTokenEstimate(
     (acc, pb) => acc + tokenEstimator(pb.title) + tokenEstimator(pb.description) + tokenEstimator(pb.instructions),
     0,
   );
+  const associatedTokens = associatedKnowledge.reduce(
+    (acc, knowledge) => acc + tokenEstimator(knowledge.fact),
+    0,
+  );
 
-  return turnTokens + workingTokens + knowledgeTokens + summaryTokens + playbookTokens;
+  return turnTokens + workingTokens + knowledgeTokens + summaryTokens + playbookTokens + associatedTokens;
 }
 
 function dropLowestPriorityTurn(activeTurns: Turn[]): Turn[] {
@@ -526,64 +531,88 @@ export async function buildMemoryContext(
   const selectedIds = new Set(relevantKnowledge.map((k) => k.id));
   const associatedKnowledge: KnowledgeMemory[] = [];
   if (relevantKnowledge.length > 0) {
-    const assocPromises = relevantKnowledge.map((k) =>
+    const fromPromises = relevantKnowledge.map((k) =>
       adapter.getAssociationsFrom('knowledge', k.id, normalizedScope),
     );
-    const allAssocs: Association[][] = await Promise.all(assocPromises);
-    const targetIds = new Set<number>();
-    for (const assocs of allAssocs) {
+    const toPromises = relevantKnowledge.map((k) =>
+      adapter.getAssociationsTo('knowledge', k.id, normalizedScope),
+    );
+    const [allFromAssocs, allToAssocs] = await Promise.all([
+      Promise.all(fromPromises),
+      Promise.all(toPromises),
+    ]);
+    const expandIds = new Set<number>();
+    // Outbound: current node is source, neighbor is target
+    for (const assocs of allFromAssocs) {
       for (const a of assocs) {
         if (
           (a.association_type === 'supports' || a.association_type === 'related_to') &&
           a.target_kind === 'knowledge' &&
           a.confidence >= associationMinConfidence &&
           !selectedIds.has(a.target_id) &&
-          !targetIds.has(a.target_id)
+          !expandIds.has(a.target_id)
         ) {
-          targetIds.add(a.target_id);
+          expandIds.add(a.target_id);
         }
       }
     }
-    for (const targetId of targetIds) {
+    // Inbound: current node is target, neighbor is source
+    for (const assocs of allToAssocs) {
+      for (const a of assocs) {
+        if (
+          (a.association_type === 'supports' || a.association_type === 'related_to') &&
+          a.source_kind === 'knowledge' &&
+          a.confidence >= associationMinConfidence &&
+          !selectedIds.has(a.source_id) &&
+          !expandIds.has(a.source_id)
+        ) {
+          expandIds.add(a.source_id);
+        }
+      }
+    }
+    for (const targetId of expandIds) {
       const km = await adapter.getKnowledgeMemoryById(targetId);
-      if (km && km.knowledge_state !== 'retired') {
+      if (
+        km &&
+        km.knowledge_state !== 'retired' &&
+        km.knowledge_state !== 'superseded' &&
+        km.tenant_id === normalizedScope.tenant_id &&
+        km.system_id === normalizedScope.system_id &&
+        km.workspace_id === normalizedScope.workspace_id &&
+        km.collaboration_id === normalizedScope.collaboration_id &&
+        km.scope_id === normalizedScope.scope_id
+      ) {
         associatedKnowledge.push(km);
       }
     }
   }
 
   let trimmedSummaries = [...recentSummaries];
-  let tokenEstimate = computeContextTokenEstimate(
-    activeTurns,
-    workingMemory,
-    relevantKnowledge,
-    trimmedSummaries,
-    tokenEstimator,
-    relevantPlaybooks,
-  );
+  let trimmedAssociated = [...associatedKnowledge];
+
+  function recomputeTokens() {
+    return computeContextTokenEstimate(
+      activeTurns, workingMemory, relevantKnowledge, trimmedSummaries,
+      tokenEstimator, relevantPlaybooks, trimmedAssociated,
+    );
+  }
+
+  let tokenEstimate = recomputeTokens();
 
   while (tokenEstimate > policy.tokenBudget && activeTurns.length > 0) {
     activeTurns = dropLowestPriorityTurn(activeTurns);
-    tokenEstimate = computeContextTokenEstimate(
-      activeTurns,
-      workingMemory,
-      relevantKnowledge,
-      trimmedSummaries,
-      tokenEstimator,
-      relevantPlaybooks,
-    );
+    tokenEstimate = recomputeTokens();
   }
 
   while (tokenEstimate > policy.tokenBudget && trimmedSummaries.length > 0) {
     trimmedSummaries = trimmedSummaries.slice(0, -1);
-    tokenEstimate = computeContextTokenEstimate(
-      activeTurns,
-      workingMemory,
-      relevantKnowledge,
-      trimmedSummaries,
-      tokenEstimator,
-      relevantPlaybooks,
-    );
+    tokenEstimate = recomputeTokens();
+  }
+
+  // Trim associated knowledge before core relevant knowledge
+  while (tokenEstimate > policy.tokenBudget && trimmedAssociated.length > 0) {
+    trimmedAssociated = trimmedAssociated.slice(0, -1);
+    tokenEstimate = recomputeTokens();
   }
 
   while (tokenEstimate > policy.tokenBudget && relevantKnowledge.length > 0) {
@@ -596,14 +625,7 @@ export async function buildMemoryContext(
     knowledgeSelectionReasons = knowledgeSelectionReasons.filter((entry) =>
       retainedIds.has(entry.knowledgeMemoryId),
     );
-    tokenEstimate = computeContextTokenEstimate(
-      activeTurns,
-      workingMemory,
-      relevantKnowledge,
-      trimmedSummaries,
-      tokenEstimator,
-      relevantPlaybooks,
-    );
+    tokenEstimate = recomputeTokens();
   }
 
   if (policy.touchSelectedKnowledge) {
@@ -651,7 +673,7 @@ export async function buildMemoryContext(
     activeObjectives,
     activeState,
     relevantPlaybooks,
-    associatedKnowledge,
+    associatedKnowledge: trimmedAssociated,
     unresolvedWork,
     knowledgeSelectionReasons,
     tokenEstimate,

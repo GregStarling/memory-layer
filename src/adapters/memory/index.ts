@@ -1,6 +1,7 @@
 import { normalizeScope, type MemoryScope, type ScopeLevel } from '../../contracts/identity.js';
 import type { StorageAdapter } from '../../contracts/storage.js';
 import type {
+  Association,
   CompactionLog,
   ContextMonitor,
   ContextMonitorUpsert,
@@ -8,14 +9,19 @@ import type {
   KnowledgeEvidence,
   KnowledgeMemory,
   KnowledgeMemoryAudit,
+  NewAssociation,
   NewCompactionLog,
   NewKnowledgeCandidate,
   NewKnowledgeEvidence,
   NewKnowledgeMemory,
   NewKnowledgeMemoryAudit,
+  NewPlaybook,
+  NewPlaybookRevision,
   NewTurn,
   NewWorkItem,
   NewWorkingMemory,
+  Playbook,
+  PlaybookRevision,
   PaginationOptions,
   PaginatedResult,
   SearchOptions,
@@ -56,6 +62,9 @@ interface MemoryState {
   workItems: WorkItem[];
   contextMonitors: ContextMonitor[];
   compactionLogs: CompactionLog[];
+  playbooks: Playbook[];
+  playbookRevisions: PlaybookRevision[];
+  associations: Association[];
 }
 
 function matchesScope(item: MemoryScope, scope: MemoryScope): boolean {
@@ -177,6 +186,9 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     workItems: [],
     contextMonitors: [],
     compactionLogs: [],
+    playbooks: [],
+    playbookRevisions: [],
+    associations: [],
   };
 
   const ids = {
@@ -189,6 +201,9 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     workItem: 1,
     contextMonitor: 1,
     compactionLog: 1,
+    playbook: 1,
+    playbookRevision: 1,
+    association: 1,
   };
 
   return {
@@ -778,6 +793,151 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         .filter((item) => matchesScope(item, scope))
         .sort((a, b) => b.id - a.id)
         .slice(0, limit);
+    },
+
+    insertPlaybook(input: NewPlaybook): Playbook {
+      const scope = normalizeScope(input);
+      const now = nowSeconds();
+      const record: Playbook = {
+        ...scope,
+        id: ids.playbook++,
+        title: input.title,
+        description: input.description,
+        instructions: input.instructions,
+        references: input.references ? [...input.references] : [],
+        templates: input.templates ? [...input.templates] : [],
+        scripts: input.scripts ? [...input.scripts] : [],
+        assets: input.assets ? [...input.assets] : [],
+        tags: input.tags ? [...input.tags] : [],
+        status: input.status ?? 'draft',
+        source_session_id: input.source_session_id ?? null,
+        source_working_memory_id: input.source_working_memory_id ?? null,
+        revision_count: 0,
+        last_used_at: null,
+        use_count: 0,
+        created_at: input.created_at ?? now,
+        updated_at: now,
+        schema_version: SCHEMA_VERSION,
+      };
+      state.playbooks.push(record);
+      return record;
+    },
+    getPlaybookById(id: number): Playbook | null {
+      return state.playbooks.find((p) => p.id === id) ?? null;
+    },
+    getActivePlaybooks(scope: MemoryScope): Playbook[] {
+      return state.playbooks.filter(
+        (p) => matchesScope(p, scope) && (p.status === 'draft' || p.status === 'active'),
+      );
+    },
+    searchPlaybooks(scope: MemoryScope, query: string, options?: SearchOptions): SearchResult<Playbook>[] {
+      const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+      if (tokens.length === 0) return [];
+      const limit = options?.limit ?? 20;
+      const activeOnly = options?.activeOnly ?? true;
+      return state.playbooks
+        .filter((p) => {
+          if (!matchesScope(p, scope)) return false;
+          if (activeOnly && (p.status === 'archived' || p.status === 'deprecated')) return false;
+          const text = `${p.title} ${p.description} ${p.instructions}`.toLowerCase();
+          return tokens.every((token) => text.includes(token));
+        })
+        .slice(0, limit)
+        .map((item, index) => ({ item, rank: index }));
+    },
+    updatePlaybook(id, patch): Playbook | null {
+      const playbook = state.playbooks.find((p) => p.id === id);
+      if (!playbook) return null;
+      if (patch.title != null) playbook.title = patch.title;
+      if (patch.description != null) playbook.description = patch.description;
+      if (patch.instructions != null) playbook.instructions = patch.instructions;
+      if (patch.references != null) playbook.references = [...patch.references];
+      if (patch.templates != null) playbook.templates = [...patch.templates];
+      if (patch.scripts != null) playbook.scripts = [...patch.scripts];
+      if (patch.assets != null) playbook.assets = [...patch.assets];
+      if (patch.tags != null) playbook.tags = [...patch.tags];
+      if (patch.status != null) playbook.status = patch.status;
+      playbook.updated_at = nowSeconds();
+      return playbook;
+    },
+    recordPlaybookUse(id: number): void {
+      const playbook = state.playbooks.find((p) => p.id === id);
+      if (playbook) {
+        playbook.use_count += 1;
+        playbook.last_used_at = nowSeconds();
+      }
+    },
+    insertPlaybookRevision(input: NewPlaybookRevision): PlaybookRevision {
+      const playbook = state.playbooks.find((p) => p.id === input.playbook_id);
+      if (!playbook) {
+        throw new Error(`Playbook ${input.playbook_id} not found`);
+      }
+      const now = nowSeconds();
+      const record: PlaybookRevision = {
+        tenant_id: playbook.tenant_id,
+        system_id: playbook.system_id,
+        workspace_id: playbook.workspace_id,
+        collaboration_id: playbook.collaboration_id,
+        scope_id: playbook.scope_id,
+        id: ids.playbookRevision++,
+        playbook_id: input.playbook_id,
+        instructions: input.instructions,
+        revision_reason: input.revision_reason,
+        source_session_id: input.source_session_id ?? null,
+        created_at: input.created_at ?? now,
+      };
+      state.playbookRevisions.push(record);
+      playbook.revision_count += 1;
+      return record;
+    },
+    getPlaybookRevisions(playbookId: number): PlaybookRevision[] {
+      return state.playbookRevisions
+        .filter((r) => r.playbook_id === playbookId)
+        .sort((a, b) => b.created_at - a.created_at);
+    },
+
+    insertAssociation(input: NewAssociation): Association {
+      const scope = normalizeScope(input);
+      // Enforce unique constraint
+      const existing = state.associations.find(
+        (a) =>
+          a.source_kind === input.source_kind &&
+          a.source_id === input.source_id &&
+          a.target_kind === input.target_kind &&
+          a.target_id === input.target_id &&
+          a.association_type === input.association_type,
+      );
+      if (existing) {
+        throw new Error('Association already exists');
+      }
+      const record: Association = {
+        ...scope,
+        id: ids.association++,
+        source_kind: input.source_kind,
+        source_id: input.source_id,
+        target_kind: input.target_kind,
+        target_id: input.target_id,
+        association_type: input.association_type,
+        confidence: input.confidence ?? 0.5,
+        auto_generated: input.auto_generated ?? false,
+        created_at: input.created_at ?? nowSeconds(),
+      };
+      state.associations.push(record);
+      return record;
+    },
+    getAssociationsFrom(kind, id, scope): Association[] {
+      return state.associations.filter(
+        (a) => a.source_kind === kind && a.source_id === id && matchesScope(a, scope),
+      );
+    },
+    getAssociationsTo(kind, id, scope): Association[] {
+      return state.associations.filter(
+        (a) => a.target_kind === kind && a.target_id === id && matchesScope(a, scope),
+      );
+    },
+    deleteAssociation(id: number): void {
+      const idx = state.associations.findIndex((a) => a.id === id);
+      if (idx !== -1) state.associations.splice(idx, 1);
     },
 
     transaction(fn) {

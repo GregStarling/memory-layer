@@ -8,7 +8,10 @@ import { normalizeScope, type MemoryScope, type ScopeLevel } from '../contracts/
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type { EmbeddingAdapter } from '../contracts/embedding.js';
 import type { MemoryEvent, MemoryEventType } from '../contracts/observability.js';
-import type { FactType, FactConfidence } from '../contracts/types.js';
+import type { FactType, FactConfidence, EpisodeDetailLevel, AssociationTargetKind, AssociationType } from '../contracts/types.js';
+import { EPISODE_DETAIL_LEVELS, PLAYBOOK_STATUSES, ASSOCIATION_TYPES, ASSOCIATION_TARGET_KINDS } from '../contracts/types.js';
+import type { CognitiveMemoryType } from '../contracts/cognitive.js';
+import type { ProfileSection, ProfileView } from '../contracts/profile.js';
 import { createSQLiteAdapterWithEmbeddings } from '../adapters/sqlite/index.js';
 import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 export interface HttpServerConfig {
@@ -44,6 +47,10 @@ export interface HttpServerConfig {
   qualityTier?: CreateMemoryOptions['qualityTier'];
   /** Cross-scope retrieval level for hosted managers. */
   crossScopeLevel?: ScopeLevel;
+  /** Auto-detect workspace from git remote or cwd when no scope provided. */
+  autoDetectWorkspace?: boolean;
+  /** Structured generation client for episodic recall, playbooks, and reflect. */
+  structuredClient?: CreateMemoryOptions['structuredClient'];
 }
 
 class HttpRequestError extends Error {
@@ -371,6 +378,8 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       qualityMode: config.qualityMode,
       qualityTier: config.qualityTier,
       crossScopeLevel: config.crossScopeLevel,
+      autoDetectWorkspace: config.autoDetectWorkspace,
+      structuredClient: config.structuredClient,
       onEvent: (event) => {
         if (sseClients.size === 0) return;
         const data = `data: ${JSON.stringify(event)}\n\n`;
@@ -491,6 +500,13 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           activeObjectives: context.activeObjectives.map((o) => ({
             title: o.title,
             status: o.status,
+          })),
+          associatedKnowledge: (context.associatedKnowledge ?? []).map((k) => ({
+            id: k.id,
+            fact: k.fact,
+            fact_type: k.fact_type,
+            knowledge_class: k.knowledge_class,
+            trust_score: k.trust_score,
           })),
           unresolvedWork: context.unresolvedWork,
           tokenEstimate: context.tokenEstimate,
@@ -806,17 +822,306 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         return;
       }
 
+      // GET /v1/episodes
+      if (path === '/v1/episodes' && req.method === 'GET') {
+        if (!query.q) {
+          writeError(res, 400, 'Missing required query parameter: q');
+          return;
+        }
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const detailLevel = query.detail
+          ? requireEnum(query.detail, EPISODE_DETAIL_LEVELS, 'detail')
+          : undefined;
+        const episodeTimeRange = (query.start_at || query.end_at)
+          ? {
+              start_at: query.start_at ? Number(query.start_at) : undefined,
+              end_at: query.end_at ? Number(query.end_at) : undefined,
+            }
+          : undefined;
+        const episodes = await requestManager.searchEpisodes({
+          query: query.q,
+          detailLevel,
+          limit: parseLimit(query.limit),
+          timeRange: episodeTimeRange,
+        });
+        writeJson(res, 200, { episodes });
+        return;
+      }
+
+      // POST /v1/episodes/summarize
+      if (path === '/v1/episodes/summarize' && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const sessionId = requireString(body.session_id, 'session_id');
+        const detailLevel = body.detailLevel
+          ? requireEnum(body.detailLevel, EPISODE_DETAIL_LEVELS, 'detailLevel')
+          : undefined;
+        const summary = await requestManager.summarizeEpisode(sessionId, { detailLevel });
+        writeJson(res, 200, { episode: summary });
+        return;
+      }
+
+      // POST /v1/reflect
+      if (path === '/v1/reflect' && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const reflectQuery = requireString(body.query, 'query');
+        const detailLevel = body.detailLevel
+          ? requireEnum(body.detailLevel, EPISODE_DETAIL_LEVELS, 'detailLevel')
+          : undefined;
+        const includeDeclarative = body.includeDeclarative != null ? Boolean(body.includeDeclarative) : undefined;
+        const includeEpisodic = body.includeEpisodic != null ? Boolean(body.includeEpisodic) : undefined;
+        const timeRange = isRecord(body.timeRange)
+          ? {
+              start_at: typeof body.timeRange.start_at === 'number' ? body.timeRange.start_at : undefined,
+              end_at: typeof body.timeRange.end_at === 'number' ? body.timeRange.end_at : undefined,
+            }
+          : undefined;
+        const result = await requestManager.reflect({
+          query: reflectQuery,
+          detailLevel,
+          includeDeclarative,
+          includeEpisodic,
+          timeRange,
+        });
+        writeJson(res, 200, result);
+        return;
+      }
+
+      // GET /v1/memory
+      if (path === '/v1/memory' && req.method === 'GET') {
+        if (!query.q) {
+          writeError(res, 400, 'Missing required query parameter: q');
+          return;
+        }
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const types = query.types
+          ? (query.types.split(',').map((t) => t.trim()).filter(Boolean) as CognitiveMemoryType[])
+          : undefined;
+        const cogMinTrust = query.minimumTrustScore != null && query.minimumTrustScore !== ''
+          ? Number(query.minimumTrustScore)
+          : undefined;
+        const cogActiveOnly = query.activeOnly != null
+          ? query.activeOnly === 'true'
+          : undefined;
+        const result = await requestManager.searchCognitive({
+          query: query.q,
+          types,
+          limit: parseLimit(query.limit),
+          minimumTrustScore: cogMinTrust,
+          activeOnly: cogActiveOnly,
+        });
+        writeJson(res, 200, result);
+        return;
+      }
+
+      // GET /v1/profile
+      if (path === '/v1/profile' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const validViews: ProfileView[] = ['user', 'operator', 'workspace'];
+        const view = query.view
+          ? requireEnum(query.view, validViews, 'view')
+          : undefined;
+        const validSections: ProfileSection[] = ['identity', 'preferences', 'communication', 'constraints', 'workflows'];
+        const sections = query.sections
+          ? query.sections.split(',').map((s) => requireEnum(s.trim(), validSections, 'sections'))
+          : undefined;
+        const minTrust = query.min_trust != null && query.min_trust !== ''
+          ? Number(query.min_trust)
+          : undefined;
+        if (minTrust != null && Number.isNaN(minTrust)) {
+          writeError(res, 400, 'Invalid min_trust parameter');
+          return;
+        }
+        const includeDisputed = query.includeDisputed === 'true' ? true : undefined;
+        const profile = await requestManager.getProfile({
+          view,
+          sections,
+          minimumTrustScore: minTrust,
+          includeDisputed,
+        });
+        writeJson(res, 200, { profile });
+        return;
+      }
+
+      // POST /v1/playbooks
+      if (path === '/v1/playbooks' && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const playbook = await requestManager.createPlaybook({
+          title: requireString(body.title, 'title'),
+          description: requireString(body.description, 'description'),
+          instructions: requireString(body.instructions, 'instructions'),
+          references: Array.isArray(body.references) ? body.references.map(String) : undefined,
+          templates: Array.isArray(body.templates) ? body.templates.map(String) : undefined,
+          scripts: Array.isArray(body.scripts) ? body.scripts.map(String) : undefined,
+          assets: Array.isArray(body.assets) ? body.assets.map(String) : undefined,
+          tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
+          status: body.status ? requireEnum(body.status, PLAYBOOK_STATUSES, 'status') : undefined,
+        });
+        writeJson(res, 201, { playbook });
+        return;
+      }
+
+      // GET /v1/playbooks
+      if (path === '/v1/playbooks' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        if (query.q) {
+          const results = await requestManager.searchPlaybooks(
+            query.q,
+            query.limit ? { limit: parseLimit(query.limit) } : undefined,
+          );
+          writeJson(res, 200, {
+            playbooks: results.map((r) => ({ ...r.item, rank: r.rank })),
+          });
+        } else {
+          const playbooks = await requestManager.listPlaybooks();
+          writeJson(res, 200, { playbooks });
+        }
+        return;
+      }
+
+      // POST /v1/playbooks/from-task
+      if (path === '/v1/playbooks/from-task' && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const playbook = await requestManager.createPlaybookFromTask({
+          title: requireString(body.title, 'title'),
+          description: requireString(body.description, 'description'),
+          sessionId: requireString(body.sessionId, 'sessionId'),
+          tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
+          sourceWorkingMemoryId: typeof body.sourceWorkingMemoryId === 'number' ? body.sourceWorkingMemoryId : undefined,
+        });
+        writeJson(res, 201, { playbook });
+        return;
+      }
+
+      // GET /v1/playbooks/:id
+      const playbookGetMatch = path.match(/^\/v1\/playbooks\/(\d+)$/);
+      if (playbookGetMatch && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const playbook = await requestManager.getPlaybook(Number(playbookGetMatch[1]));
+        if (!playbook) {
+          writeError(res, 404, 'Playbook not found');
+          return;
+        }
+        writeJson(res, 200, { playbook });
+        return;
+      }
+
+      // PUT /v1/playbooks/:id
+      if (playbookGetMatch && req.method === 'PUT') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const patch: Record<string, unknown> = {};
+        if (body.title != null) patch.title = requireString(body.title, 'title');
+        if (body.description != null) patch.description = requireString(body.description, 'description');
+        if (body.instructions != null) patch.instructions = requireString(body.instructions, 'instructions');
+        if (Array.isArray(body.references)) patch.references = body.references.map(String);
+        if (Array.isArray(body.templates)) patch.templates = body.templates.map(String);
+        if (Array.isArray(body.scripts)) patch.scripts = body.scripts.map(String);
+        if (Array.isArray(body.assets)) patch.assets = body.assets.map(String);
+        if (Array.isArray(body.tags)) patch.tags = body.tags.map(String);
+        if (body.status != null) patch.status = requireEnum(body.status, PLAYBOOK_STATUSES, 'status');
+        const updated = await requestManager.updatePlaybook(Number(playbookGetMatch[1]), patch);
+        if (!updated) {
+          writeError(res, 404, 'Playbook not found');
+          return;
+        }
+        writeJson(res, 200, { playbook: updated });
+        return;
+      }
+
+      // POST /v1/playbooks/:id/revise
+      const playbookReviseMatch = path.match(/^\/v1\/playbooks\/(\d+)\/revise$/);
+      if (playbookReviseMatch && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const result = await requestManager.revisePlaybook(
+          Number(playbookReviseMatch[1]),
+          requireString(body.instructions, 'instructions'),
+          requireString(body.revisionReason, 'revisionReason'),
+          optionalString(body.sourceSessionId, 'sourceSessionId'),
+        );
+        writeJson(res, 200, result);
+        return;
+      }
+
+      // POST /v1/playbooks/:id/use
+      const playbookUseMatch = path.match(/^\/v1\/playbooks\/(\d+)\/use$/);
+      if (playbookUseMatch && req.method === 'POST') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        await requestManager.recordPlaybookUse(Number(playbookUseMatch[1]));
+        writeJson(res, 200, { recorded: true });
+        return;
+      }
+
+      // POST /v1/associations
+      if (path === '/v1/associations' && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const association = await requestManager.addAssociation({
+          source_kind: requireEnum(body.source_kind, ASSOCIATION_TARGET_KINDS, 'source_kind'),
+          source_id: typeof body.source_id === 'number' ? body.source_id : (() => { throw new HttpRequestError(400, 'Missing or invalid field: source_id'); })(),
+          target_kind: requireEnum(body.target_kind, ASSOCIATION_TARGET_KINDS, 'target_kind'),
+          target_id: typeof body.target_id === 'number' ? body.target_id : (() => { throw new HttpRequestError(400, 'Missing or invalid field: target_id'); })(),
+          association_type: requireEnum(body.association_type, ASSOCIATION_TYPES, 'association_type'),
+          confidence: typeof body.confidence === 'number' ? body.confidence : undefined,
+          auto_generated: typeof body.auto_generated === 'boolean' ? body.auto_generated : undefined,
+        });
+        writeJson(res, 201, { association });
+        return;
+      }
+
+      // GET /v1/associations/:kind/:id
+      const assocGetMatch = path.match(/^\/v1\/associations\/([a-z_]+)\/(\d+)$/);
+      if (assocGetMatch && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const kind = requireEnum(assocGetMatch[1], ASSOCIATION_TARGET_KINDS, 'kind');
+        const targetId = Number(assocGetMatch[2]);
+        const result = await requestManager.getAssociations(kind, targetId);
+        writeJson(res, 200, result);
+        return;
+      }
+
+      // POST /v1/associations/traverse
+      if (path === '/v1/associations/traverse' && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const kind = requireEnum(body.kind, ASSOCIATION_TARGET_KINDS, 'kind');
+        const id = typeof body.id === 'number' ? body.id : (() => { throw new HttpRequestError(400, 'Missing or invalid field: id'); })();
+        const maxDepth = typeof body.maxDepth === 'number' ? body.maxDepth : undefined;
+        const maxNodes = typeof body.maxNodes === 'number' ? body.maxNodes : undefined;
+        const graph = await requestManager.traverseAssociations(kind, id, { maxDepth, maxNodes });
+        writeJson(res, 200, graph);
+        return;
+      }
+
+      // DELETE /v1/associations/:id
+      const assocDeleteMatch = path.match(/^\/v1\/associations\/(\d+)$/);
+      if (assocDeleteMatch && req.method === 'DELETE') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        await requestManager.removeAssociation(Number(assocDeleteMatch[1]));
+        writeJson(res, 200, { deleted: true });
+        return;
+      }
+
       writeError(res, 404, `Not found: ${req.method} ${path}`);
     } catch (error) {
       if (error instanceof HttpRequestError) {
         writeError(res, error.status, error.message);
         return;
       }
-      writeError(
-        res,
-        500,
-        error instanceof Error ? error.message : String(error),
-      );
+      // Map resource not-found / scope-mismatch errors from the manager to 404
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        /\b(not found|does not belong)\b/i.test(message) ||
+        /^(Playbook|Association)\s+\d+\s+(not found|does not belong)/i.test(message)
+      ) {
+        writeError(res, 404, message);
+        return;
+      }
+      writeError(res, 500, message);
     }
   });
 

@@ -23,8 +23,15 @@ import type {
   KnowledgeMemory,
   KnowledgeMemoryAudit,
   KnowledgeTrustAssessment,
+  NewPlaybook,
   PaginationOptions,
   PaginatedResult,
+  Playbook,
+  Association,
+  AssociationTargetKind,
+  AssociationType,
+  NewAssociation,
+  PlaybookRevision,
   SearchOptions,
   SearchResult,
   EpisodeSearchOptions,
@@ -68,6 +75,15 @@ import type {
 import type { StructuredGenerationClient } from '../summarizers/client.js';
 import { searchEpisodes, summarizeEpisode, reflect } from './episodic.js';
 import { searchCognitive } from './cognitive.js';
+import { traverseAssociations, type AssociationGraph } from './associations.js';
+import type { Profile, ProfileOptions } from '../contracts/profile.js';
+import { getProfile } from './profile.js';
+import {
+  createPlaybookFromTask,
+  revisePlaybook,
+  findRelevantPlaybooks,
+  type CreatePlaybookFromTaskInput,
+} from './playbook.js';
 import { normalizeScope } from '../contracts/identity.js';
 
 export interface MemoryManagerConfig {
@@ -159,6 +175,37 @@ export interface MemoryManager {
   summarizeEpisode(sessionId: string, options?: { detailLevel?: EpisodeSummary['detailLevel'] }): Promise<EpisodeSummary>;
   reflect(options: ReflectOptions): Promise<ReflectResult>;
   searchCognitive(options: CognitiveSearchOptions): Promise<CognitiveSearchResult>;
+  getProfile(options?: ProfileOptions): Promise<Profile>;
+  createPlaybook(input: Omit<NewPlaybook, 'tenant_id' | 'system_id' | 'scope_id' | 'workspace_id' | 'collaboration_id'>): Promise<Playbook>;
+  createPlaybookFromTask(input: CreatePlaybookFromTaskInput): Promise<Playbook>;
+  revisePlaybook(
+    playbookId: number,
+    newInstructions: string,
+    revisionReason: string,
+    sourceSessionId?: string | null,
+  ): Promise<{ playbook: Playbook; revision: PlaybookRevision }>;
+  getPlaybook(id: number): Promise<Playbook | null>;
+  listPlaybooks(): Promise<Playbook[]>;
+  searchPlaybooks(query: string, options?: SearchOptions): Promise<SearchResult<Playbook>[]>;
+  updatePlaybook(
+    id: number,
+    patch: {
+      title?: string;
+      description?: string;
+      instructions?: string;
+      references?: string[];
+      templates?: string[];
+      scripts?: string[];
+      assets?: string[];
+      tags?: string[];
+      status?: Playbook['status'];
+    },
+  ): Promise<Playbook | null>;
+  recordPlaybookUse(id: number): Promise<void>;
+  addAssociation(input: Omit<NewAssociation, 'tenant_id' | 'system_id' | 'scope_id' | 'workspace_id' | 'collaboration_id'>): Promise<Association>;
+  getAssociations(kind: AssociationTargetKind, id: number): Promise<{ from: Association[]; to: Association[] }>;
+  traverseAssociations(kind: AssociationTargetKind, id: number, options?: { maxDepth?: number; maxNodes?: number }): Promise<AssociationGraph>;
+  removeAssociation(id: number): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -675,6 +722,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
     async getSessionBootstrap(relevanceQuery) {
       const context = await getContextInternal(relevanceQuery);
+      const profile = await getProfile(asyncAdapter, config.scope);
       return {
         currentObjective: context.currentObjective,
         workingMemory: context.workingMemory,
@@ -682,6 +730,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         recentSummaries: context.recentSummaries,
         activeObjectives: context.activeObjectives,
         unresolvedWork: context.unresolvedWork,
+        profile,
       };
     },
 
@@ -1020,6 +1069,141 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
     async searchCognitive(options) {
       return searchCognitive(asyncAdapter, config.scope, options);
+    },
+
+    async getProfile(options) {
+      return getProfile(asyncAdapter, config.scope, options);
+    },
+
+    async createPlaybook(input) {
+      return asyncAdapter.insertPlaybook({ ...input, ...config.scope });
+    },
+
+    async createPlaybookFromTask(input) {
+      if (!config.structuredClient) {
+        throw new Error('createPlaybookFromTask requires a structuredClient in MemoryManagerConfig');
+      }
+      return createPlaybookFromTask(
+        { adapter: asyncAdapter, scope: config.scope, client: config.structuredClient },
+        input,
+      );
+    },
+
+    async revisePlaybook(playbookId, newInstructions, revisionReason, sourceSessionId) {
+      return revisePlaybook(asyncAdapter, config.scope, playbookId, newInstructions, revisionReason, sourceSessionId);
+    },
+
+    async getPlaybook(id) {
+      const playbook = await asyncAdapter.getPlaybookById(id);
+      if (!playbook) return null;
+      const norm = normalizeScope(config.scope);
+      if (
+        playbook.tenant_id !== norm.tenant_id ||
+        playbook.system_id !== norm.system_id ||
+        playbook.workspace_id !== norm.workspace_id ||
+        playbook.collaboration_id !== norm.collaboration_id ||
+        playbook.scope_id !== norm.scope_id
+      ) {
+        return null;
+      }
+      return playbook;
+    },
+
+    async listPlaybooks() {
+      return asyncAdapter.getActivePlaybooks(config.scope);
+    },
+
+    async searchPlaybooks(query, options) {
+      return findRelevantPlaybooks(asyncAdapter, config.scope, query, options);
+    },
+
+    async updatePlaybook(id, patch) {
+      const playbook = await asyncAdapter.getPlaybookById(id);
+      if (!playbook) return null;
+      const norm = normalizeScope(config.scope);
+      if (
+        playbook.tenant_id !== norm.tenant_id ||
+        playbook.system_id !== norm.system_id ||
+        playbook.workspace_id !== norm.workspace_id ||
+        playbook.collaboration_id !== norm.collaboration_id ||
+        playbook.scope_id !== norm.scope_id
+      ) {
+        return null;
+      }
+      return asyncAdapter.updatePlaybook(id, patch);
+    },
+
+    async recordPlaybookUse(id) {
+      const playbook = await asyncAdapter.getPlaybookById(id);
+      if (!playbook) {
+        throw new Error(`Playbook ${id} not found`);
+      }
+      const norm = normalizeScope(config.scope);
+      if (
+        playbook.tenant_id !== norm.tenant_id ||
+        playbook.system_id !== norm.system_id ||
+        playbook.workspace_id !== norm.workspace_id ||
+        playbook.collaboration_id !== norm.collaboration_id ||
+        playbook.scope_id !== norm.scope_id
+      ) {
+        throw new Error(`Playbook ${id} does not belong to the requested scope`);
+      }
+      return asyncAdapter.recordPlaybookUse(id);
+    },
+
+    async addAssociation(input) {
+      return asyncAdapter.insertAssociation({
+        ...input,
+        ...normalizeScope(config.scope),
+      });
+    },
+
+    async getAssociations(kind, id) {
+      const [from, to] = await Promise.all([
+        asyncAdapter.getAssociationsFrom(kind, id, config.scope),
+        asyncAdapter.getAssociationsTo(kind, id, config.scope),
+      ]);
+      return { from, to };
+    },
+
+    async traverseAssociations(kind, id, options) {
+      return traverseAssociations(asyncAdapter, config.scope, kind, id, options);
+    },
+
+    async removeAssociation(id) {
+      // Scope safety: verify the association belongs to the current scope by
+      // scanning across all target kinds, not just knowledge.
+      const norm = normalizeScope(config.scope);
+      const kinds: AssociationTargetKind[] = ['knowledge', 'playbook', 'working_memory', 'work_item'];
+      let found = false;
+      for (const kind of kinds) {
+        if (found) break;
+        // Collect all source IDs for this kind in-scope
+        let ids: number[] = [];
+        if (kind === 'knowledge') {
+          ids = (await asyncAdapter.getActiveKnowledgeMemory(norm)).map((k) => k.id);
+        } else if (kind === 'playbook') {
+          ids = (await asyncAdapter.getActivePlaybooks(norm)).map((p) => p.id);
+        } else if (kind === 'working_memory') {
+          ids = (await asyncAdapter.getActiveWorkingMemory(norm)).map((w) => w.id);
+        } else if (kind === 'work_item') {
+          ids = (await asyncAdapter.getActiveWorkItems(norm)).map((w) => w.id);
+        }
+        for (const nodeId of ids) {
+          const [from, to] = await Promise.all([
+            asyncAdapter.getAssociationsFrom(kind, nodeId, norm),
+            asyncAdapter.getAssociationsTo(kind, nodeId, norm),
+          ]);
+          if (from.some((a) => a.id === id) || to.some((a) => a.id === id)) {
+            found = true;
+            break;
+          }
+        }
+      }
+      if (!found) {
+        throw new Error(`Association ${id} not found in the current scope`);
+      }
+      await asyncAdapter.deleteAssociation(id);
     },
 
     async close() {

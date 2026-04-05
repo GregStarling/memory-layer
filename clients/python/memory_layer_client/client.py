@@ -10,6 +10,8 @@ from urllib.parse import urlencode
 import httpx
 
 from .models import (
+    Association,
+    AssociationGraph,
     AuditListResponse,
     ChangeListResponse,
     CompactionLogListResponse,
@@ -29,6 +31,13 @@ from .models import (
     SearchResponse,
     StoredExchange,
     StoredTurn,
+    CognitiveSearchResult,
+    EpisodeSearchResponse,
+    EpisodeSummary,
+    Playbook,
+    Profile,
+    ReflectResult,
+    RevisePlaybookResult,
     TrustAssessmentResponse,
 )
 
@@ -344,6 +353,348 @@ class MemoryClient:
     def ready(self) -> ReadyResponse:
         payload = self._request("GET", "/readyz")
         return ReadyResponse.from_dict(payload)
+
+    def search_episodes(
+        self,
+        query: str,
+        detail_level: Optional[str] = None,
+        limit: Optional[int] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> EpisodeSearchResponse:
+        params: dict[str, Any] = {"q": query, "detail": detail_level, "limit": limit}
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = self._request(
+            "GET",
+            _append_query_params("/v1/episodes", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return EpisodeSearchResponse.from_dict(payload)
+
+    def summarize_episode(
+        self,
+        session_id: str,
+        detail_level: Optional[str] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> EpisodeSummary:
+        body: dict[str, Any] = {"session_id": session_id}
+        if detail_level is not None:
+            body["detailLevel"] = detail_level
+        payload = self._request(
+            "POST",
+            "/v1/episodes/summarize",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return EpisodeSummary.from_dict(payload["episode"])
+
+    def reflect(
+        self,
+        query: str,
+        detail_level: Optional[str] = None,
+        include_episodic: Optional[bool] = None,
+        include_declarative: Optional[bool] = None,
+        time_range: Optional[dict[str, int]] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> ReflectResult:
+        body: dict[str, Any] = {"query": query}
+        if detail_level is not None:
+            body["detailLevel"] = detail_level
+        if include_episodic is not None:
+            body["includeEpisodic"] = include_episodic
+        if include_declarative is not None:
+            body["includeDeclarative"] = include_declarative
+        if time_range is not None:
+            body["timeRange"] = time_range
+        payload = self._request(
+            "POST",
+            "/v1/reflect",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return ReflectResult.from_dict(payload)
+
+    def search_cognitive(
+        self,
+        query: str,
+        types: Optional[list[str]] = None,
+        limit: Optional[int] = None,
+        minimum_trust_score: Optional[float] = None,
+        active_only: Optional[bool] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> CognitiveSearchResult:
+        params: dict[str, Any] = {
+            "q": query,
+            "types": ",".join(types) if types else None,
+            "limit": limit,
+            "minimumTrustScore": minimum_trust_score,
+            "activeOnly": str(active_only).lower() if active_only is not None else None,
+        }
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = self._request(
+            "GET",
+            _append_query_params("/v1/memory", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return CognitiveSearchResult.from_dict(payload)
+
+    def get_profile(
+        self,
+        view: Optional[str] = None,
+        sections: Optional[list[str]] = None,
+        min_trust: Optional[float] = None,
+        include_disputed: Optional[bool] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> "Profile":
+        params: dict[str, Any] = {
+            "view": view,
+            "sections": ",".join(sections) if sections else None,
+            "min_trust": min_trust,
+            "includeDisputed": str(include_disputed).lower() if include_disputed is not None else None,
+        }
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = self._request(
+            "GET",
+            _append_query_params("/v1/profile", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return Profile.from_dict(payload["profile"])
+
+    def create_playbook(
+        self,
+        title: str,
+        description: str,
+        instructions: str,
+        tags: Optional[list[str]] = None,
+        status: Optional[str] = None,
+        references: Optional[list[str]] = None,
+        templates: Optional[list[str]] = None,
+        scripts: Optional[list[str]] = None,
+        assets: Optional[list[str]] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> Playbook:
+        body: dict[str, Any] = {
+            "title": title,
+            "description": description,
+            "instructions": instructions,
+        }
+        if tags is not None:
+            body["tags"] = tags
+        if status is not None:
+            body["status"] = status
+        if references is not None:
+            body["references"] = references
+        if templates is not None:
+            body["templates"] = templates
+        if scripts is not None:
+            body["scripts"] = scripts
+        if assets is not None:
+            body["assets"] = assets
+        if scope or self.default_scope:
+            body["scope"] = (scope or self.default_scope).to_dict()  # type: ignore[union-attr]
+        payload = self._request("POST", "/v1/playbooks", body, headers=_scope_headers(scope, self.default_scope))
+        return Playbook.from_dict(payload["playbook"])
+
+    def list_playbooks(
+        self,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> list[Playbook]:
+        params: dict[str, Any] = {}
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = self._request(
+            "GET",
+            _append_query_params("/v1/playbooks", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return [Playbook.from_dict(p) for p in payload.get("playbooks", [])]
+
+    def search_playbooks(
+        self,
+        query: str,
+        limit: Optional[int] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> list[Playbook]:
+        params: dict[str, Any] = {"q": query, "limit": limit}
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = self._request(
+            "GET",
+            _append_query_params("/v1/playbooks", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return [Playbook.from_dict(p) for p in payload.get("playbooks", [])]
+
+    def get_playbook(
+        self,
+        playbook_id: int,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> Optional[Playbook]:
+        payload = self._request(
+            "GET",
+            f"/v1/playbooks/{playbook_id}",
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return Playbook.from_dict(payload["playbook"])
+
+    def revise_playbook(
+        self,
+        playbook_id: int,
+        instructions: str,
+        revision_reason: str,
+        source_session_id: Optional[str] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> RevisePlaybookResult:
+        body: dict[str, Any] = {
+            "instructions": instructions,
+            "revisionReason": revision_reason,
+        }
+        if source_session_id is not None:
+            body["sourceSessionId"] = source_session_id
+        if scope or self.default_scope:
+            body["scope"] = (scope or self.default_scope).to_dict()  # type: ignore[union-attr]
+        payload = self._request(
+            "POST",
+            f"/v1/playbooks/{playbook_id}/revise",
+            body,
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return RevisePlaybookResult.from_dict(payload)
+
+    def record_playbook_use(
+        self,
+        playbook_id: int,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> None:
+        self._request(
+            "POST",
+            f"/v1/playbooks/{playbook_id}/use",
+            headers=_scope_headers(scope, self.default_scope),
+        )
+
+    def create_playbook_from_task(
+        self,
+        title: str,
+        description: str,
+        session_id: str,
+        tags: Optional[list[str]] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> Playbook:
+        body: dict[str, Any] = {
+            "title": title,
+            "description": description,
+            "sessionId": session_id,
+        }
+        if tags is not None:
+            body["tags"] = tags
+        if scope or self.default_scope:
+            body["scope"] = (scope or self.default_scope).to_dict()  # type: ignore[union-attr]
+        payload = self._request(
+            "POST",
+            "/v1/playbooks/from-task",
+            body,
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return Playbook.from_dict(payload["playbook"])
+
+    def add_association(
+        self,
+        source_kind: str,
+        source_id: int,
+        target_kind: str,
+        target_id: int,
+        association_type: str,
+        confidence: Optional[float] = None,
+        auto_generated: Optional[bool] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> Association:
+        body: dict[str, Any] = {
+            "source_kind": source_kind,
+            "source_id": source_id,
+            "target_kind": target_kind,
+            "target_id": target_id,
+            "association_type": association_type,
+        }
+        if confidence is not None:
+            body["confidence"] = confidence
+        if auto_generated is not None:
+            body["auto_generated"] = auto_generated
+        payload = self._request(
+            "POST",
+            "/v1/associations",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return Association.from_dict(payload["association"])
+
+    def get_associations(
+        self,
+        kind: str,
+        target_id: int,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> dict[str, list[Association]]:
+        params: dict[str, Any] = {}
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = self._request(
+            "GET",
+            _append_query_params(f"/v1/associations/{kind}/{target_id}", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return {
+            "from": [Association.from_dict(a) for a in payload.get("from", [])],
+            "to": [Association.from_dict(a) for a in payload.get("to", [])],
+        }
+
+    def traverse_associations(
+        self,
+        kind: str,
+        target_id: int,
+        max_depth: Optional[int] = None,
+        max_nodes: Optional[int] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> AssociationGraph:
+        body: dict[str, Any] = {"kind": kind, "id": target_id}
+        if max_depth is not None:
+            body["maxDepth"] = max_depth
+        if max_nodes is not None:
+            body["maxNodes"] = max_nodes
+        payload = self._request(
+            "POST",
+            "/v1/associations/traverse",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return AssociationGraph.from_dict(payload)
+
+    def remove_association(
+        self,
+        association_id: int,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> None:
+        self._request(
+            "DELETE",
+            f"/v1/associations/{association_id}",
+            headers=_scope_headers(scope, self.default_scope),
+        )
 
     def stream_events(
         self,
@@ -757,6 +1108,348 @@ class AsyncMemoryClient:
     async def ready(self) -> ReadyResponse:
         payload = await self._request("GET", "/readyz")
         return ReadyResponse.from_dict(payload)
+
+    async def search_episodes(
+        self,
+        query: str,
+        detail_level: Optional[str] = None,
+        limit: Optional[int] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> EpisodeSearchResponse:
+        params: dict[str, Any] = {"q": query, "detail": detail_level, "limit": limit}
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = await self._request(
+            "GET",
+            _append_query_params("/v1/episodes", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return EpisodeSearchResponse.from_dict(payload)
+
+    async def summarize_episode(
+        self,
+        session_id: str,
+        detail_level: Optional[str] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> EpisodeSummary:
+        body: dict[str, Any] = {"session_id": session_id}
+        if detail_level is not None:
+            body["detailLevel"] = detail_level
+        payload = await self._request(
+            "POST",
+            "/v1/episodes/summarize",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return EpisodeSummary.from_dict(payload["episode"])
+
+    async def reflect(
+        self,
+        query: str,
+        detail_level: Optional[str] = None,
+        include_episodic: Optional[bool] = None,
+        include_declarative: Optional[bool] = None,
+        time_range: Optional[dict[str, int]] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> ReflectResult:
+        body: dict[str, Any] = {"query": query}
+        if detail_level is not None:
+            body["detailLevel"] = detail_level
+        if include_episodic is not None:
+            body["includeEpisodic"] = include_episodic
+        if include_declarative is not None:
+            body["includeDeclarative"] = include_declarative
+        if time_range is not None:
+            body["timeRange"] = time_range
+        payload = await self._request(
+            "POST",
+            "/v1/reflect",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return ReflectResult.from_dict(payload)
+
+    async def search_cognitive(
+        self,
+        query: str,
+        types: Optional[list[str]] = None,
+        limit: Optional[int] = None,
+        minimum_trust_score: Optional[float] = None,
+        active_only: Optional[bool] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> CognitiveSearchResult:
+        params: dict[str, Any] = {
+            "q": query,
+            "types": ",".join(types) if types else None,
+            "limit": limit,
+            "minimumTrustScore": minimum_trust_score,
+            "activeOnly": str(active_only).lower() if active_only is not None else None,
+        }
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = await self._request(
+            "GET",
+            _append_query_params("/v1/memory", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return CognitiveSearchResult.from_dict(payload)
+
+    async def get_profile(
+        self,
+        view: Optional[str] = None,
+        sections: Optional[list[str]] = None,
+        min_trust: Optional[float] = None,
+        include_disputed: Optional[bool] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> "Profile":
+        params: dict[str, Any] = {
+            "view": view,
+            "sections": ",".join(sections) if sections else None,
+            "min_trust": min_trust,
+            "includeDisputed": str(include_disputed).lower() if include_disputed is not None else None,
+        }
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = await self._request(
+            "GET",
+            _append_query_params("/v1/profile", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return Profile.from_dict(payload["profile"])
+
+    async def create_playbook(
+        self,
+        title: str,
+        description: str,
+        instructions: str,
+        tags: Optional[list[str]] = None,
+        status: Optional[str] = None,
+        references: Optional[list[str]] = None,
+        templates: Optional[list[str]] = None,
+        scripts: Optional[list[str]] = None,
+        assets: Optional[list[str]] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> Playbook:
+        body: dict[str, Any] = {
+            "title": title,
+            "description": description,
+            "instructions": instructions,
+        }
+        if tags is not None:
+            body["tags"] = tags
+        if status is not None:
+            body["status"] = status
+        if references is not None:
+            body["references"] = references
+        if templates is not None:
+            body["templates"] = templates
+        if scripts is not None:
+            body["scripts"] = scripts
+        if assets is not None:
+            body["assets"] = assets
+        if scope or self.default_scope:
+            body["scope"] = (scope or self.default_scope).to_dict()  # type: ignore[union-attr]
+        payload = await self._request("POST", "/v1/playbooks", body, headers=_scope_headers(scope, self.default_scope))
+        return Playbook.from_dict(payload["playbook"])
+
+    async def list_playbooks(
+        self,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> list[Playbook]:
+        params: dict[str, Any] = {}
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = await self._request(
+            "GET",
+            _append_query_params("/v1/playbooks", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return [Playbook.from_dict(p) for p in payload.get("playbooks", [])]
+
+    async def search_playbooks(
+        self,
+        query: str,
+        limit: Optional[int] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> list[Playbook]:
+        params: dict[str, Any] = {"q": query, "limit": limit}
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = await self._request(
+            "GET",
+            _append_query_params("/v1/playbooks", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return [Playbook.from_dict(p) for p in payload.get("playbooks", [])]
+
+    async def get_playbook(
+        self,
+        playbook_id: int,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> Optional[Playbook]:
+        payload = await self._request(
+            "GET",
+            f"/v1/playbooks/{playbook_id}",
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return Playbook.from_dict(payload["playbook"])
+
+    async def revise_playbook(
+        self,
+        playbook_id: int,
+        instructions: str,
+        revision_reason: str,
+        source_session_id: Optional[str] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> RevisePlaybookResult:
+        body: dict[str, Any] = {
+            "instructions": instructions,
+            "revisionReason": revision_reason,
+        }
+        if source_session_id is not None:
+            body["sourceSessionId"] = source_session_id
+        if scope or self.default_scope:
+            body["scope"] = (scope or self.default_scope).to_dict()  # type: ignore[union-attr]
+        payload = await self._request(
+            "POST",
+            f"/v1/playbooks/{playbook_id}/revise",
+            body,
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return RevisePlaybookResult.from_dict(payload)
+
+    async def record_playbook_use(
+        self,
+        playbook_id: int,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> None:
+        await self._request(
+            "POST",
+            f"/v1/playbooks/{playbook_id}/use",
+            headers=_scope_headers(scope, self.default_scope),
+        )
+
+    async def create_playbook_from_task(
+        self,
+        title: str,
+        description: str,
+        session_id: str,
+        tags: Optional[list[str]] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> Playbook:
+        body: dict[str, Any] = {
+            "title": title,
+            "description": description,
+            "sessionId": session_id,
+        }
+        if tags is not None:
+            body["tags"] = tags
+        if scope or self.default_scope:
+            body["scope"] = (scope or self.default_scope).to_dict()  # type: ignore[union-attr]
+        payload = await self._request(
+            "POST",
+            "/v1/playbooks/from-task",
+            body,
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return Playbook.from_dict(payload["playbook"])
+
+    async def add_association(
+        self,
+        source_kind: str,
+        source_id: int,
+        target_kind: str,
+        target_id: int,
+        association_type: str,
+        confidence: Optional[float] = None,
+        auto_generated: Optional[bool] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> Association:
+        body: dict[str, Any] = {
+            "source_kind": source_kind,
+            "source_id": source_id,
+            "target_kind": target_kind,
+            "target_id": target_id,
+            "association_type": association_type,
+        }
+        if confidence is not None:
+            body["confidence"] = confidence
+        if auto_generated is not None:
+            body["auto_generated"] = auto_generated
+        payload = await self._request(
+            "POST",
+            "/v1/associations",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return Association.from_dict(payload["association"])
+
+    async def get_associations(
+        self,
+        kind: str,
+        target_id: int,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> dict[str, list[Association]]:
+        params: dict[str, Any] = {}
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = await self._request(
+            "GET",
+            _append_query_params(f"/v1/associations/{kind}/{target_id}", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return {
+            "from": [Association.from_dict(a) for a in payload.get("from", [])],
+            "to": [Association.from_dict(a) for a in payload.get("to", [])],
+        }
+
+    async def traverse_associations(
+        self,
+        kind: str,
+        target_id: int,
+        max_depth: Optional[int] = None,
+        max_nodes: Optional[int] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> AssociationGraph:
+        body: dict[str, Any] = {"kind": kind, "id": target_id}
+        if max_depth is not None:
+            body["maxDepth"] = max_depth
+        if max_nodes is not None:
+            body["maxNodes"] = max_nodes
+        payload = await self._request(
+            "POST",
+            "/v1/associations/traverse",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return AssociationGraph.from_dict(payload)
+
+    async def remove_association(
+        self,
+        association_id: int,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> None:
+        await self._request(
+            "DELETE",
+            f"/v1/associations/{association_id}",
+            headers=_scope_headers(scope, self.default_scope),
+        )
 
     async def astream_events(
         self,

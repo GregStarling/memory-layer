@@ -10,6 +10,8 @@ import type { MemoryScope, ScopeLevel } from '../../contracts/identity.js';
 import { normalizeScope, widenScope } from '../../contracts/identity.js';
 import type { EventHook, Logger } from '../../contracts/observability.js';
 import type {
+  Association,
+  AssociationTargetKind,
   CompactionLog,
   ContextMonitor,
   ContextMonitorUpsert,
@@ -17,14 +19,19 @@ import type {
   KnowledgeEvidence,
   KnowledgeMemory,
   KnowledgeMemoryAudit,
+  NewAssociation,
   NewCompactionLog,
   NewKnowledgeCandidate,
   NewKnowledgeEvidence,
   NewKnowledgeMemory,
   NewKnowledgeMemoryAudit,
+  NewPlaybook,
+  NewPlaybookRevision,
   NewWorkItem,
   NewTurn,
   NewWorkingMemory,
+  Playbook,
+  PlaybookRevision,
   PaginationOptions,
   PaginatedResult,
   SearchOptions,
@@ -254,6 +261,80 @@ function mapWorkItem(row: Record<string, unknown>): WorkItem {
     source_working_memory_id: row.source_working_memory_id != null ? Number(row.source_working_memory_id) : null,
     created_at: Number(row.created_at),
     updated_at: Number(row.updated_at),
+  };
+}
+
+function parseJsonStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((v): v is string => typeof v === 'string');
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+    } catch { return []; }
+  }
+  return [];
+}
+
+function mapPlaybook(row: Record<string, unknown>): Playbook {
+  return {
+    id: Number(row.id),
+    tenant_id: String(row.tenant_id),
+    system_id: String(row.system_id),
+    workspace_id: String(row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? ''),
+    scope_id: String(row.scope_id),
+    title: String(row.title),
+    description: String(row.description),
+    instructions: String(row.instructions),
+    references: parseJsonStringArray(row.references_json),
+    templates: parseJsonStringArray(row.templates),
+    scripts: parseJsonStringArray(row.scripts),
+    assets: parseJsonStringArray(row.assets),
+    tags: parseJsonStringArray(row.tags),
+    status: row.status as Playbook['status'],
+    source_session_id: row.source_session_id != null ? String(row.source_session_id) : null,
+    source_working_memory_id: row.source_working_memory_id != null ? Number(row.source_working_memory_id) : null,
+    revision_count: Number(row.revision_count ?? 0),
+    last_used_at: row.last_used_at != null ? Number(row.last_used_at) : null,
+    use_count: Number(row.use_count ?? 0),
+    created_at: Number(row.created_at),
+    updated_at: Number(row.updated_at),
+    schema_version: Number(row.schema_version ?? 1),
+  };
+}
+
+function mapPlaybookRevision(row: Record<string, unknown>): PlaybookRevision {
+  return {
+    id: Number(row.id),
+    tenant_id: String(row.tenant_id),
+    system_id: String(row.system_id),
+    workspace_id: String(row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? ''),
+    scope_id: String(row.scope_id),
+    playbook_id: Number(row.playbook_id),
+    instructions: String(row.instructions),
+    revision_reason: String(row.revision_reason),
+    source_session_id: row.source_session_id != null ? String(row.source_session_id) : null,
+    created_at: Number(row.created_at),
+  };
+}
+
+function mapAssociation(row: Record<string, unknown>): Association {
+  return {
+    id: Number(row.id),
+    tenant_id: String(row.tenant_id),
+    system_id: String(row.system_id),
+    workspace_id: String(row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? ''),
+    scope_id: String(row.scope_id),
+    source_kind: row.source_kind as AssociationTargetKind,
+    source_id: Number(row.source_id),
+    target_kind: row.target_kind as AssociationTargetKind,
+    target_id: Number(row.target_id),
+    association_type: row.association_type as Association['association_type'],
+    confidence: Number(row.confidence),
+    auto_generated: Boolean(row.auto_generated),
+    created_at: Number(row.created_at),
   };
 }
 
@@ -1075,6 +1156,146 @@ export function createPostgresAdapter(
         params,
       );
       return rows.map(mapCompactionLog);
+    },
+
+    async insertPlaybook(input) {
+      const n = normalizeScope(input);
+      const { rows } = await pool.query(
+        `INSERT INTO playbooks (tenant_id, system_id, workspace_id, collaboration_id, scope_id, title, description, instructions,
+           references_json, templates, scripts, assets, tags, status, source_session_id, source_working_memory_id, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $17)
+         RETURNING *`,
+        [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id,
+         input.title, input.description, input.instructions,
+         JSON.stringify(input.references ?? []), JSON.stringify(input.templates ?? []),
+         JSON.stringify(input.scripts ?? []), JSON.stringify(input.assets ?? []),
+         JSON.stringify(input.tags ?? []), input.status ?? 'draft',
+         input.source_session_id ?? null, input.source_working_memory_id ?? null, input.created_at ?? now()],
+      );
+      return mapPlaybook(rows[0]);
+    },
+    async getPlaybookById(id) {
+      const { rows } = await pool.query('SELECT * FROM playbooks WHERE id = $1', [id]);
+      return rows[0] ? mapPlaybook(rows[0]) : null;
+    },
+    async getActivePlaybooks(scope) {
+      const { rows } = await pool.query(
+        `SELECT * FROM playbooks WHERE ${scopeWhere()} AND status IN ('draft', 'active') ORDER BY id DESC`,
+        scopeParams(scope),
+      );
+      return rows.map(mapPlaybook);
+    },
+    async searchPlaybooks(scope, query, options) {
+      const limit = options?.limit ?? 20;
+      const activeOnly = options?.activeOnly ?? true;
+      const statusFilter = activeOnly
+        ? `AND status NOT IN ('archived', 'deprecated')`
+        : '';
+      const { rows } = await pool.query(
+        `SELECT *, ts_rank(search_vector, plainto_tsquery('english', $6)) AS rank
+         FROM playbooks WHERE ${scopeWhere()} ${statusFilter}
+         AND search_vector @@ plainto_tsquery('english', $6)
+         ORDER BY rank DESC LIMIT $7`,
+        [...scopeParams(scope), query, limit],
+      );
+      return rows.map((row: Record<string, unknown>, index: number) => ({
+        item: mapPlaybook(row),
+        rank: Number(row.rank ?? index),
+      }));
+    },
+    async updatePlaybook(id, patch) {
+      const sets: string[] = [];
+      const values: unknown[] = [];
+      let idx = 1;
+      if (patch.title != null) { sets.push(`title = $${idx++}`); values.push(patch.title); }
+      if (patch.description != null) { sets.push(`description = $${idx++}`); values.push(patch.description); }
+      if (patch.instructions != null) { sets.push(`instructions = $${idx++}`); values.push(patch.instructions); }
+      if (patch.references != null) { sets.push(`references_json = $${idx++}`); values.push(JSON.stringify(patch.references)); }
+      if (patch.templates != null) { sets.push(`templates = $${idx++}`); values.push(JSON.stringify(patch.templates)); }
+      if (patch.scripts != null) { sets.push(`scripts = $${idx++}`); values.push(JSON.stringify(patch.scripts)); }
+      if (patch.assets != null) { sets.push(`assets = $${idx++}`); values.push(JSON.stringify(patch.assets)); }
+      if (patch.tags != null) { sets.push(`tags = $${idx++}`); values.push(JSON.stringify(patch.tags)); }
+      if (patch.status != null) { sets.push(`status = $${idx++}`); values.push(patch.status); }
+      if (sets.length === 0) return this.getPlaybookById(id);
+      sets.push(`updated_at = $${idx++}`);
+      values.push(now());
+      values.push(id);
+      const { rows } = await pool.query(
+        `UPDATE playbooks SET ${sets.join(', ')} WHERE id = $${idx} RETURNING *`,
+        values,
+      );
+      return rows[0] ? mapPlaybook(rows[0]) : null;
+    },
+    async recordPlaybookUse(id) {
+      await pool.query(
+        'UPDATE playbooks SET use_count = use_count + 1, last_used_at = $1 WHERE id = $2',
+        [now(), id],
+      );
+    },
+    async insertPlaybookRevision(input) {
+      const playbook = await this.getPlaybookById(input.playbook_id);
+      if (!playbook) {
+        throw new Error(`Playbook ${input.playbook_id} not found`);
+      }
+      const { rows } = await pool.query(
+        `INSERT INTO playbook_revisions (tenant_id, system_id, workspace_id, collaboration_id, scope_id, playbook_id, instructions, revision_reason, source_session_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING *`,
+        [playbook.tenant_id, playbook.system_id, playbook.workspace_id, playbook.collaboration_id, playbook.scope_id,
+         input.playbook_id, input.instructions, input.revision_reason,
+         input.source_session_id ?? null, input.created_at ?? now()],
+      );
+      await pool.query(
+        'UPDATE playbooks SET revision_count = revision_count + 1 WHERE id = $1',
+        [input.playbook_id],
+      );
+      return mapPlaybookRevision(rows[0]);
+    },
+    async getPlaybookRevisions(playbookId) {
+      const { rows } = await pool.query(
+        'SELECT * FROM playbook_revisions WHERE playbook_id = $1 ORDER BY created_at DESC',
+        [playbookId],
+      );
+      return rows.map(mapPlaybookRevision);
+    },
+
+    async insertAssociation(input) {
+      const n = normalizeScope(input);
+      const { rows } = await pool.query(
+        `INSERT INTO associations
+          (tenant_id, system_id, workspace_id, collaboration_id, scope_id,
+           source_kind, source_id, target_kind, target_id, association_type, confidence, auto_generated, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+         RETURNING *`,
+        [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id,
+         input.source_kind, input.source_id, input.target_kind, input.target_id,
+         input.association_type, input.confidence ?? 0.5, input.auto_generated ?? false,
+         input.created_at ?? now()],
+      );
+      return mapAssociation(rows[0]);
+    },
+    async getAssociationsFrom(kind, id, scope) {
+      const n = normalizeScope(scope);
+      const { rows } = await pool.query(
+        `SELECT * FROM associations WHERE source_kind = $1 AND source_id = $2
+         AND tenant_id = $3 AND system_id = $4 AND workspace_id = $5 AND collaboration_id = $6 AND scope_id = $7
+         ORDER BY id DESC`,
+        [kind, id, n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id],
+      );
+      return rows.map(mapAssociation);
+    },
+    async getAssociationsTo(kind, id, scope) {
+      const n = normalizeScope(scope);
+      const { rows } = await pool.query(
+        `SELECT * FROM associations WHERE target_kind = $1 AND target_id = $2
+         AND tenant_id = $3 AND system_id = $4 AND workspace_id = $5 AND collaboration_id = $6 AND scope_id = $7
+         ORDER BY id DESC`,
+        [kind, id, n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id],
+      );
+      return rows.map(mapAssociation);
+    },
+    async deleteAssociation(id) {
+      await pool.query('DELETE FROM associations WHERE id = $1', [id]);
     },
 
     async transaction<T>(fn: () => Promise<T>): Promise<T> {

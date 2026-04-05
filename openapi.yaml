@@ -12,6 +12,7 @@ tags:
   - name: cognitive
   - name: profiles
   - name: playbooks
+  - name: associations
   - name: maintenance
   - name: observability
 components:
@@ -79,6 +80,41 @@ components:
       properties:
         error:
           type: string
+    Association:
+      type: object
+      required: [id, tenant_id, system_id, workspace_id, collaboration_id, scope_id, source_kind, source_id, target_kind, target_id, association_type, confidence, auto_generated, created_at]
+      properties:
+        id:
+          type: integer
+        tenant_id:
+          type: string
+        system_id:
+          type: string
+        workspace_id:
+          type: string
+        collaboration_id:
+          type: string
+        scope_id:
+          type: string
+        source_kind:
+          type: string
+          enum: [knowledge, playbook, working_memory, work_item]
+        source_id:
+          type: integer
+        target_kind:
+          type: string
+          enum: [knowledge, playbook, working_memory, work_item]
+        target_id:
+          type: integer
+        association_type:
+          type: string
+          enum: [related_to, supports, contradicts, supersedes, depends_on, solves, applies_to, derived_from]
+        confidence:
+          type: number
+        auto_generated:
+          type: boolean
+        created_at:
+          type: integer
     MemoryEvent:
       type: object
       required: [type, scope, timestamp, durationMs, meta]
@@ -465,10 +501,20 @@ components:
           type: integer
     Playbook:
       type: object
-      required: [id, title, description, instructions, references, templates, scripts, assets, tags, status, revision_count, use_count, created_at, updated_at, schema_version]
+      required: [id, tenant_id, system_id, workspace_id, collaboration_id, scope_id, title, description, instructions, references, templates, scripts, assets, tags, status, revision_count, use_count, created_at, updated_at, schema_version]
       properties:
         id:
           type: integer
+        tenant_id:
+          type: string
+        system_id:
+          type: string
+        workspace_id:
+          type: string
+        collaboration_id:
+          type: string
+        scope_id:
+          type: string
         title:
           type: string
         description:
@@ -558,10 +604,20 @@ components:
           $ref: '#/components/schemas/Scope'
     PlaybookRevision:
       type: object
-      required: [id, playbook_id, instructions, revision_reason, created_at]
+      required: [id, tenant_id, system_id, workspace_id, collaboration_id, scope_id, playbook_id, instructions, revision_reason, created_at]
       properties:
         id:
           type: integer
+        tenant_id:
+          type: string
+        system_id:
+          type: string
+        workspace_id:
+          type: string
+        collaboration_id:
+          type: string
+        scope_id:
+          type: string
         playbook_id:
           type: integer
         instructions:
@@ -946,8 +1002,19 @@ paths:
   /v1/playbooks:
     get:
       tags: [playbooks]
-      summary: List active playbooks
+      summary: List or search playbooks
+      description: Without q param, lists active playbooks. With q param, searches by query.
       parameters:
+        - name: q
+          in: query
+          schema:
+            type: string
+          description: Search query (optional — omit to list all active playbooks)
+        - name: limit
+          in: query
+          schema:
+            type: integer
+          description: Maximum results (for search)
         - $ref: '#/components/parameters/ScopeTenant'
         - $ref: '#/components/parameters/ScopeSystem'
         - $ref: '#/components/parameters/ScopeWorkspace'
@@ -955,7 +1022,7 @@ paths:
         - $ref: '#/components/parameters/ScopeId'
       responses:
         '200':
-          description: Active playbooks
+          description: Playbooks (with optional rank field when searching)
           content:
             application/json:
               schema:
@@ -981,47 +1048,11 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Playbook'
-  /v1/playbooks/search:
-    get:
-      tags: [playbooks]
-      summary: Search playbooks by query
-      parameters:
-        - name: q
-          in: query
-          required: true
-          schema:
-            type: string
-          description: Search query
-        - name: limit
-          in: query
-          schema:
-            type: integer
-          description: Maximum results
-        - $ref: '#/components/parameters/ScopeTenant'
-        - $ref: '#/components/parameters/ScopeSystem'
-        - $ref: '#/components/parameters/ScopeWorkspace'
-        - $ref: '#/components/parameters/ScopeCollaboration'
-        - $ref: '#/components/parameters/ScopeId'
-      responses:
-        '200':
-          description: Search results
-          content:
-            application/json:
-              schema:
                 type: object
-                required: [results]
+                required: [playbook]
                 properties:
-                  results:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/PlaybookSearchHit'
-        '400':
-          description: Missing search query
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
+                  playbook:
+                    $ref: '#/components/schemas/Playbook'
   /v1/playbooks/from-task:
     post:
       tags: [playbooks]
@@ -1032,17 +1063,24 @@ paths:
           application/json:
             schema:
               type: object
-              required: [sessionId]
+              required: [title, description, sessionId]
               properties:
+                title:
+                  type: string
+                  description: Playbook title
+                description:
+                  type: string
+                  description: Playbook description
                 sessionId:
                   type: string
                   description: Session ID containing the task to extract
-                title:
-                  type: string
                 tags:
                   type: array
                   items:
                     type: string
+                sourceWorkingMemoryId:
+                  type: integer
+                  description: Optional working memory ID that triggered extraction
                 scope:
                   $ref: '#/components/schemas/Scope'
       responses:
@@ -1051,7 +1089,11 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Playbook'
+                type: object
+                required: [playbook]
+                properties:
+                  playbook:
+                    $ref: '#/components/schemas/Playbook'
   /v1/playbooks/{playbookId}:
     get:
       tags: [playbooks]
@@ -1073,7 +1115,75 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Playbook'
+                type: object
+                required: [playbook]
+                properties:
+                  playbook:
+                    $ref: '#/components/schemas/Playbook'
+        '404':
+          description: Playbook not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    put:
+      tags: [playbooks]
+      summary: Update a playbook
+      parameters:
+        - name: playbookId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                description:
+                  type: string
+                instructions:
+                  type: string
+                references:
+                  type: array
+                  items:
+                    type: string
+                templates:
+                  type: array
+                  items:
+                    type: string
+                scripts:
+                  type: array
+                  items:
+                    type: string
+                assets:
+                  type: array
+                  items:
+                    type: string
+                tags:
+                  type: array
+                  items:
+                    type: string
+                status:
+                  type: string
+                  enum: [draft, active, deprecated, archived]
+                scope:
+                  $ref: '#/components/schemas/Scope'
+      responses:
+        '200':
+          description: Updated playbook
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [playbook]
+                properties:
+                  playbook:
+                    $ref: '#/components/schemas/Playbook'
         '404':
           description: Playbook not found
           content:
@@ -1096,16 +1206,17 @@ paths:
           application/json:
             schema:
               type: object
-              required: [instructions, revision_reason]
+              required: [instructions, revisionReason]
               properties:
                 instructions:
                   type: string
                   description: New instructions
-                revision_reason:
+                revisionReason:
                   type: string
                   description: Reason for the revision
-                source_session_id:
+                sourceSessionId:
                   type: string
+                  description: Optional session ID that triggered the revision
                 scope:
                   $ref: '#/components/schemas/Scope'
       responses:
@@ -1138,8 +1249,9 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [recorded]
                 properties:
-                  ok:
+                  recorded:
                     type: boolean
         '404':
           description: Playbook not found
@@ -1147,6 +1259,145 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /v1/associations:
+    post:
+      tags: [associations]
+      summary: Create an association between two memory artifacts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_kind, source_id, target_kind, target_id, association_type]
+              properties:
+                source_kind:
+                  type: string
+                  enum: [knowledge, playbook, working_memory, work_item]
+                source_id:
+                  type: integer
+                target_kind:
+                  type: string
+                  enum: [knowledge, playbook, working_memory, work_item]
+                target_id:
+                  type: integer
+                association_type:
+                  type: string
+                  enum: [related_to, supports, contradicts, supersedes, depends_on, solves, applies_to, derived_from]
+                confidence:
+                  type: number
+                auto_generated:
+                  type: boolean
+      responses:
+        '201':
+          description: Association created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [association]
+                properties:
+                  association:
+                    $ref: '#/components/schemas/Association'
+  /v1/associations/{kind}/{id}:
+    get:
+      tags: [associations]
+      summary: Get associations for a memory artifact
+      parameters:
+        - name: kind
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [knowledge, playbook, working_memory, work_item]
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Associations from and to the artifact
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  from:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Association'
+                  to:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Association'
+  /v1/associations/traverse:
+    post:
+      tags: [associations]
+      summary: Traverse association graph with bounded BFS
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, id]
+              properties:
+                kind:
+                  type: string
+                  enum: [knowledge, playbook, working_memory, work_item]
+                id:
+                  type: integer
+                maxDepth:
+                  type: integer
+                  default: 2
+                maxNodes:
+                  type: integer
+                  default: 20
+      responses:
+        '200':
+          description: Association graph
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [nodes, edges]
+                properties:
+                  nodes:
+                    type: array
+                    items:
+                      type: object
+                      required: [kind, id]
+                      properties:
+                        kind:
+                          type: string
+                        id:
+                          type: integer
+                  edges:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Association'
+  /v1/associations/{id}:
+    delete:
+      tags: [associations]
+      summary: Delete an association
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Association deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted]
+                properties:
+                  deleted:
+                    type: boolean
   /v1/facts:
     post:
       tags: [ingestion]
