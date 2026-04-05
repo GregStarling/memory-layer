@@ -109,7 +109,7 @@ import type {
   TemporalStateSnapshot,
   TimelineResult,
 } from '../contracts/temporal.js';
-import { normalizeTemporalId } from '../contracts/temporal.js';
+import { compareTemporalIds, normalizeTemporalId } from '../contracts/temporal.js';
 import type { StructuredGenerationClient } from '../summarizers/client.js';
 import { searchEpisodes, summarizeEpisode, reflect } from './episodic.js';
 import { searchCognitive } from './cognitive.js';
@@ -247,6 +247,20 @@ export interface MemoryManager {
       includeCoordinationState?: boolean;
     },
   ): Promise<SessionBootstrap>;
+  captureSnapshot(
+    relevanceQuery?: string,
+    options?: {
+      view?: ContextViewPolicy;
+      viewer?: ActorRef;
+      includeCoordinationState?: boolean;
+    },
+  ): Promise<{
+    bootstrap: SessionBootstrap;
+    context: MemoryContext;
+    frozenAt: number;
+    watermarkEventId: string | null;
+    profile: Profile | null;
+  }>;
   getRuntimeDiagnostics(): Promise<{
     circuitBreakers: {
       summarizer: CircuitBreakerSnapshot;
@@ -1042,6 +1056,9 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       viewer?: ActorRef;
       includeCoordinationState?: boolean;
     },
+    replayCutoff?: {
+      throughEventId?: TemporalId | null;
+    },
   ): Promise<{
     context: MemoryContext;
     events: MemoryEventRecord[];
@@ -1076,8 +1093,14 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
             endAt: asOf,
             limit: 500,
           });
+    const filteredEvents =
+      replayCutoff?.throughEventId != null
+        ? events.filter(
+            (event) => compareTemporalIds(event.event_id, replayCutoff.throughEventId!) <= 0,
+          )
+        : events;
     const replayed = normalizeReplayedTemporalState(
-      foldTemporalState(events, { sessionId: config.sessionId }),
+      foldTemporalState(filteredEvents, { sessionId: config.sessionId }),
       asOf,
     );
     const replayAdapter = createTemporalReplayAdapter(replayed, asOf);
@@ -1103,9 +1126,9 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     });
     return {
       context,
-      events,
+      events: filteredEvents,
       state: replayed,
-      watermarkEventId: replayed.watermarkEventId,
+      watermarkEventId: replayCutoff?.throughEventId ?? replayed.watermarkEventId,
       exact: true,
       cutoverAt,
     };
@@ -1129,23 +1152,6 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
   }
 
   async function getHistoricalProfileAt(asOf: number): Promise<Profile> {
-    const cutoverAt = await getTemporalCutoverAt();
-    if (cutoverAt != null && asOf >= cutoverAt) {
-      const replayed = normalizeReplayedTemporalState(
-        foldTemporalState(
-          await listAllMemoryEvents(asyncAdapter, config.scope, {
-            endAt: asOf,
-            limit: 500,
-          }),
-          { sessionId: config.sessionId },
-        ),
-        asOf,
-      );
-      return buildProfileFromKnowledge(
-        replayed.knowledge.filter((item) => matchesScope(item, config.scope)),
-      );
-    }
-
     const bestEffort = await collectBestEffortTemporalState(asOf);
     return buildProfileFromKnowledge(
       bestEffort.knowledge.filter((item) => matchesScope(item, config.scope)),
@@ -1454,11 +1460,54 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     },
 
     async getSessionBootstrapAt(asOf, relevanceQuery, options) {
-      const [replay, profile] = await Promise.all([
-        buildReplayedContext(asOf, relevanceQuery, options),
-        getHistoricalProfileAt(asOf),
-      ]);
+      const replay = await buildReplayedContext(asOf, relevanceQuery, options);
+      const profile =
+        replay.exact && replay.state
+          ? buildProfileFromKnowledge(
+              replay.state.knowledge.filter((item) => matchesScope(item, config.scope)),
+            )
+          : await getHistoricalProfileAt(asOf);
       return buildSessionBootstrapPayload(replay.context, profile);
+    },
+
+    async captureSnapshot(relevanceQuery, options) {
+      const frozenAt = Math.floor(Date.now() / 1000);
+      const watermark = await asyncAdapter.getTemporalWatermark('temporal');
+      if (!watermark || watermark.last_event_id === '0') {
+        const [context, profile] = await Promise.all([
+          getContextInternal(relevanceQuery, undefined, options),
+          getProfile(asyncAdapter, config.scope),
+        ]);
+        return {
+          bootstrap: buildSessionBootstrapPayload(context, profile),
+          context,
+          frozenAt,
+          watermarkEventId: null,
+          profile,
+        };
+      }
+
+      const replay = await buildReplayedContext(
+        watermark.updated_at,
+        relevanceQuery,
+        options,
+        {
+          throughEventId: watermark.last_event_id,
+        },
+      );
+      const profile =
+        replay.exact && replay.state
+          ? buildProfileFromKnowledge(
+              replay.state.knowledge.filter((item) => matchesScope(item, config.scope)),
+            )
+          : await getHistoricalProfileAt(watermark.updated_at);
+      return {
+        bootstrap: buildSessionBootstrapPayload(replay.context, profile),
+        context: replay.context,
+        frozenAt,
+        watermarkEventId: replay.exact ? watermark.last_event_id : null,
+        profile,
+      };
     },
 
     async getRuntimeDiagnostics() {

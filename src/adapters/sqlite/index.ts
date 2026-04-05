@@ -387,22 +387,16 @@ function createAdapterFromDatabase(
     inputs: NewMemoryEventRecord[],
   ): MemoryEventRecord[] {
     if (inputs.length === 0) return [];
-    const insert = db.prepare(
-      `INSERT INTO memory_event_log
-        (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, actor_id,
-         actor_kind, actor_system_id, actor_display_name, actor_metadata,
-         entity_kind, entity_id, event_type, payload, causation_id, correlation_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    );
-    const read = db.prepare('SELECT * FROM memory_event_log WHERE event_id = ?');
     const tx = db.transaction((batch: NewMemoryEventRecord[]) => {
-      const records: MemoryEventRecord[] = [];
-      let lastEventId: string | null = null;
-      let lastCreatedAt = nowSeconds();
-      for (const input of batch) {
-        const normalized = normalizeScope(input);
-        const createdAt = input.created_at ?? nowSeconds();
-        const result = insert.run(
+      const normalizedBatch = batch.map((input) => ({
+        normalized: normalizeScope(input),
+        input,
+        createdAt: input.created_at ?? nowSeconds(),
+      }));
+      const values = normalizedBatch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+      const params: unknown[] = [];
+      for (const { normalized, input, createdAt } of normalizedBatch) {
+        params.push(
           normalized.tenant_id,
           normalized.system_id,
           normalized.workspace_id,
@@ -422,20 +416,35 @@ function createAdapterFromDatabase(
           input.correlation_id ?? null,
           createdAt,
         );
-        const eventId = normalizeTemporalId(result.lastInsertRowid as string | number | bigint);
-        const row = read.get(eventId) as MemoryEventRow | undefined;
-        if (row) {
-          records.push(rowToMemoryEvent(row));
-        }
-        lastEventId = eventId;
-        lastCreatedAt = createdAt;
       }
+      const result = db.prepare(
+        `INSERT INTO memory_event_log
+          (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, actor_id,
+           actor_kind, actor_system_id, actor_display_name, actor_metadata,
+           entity_kind, entity_id, event_type, payload, causation_id, correlation_id, created_at)
+         VALUES ${values}`,
+      ).run(...params);
+      const lastEventId = normalizeTemporalId(result.lastInsertRowid as string | number | bigint);
+      const firstEventId = normalizeTemporalId(
+        BigInt(lastEventId) - BigInt(normalizedBatch.length) + 1n,
+      );
+      const records = (
+        db
+          .prepare(
+            `SELECT * FROM memory_event_log
+             WHERE event_id BETWEEN ? AND ?
+             ORDER BY event_id ASC`,
+          )
+          .all(firstEventId, lastEventId) as MemoryEventRow[]
+      ).map(rowToMemoryEvent);
       if (lastEventId != null) {
         writeTemporalWatermark({
           projection_name: 'temporal',
           last_event_id: lastEventId,
-          updated_at: lastCreatedAt,
-          cutover_at: readTemporalWatermark('temporal')?.cutover_at ?? lastCreatedAt,
+          updated_at: normalizedBatch[normalizedBatch.length - 1]!.createdAt,
+          cutover_at:
+            readTemporalWatermark('temporal')?.cutover_at ??
+            normalizedBatch[normalizedBatch.length - 1]!.createdAt,
           metadata: readTemporalWatermark('temporal')?.metadata ?? null,
         });
       }

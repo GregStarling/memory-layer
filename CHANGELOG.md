@@ -26,6 +26,10 @@ unreleased work before its first public release.
 
 - **`getProfile` / `memory_get_profile` / `GET /v1/profile` now default to trusted knowledge only.** Provisional-state knowledge was previously included by default; callers must now opt in with `includeProvisional: true` (or `?includeProvisional=true`) to see it. The tool description has always said profiles are built from trusted knowledge, so this fixes the default to match the contract — but any caller that was relying on provisional leakage will see fewer entries. Disputed entries continue to require `includeDisputed: true`.
 
+### Changed
+
+- **`operator_supervisor` context assembly now widens further by default.** When no explicit `crossScopeLevel` is configured, `operator_supervisor` now defaults to tenant-level fetch and can surface `tenant`-visibility knowledge, work items, playbooks, claims, and handoffs. Other views keep their narrower defaults and still do not surface tenant-visible items.
+
 ### Fixed
 
 - Added retrieval, context assembly, observability, summarizer/extractor helpers, knowledge growth, policy controls, semantic search, hybrid ranking, and a `MemoryManager` facade.

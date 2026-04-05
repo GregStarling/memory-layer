@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createInMemoryAdapter } from '../adapters/memory/index.js';
 import { createSQLiteAdapter } from '../adapters/sqlite/index.js';
+import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 import { createMemoryManager } from '../core/manager.js';
 import { createMemoryRuntime } from '../core/runtime.js';
 import type { StorageAdapter } from '../contracts/storage.js';
@@ -170,6 +171,63 @@ describe('memory runtime helpers', () => {
       expect(snapshot!.context).toBeDefined();
       expect(snapshot!.watermarkEventId).toBe(latestCursor === '0' ? null : latestCursor);
       await manager.close();
+    });
+
+    it('captures snapshots against a fixed event watermark even if later same-second writes land mid-capture', async () => {
+      const syncAdapter = createSQLiteAdapter(':memory:');
+      const asyncAdapter = wrapSyncAdapter(syncAdapter);
+      const scope = makeScope();
+      const manager = createMemoryManager({
+        asyncAdapter,
+        scope,
+        sessionId: 'session-1',
+        summarizer: async () => ({
+          summary: 'snapshot summary',
+          key_entities: [],
+          topic_tags: [],
+        }),
+        autoCompact: false,
+      });
+      const runtime = createMemoryRuntime(manager, { snapshotMode: true });
+
+      syncAdapter.insertTurn({
+        ...scope,
+        session_id: 'session-1',
+        actor: 'user',
+        role: 'user',
+        content: 'seed turn',
+      });
+      const initialWatermark = syncAdapter.getTemporalWatermark('temporal');
+      expect(initialWatermark).toBeTruthy();
+
+      let injectedLateTurn = false;
+      const originalListMemoryEvents = asyncAdapter.listMemoryEvents.bind(asyncAdapter);
+      asyncAdapter.listMemoryEvents = async (listedScope, query) => {
+        if (!injectedLateTurn) {
+          injectedLateTurn = true;
+          syncAdapter.insertTurn({
+            ...scope,
+            session_id: 'session-1',
+            actor: 'user',
+            role: 'user',
+            content: 'late turn in same second',
+            created_at: initialWatermark!.updated_at,
+          });
+        }
+        return originalListMemoryEvents(listedScope, query);
+      };
+
+      await runtime.startSession('seed');
+
+      const snapshot = runtime.getSnapshot();
+      const latestWatermark = syncAdapter.getTemporalWatermark('temporal');
+      expect(snapshot).not.toBeNull();
+      expect(snapshot!.watermarkEventId).toBe(initialWatermark!.last_event_id);
+      expect(latestWatermark?.last_event_id).not.toBe(initialWatermark!.last_event_id);
+      expect(snapshot!.context.activeTurns.map((turn) => turn.content)).toEqual(['seed turn']);
+
+      await manager.close();
+      syncAdapter.close();
     });
 
     it('returns cached snapshot context from beforeModelCall instead of live state', async () => {

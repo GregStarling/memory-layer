@@ -137,21 +137,16 @@ export function createMemoryRuntime(
 
   async function captureSnapshot(
     relevanceQuery?: string,
-    format?: FormatOptions,
+    _format?: FormatOptions,
   ): Promise<SessionSnapshot> {
-    const frozenAt = Math.floor(Date.now() / 1000);
-    const [bootstrapPayload, context] = await Promise.all([
-      getBootstrapPayload(relevanceQuery, format),
-      manager.getContext(relevanceQuery),
-    ]);
-    const latestCursor = await manager.resolveChangeStreamCursor();
+    const captured = await manager.captureSnapshot(relevanceQuery);
     const snapshot: SessionSnapshot = {
       snapshotId: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-      bootstrap: bootstrapPayload.bootstrap,
-      context,
-      frozenAt,
-      watermarkEventId: latestCursor === '0' ? null : latestCursor,
-      profile: bootstrapPayload.bootstrap.profile ?? null,
+      bootstrap: captured.bootstrap,
+      context: captured.context,
+      frozenAt: captured.frozenAt,
+      watermarkEventId: captured.watermarkEventId,
+      profile: captured.profile,
     };
     // Deep-freeze so callers can't mutate the cached snapshot's bootstrap,
     // context, or profile via returned references.

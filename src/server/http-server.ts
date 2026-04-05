@@ -81,6 +81,10 @@ export interface HttpServerConfig {
   autoDetectWorkspace?: boolean;
   /** Structured generation client for episodic recall, playbooks, and reflect. */
   structuredClient?: CreateMemoryOptions['structuredClient'];
+  /** Default event cap for diff/reporting endpoints. Defaults to 5000. */
+  defaultDiffMaxEvents?: number;
+  /** Hard maximum event cap for diff/reporting endpoints. Defaults to 20000. */
+  maxDiffMaxEvents?: number;
 }
 
 class HttpRequestError extends Error {
@@ -99,6 +103,27 @@ const SESSION_MANAGER_CACHE_LIMIT = 256;
 const MAX_LIST_LIMIT = 100;
 const DEFAULT_DIFF_MAX_EVENTS = 5000;
 const MAX_DIFF_MAX_EVENTS = 20000;
+
+function resolveDiffEventCaps(
+  defaultMaxEvents?: number,
+  maxMaxEvents?: number,
+): { defaultDiffMaxEvents: number; maxDiffMaxEvents: number } {
+  const resolvedMax = maxMaxEvents ?? MAX_DIFF_MAX_EVENTS;
+  const resolvedDefault = defaultMaxEvents ?? DEFAULT_DIFF_MAX_EVENTS;
+  if (!Number.isInteger(resolvedMax) || resolvedMax < 1) {
+    throw new Error('memory-layer: maxDiffMaxEvents must be a positive integer');
+  }
+  if (!Number.isInteger(resolvedDefault) || resolvedDefault < 1) {
+    throw new Error('memory-layer: defaultDiffMaxEvents must be a positive integer');
+  }
+  if (resolvedDefault > resolvedMax) {
+    throw new Error('memory-layer: defaultDiffMaxEvents must not exceed maxDiffMaxEvents');
+  }
+  return {
+    defaultDiffMaxEvents: resolvedDefault,
+    maxDiffMaxEvents: resolvedMax,
+  };
+}
 
 function failHttpValidation(message: string): never {
   throw new HttpRequestError(400, message);
@@ -585,6 +610,10 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
   const adminApiKey = config.adminApiKey ?? process.env.MEMORY_ADMIN_API_KEY;
   const enableCors = config.cors ?? true;
   const bodyLimitBytes = config.bodyLimitBytes ?? 1_048_576;
+  const { defaultDiffMaxEvents, maxDiffMaxEvents } = resolveDiffEventCaps(
+    config.defaultDiffMaxEvents,
+    config.maxDiffMaxEvents,
+  );
   const managers = new Map<string, MemoryManager>();
   // Managers keyed by (scope, sessionId) for snapshot endpoints that must
   // honor the URL-path session instead of the scope's bound default session.
@@ -898,7 +927,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const to = parseOptionalFiniteNumber(query.to, { name: 'to' }, failHttpValidation);
         const maxEvents = parseOptionalFiniteInteger(
           query.max_events,
-          { name: 'max_events', min: 1, max: MAX_DIFF_MAX_EVENTS },
+          { name: 'max_events', min: 1, max: maxDiffMaxEvents },
           failHttpValidation,
         );
         if (from == null || to == null) {
@@ -909,7 +938,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           sessionId: query.session_id || undefined,
           entityKind: query.entity_kind as never,
           entityId: query.entity_id || undefined,
-          maxEvents: maxEvents ?? DEFAULT_DIFF_MAX_EVENTS,
+          maxEvents: maxEvents ?? defaultDiffMaxEvents,
         });
         writeJson(res, 200, diff);
         return;
@@ -1511,17 +1540,27 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const detailLevel = query.detail
           ? requireEnum(query.detail, EPISODE_DETAIL_LEVELS, 'detail')
           : undefined;
-        const episodeTimeRange = (query.start_at || query.end_at)
-          ? {
-              start_at: query.start_at ? Number(query.start_at) : undefined,
-              end_at: query.end_at ? Number(query.end_at) : undefined,
-            }
-          : undefined;
+        const episodeStartAt = parseOptionalFiniteNumber(
+          query.start_at,
+          { name: 'start_at' },
+          failHttpValidation,
+        );
+        const episodeEndAt = parseOptionalFiniteNumber(
+          query.end_at,
+          { name: 'end_at' },
+          failHttpValidation,
+        );
         const episodes = await requestManager.searchEpisodes({
           query: query.q,
           detailLevel,
           limit: parseLimit(query.limit),
-          timeRange: episodeTimeRange,
+          timeRange:
+            episodeStartAt != null || episodeEndAt != null
+              ? {
+                  start_at: episodeStartAt,
+                  end_at: episodeEndAt,
+                }
+              : undefined,
         });
         writeJson(res, 200, { episodes });
         return;
@@ -1553,8 +1592,16 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const reflectLimit = parseOptionalNonNegativeInteger(body.limit, 'limit');
         const timeRange = isRecord(body.timeRange)
           ? {
-              start_at: typeof body.timeRange.start_at === 'number' ? body.timeRange.start_at : undefined,
-              end_at: typeof body.timeRange.end_at === 'number' ? body.timeRange.end_at : undefined,
+              start_at: parseOptionalFiniteNumber(
+                body.timeRange.start_at,
+                { name: 'timeRange.start_at' },
+                failHttpValidation,
+              ),
+              end_at: parseOptionalFiniteNumber(
+                body.timeRange.end_at,
+                { name: 'timeRange.end_at' },
+                failHttpValidation,
+              ),
             }
           : undefined;
         const result = await requestManager.reflect({
@@ -1673,7 +1720,11 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           description: requireString(body.description, 'description'),
           sessionId: requireString(body.sessionId, 'sessionId'),
           tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
-          sourceWorkingMemoryId: typeof body.sourceWorkingMemoryId === 'number' ? body.sourceWorkingMemoryId : undefined,
+          sourceWorkingMemoryId: parseOptionalFiniteInteger(
+            body.sourceWorkingMemoryId,
+            { name: 'sourceWorkingMemoryId', min: 1 },
+            failHttpValidation,
+          ),
         });
         writeJson(res, 201, { playbook });
         return;
@@ -1817,18 +1868,14 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const requestManager = getSessionManager(scopeInput, sessionId);
         const scopeKey = scopeKeyFor(scopeInput);
         const relevanceQuery = typeof body.relevanceQuery === 'string' ? body.relevanceQuery : undefined;
-        const [bootstrap, context] = await Promise.all([
-          requestManager.getSessionBootstrap(relevanceQuery),
-          requestManager.getContext(relevanceQuery),
-        ]);
-        const latestCursor = await requestManager.resolveChangeStreamCursor();
+        const snapshotData = await requestManager.captureSnapshot(relevanceQuery);
         const snapshot = {
           scopeKey,
           snapshotId: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-          bootstrap,
-          context,
-          frozenAt: Math.floor(Date.now() / 1000),
-          watermarkEventId: latestCursor === '0' ? null : latestCursor,
+          bootstrap: snapshotData.bootstrap,
+          context: snapshotData.context,
+          frozenAt: snapshotData.frozenAt,
+          watermarkEventId: snapshotData.watermarkEventId,
         };
         touchSnapshot(`${scopeKey}:${sessionId}`, snapshot);
         const { scopeKey: _scopeKey, ...publicSnapshot } = snapshot;
@@ -1860,18 +1907,14 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const requestManager = getSessionManager(scopeInput, sessionId);
         const scopeKey = scopeKeyFor(scopeInput);
         const relevanceQuery = typeof body.relevanceQuery === 'string' ? body.relevanceQuery : undefined;
-        const [bootstrap, context] = await Promise.all([
-          requestManager.getSessionBootstrap(relevanceQuery),
-          requestManager.getContext(relevanceQuery),
-        ]);
-        const latestCursor = await requestManager.resolveChangeStreamCursor();
+        const snapshotData = await requestManager.captureSnapshot(relevanceQuery);
         const snapshot = {
           scopeKey,
           snapshotId: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-          bootstrap,
-          context,
-          frozenAt: Math.floor(Date.now() / 1000),
-          watermarkEventId: latestCursor === '0' ? null : latestCursor,
+          bootstrap: snapshotData.bootstrap,
+          context: snapshotData.context,
+          frozenAt: snapshotData.frozenAt,
+          watermarkEventId: snapshotData.watermarkEventId,
         };
         touchSnapshot(`${scopeKey}:${sessionId}`, snapshot);
         const { scopeKey: _scopeKey, ...publicSnapshot } = snapshot;

@@ -628,6 +628,11 @@ describe('MCP server handler', () => {
     } as never);
     expect(badExpectedVersion.isError).toBe(true);
 
+    const badWorkItemId = await handler.callTool('memory_update_work_item', {
+      id: 'bad',
+    } as never);
+    expect(badWorkItemId.isError).toBe(true);
+
     const badLease = await handler.callTool('memory_claim_work_item', {
       workItemId: 1,
       actor: { actor_kind: 'agent', actor_id: 'planner' },
@@ -654,5 +659,25 @@ describe('MCP server handler', () => {
       minimumTrustScore: 'NaN',
     } as never);
     expect(badProfileTrust.isError).toBe(true);
+
+    const badEpisodeTimeRange = await handler.callTool('memory_search_episodes', {
+      query: 'deploy',
+      timeRange: { start_at: 'bad' },
+    } as never);
+    expect(badEpisodeTimeRange.isError).toBe(true);
+
+    const badReflectTimeRange = await handler.callTool('memory_reflect', {
+      query: 'deploy',
+      timeRange: { end_at: 'bad' },
+    } as never);
+    expect(badReflectTimeRange.isError).toBe(true);
+
+    const badSourceWorkingMemoryId = await handler.callTool('memory_create_playbook_from_task', {
+      title: 'Deploy',
+      description: 'Ship it',
+      sessionId: 'session-1',
+      sourceWorkingMemoryId: 'bad',
+    } as never);
+    expect(badSourceWorkingMemoryId.isError).toBe(true);
   });
 });

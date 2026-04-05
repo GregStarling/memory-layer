@@ -51,6 +51,10 @@ export interface McpServerConfig {
   autoDetectWorkspace?: boolean;
   /** Structured generation client for episodic recall, playbooks, and reflect. */
   structuredClient?: CreateMemoryOptions['structuredClient'];
+  /** Default event cap for diff/reporting tools. Defaults to 5000. */
+  defaultDiffMaxEvents?: number;
+  /** Hard maximum event cap for diff/reporting tools. Defaults to 20000. */
+  maxDiffMaxEvents?: number;
 }
 
 interface McpTool {
@@ -91,6 +95,27 @@ const TEMPORAL_ENTITY_KINDS = [
 
 function failMcpValidation(message: string): never {
   throw new McpValidationError(message);
+}
+
+function resolveDiffEventCaps(
+  defaultMaxEvents?: number,
+  maxMaxEvents?: number,
+): { defaultDiffMaxEvents: number; maxDiffMaxEvents: number } {
+  const resolvedMax = maxMaxEvents ?? MAX_DIFF_MAX_EVENTS;
+  const resolvedDefault = defaultMaxEvents ?? DEFAULT_DIFF_MAX_EVENTS;
+  if (!Number.isInteger(resolvedMax) || resolvedMax < 1) {
+    throw new Error('memory-layer: maxDiffMaxEvents must be a positive integer');
+  }
+  if (!Number.isInteger(resolvedDefault) || resolvedDefault < 1) {
+    throw new Error('memory-layer: defaultDiffMaxEvents must be a positive integer');
+  }
+  if (resolvedDefault > resolvedMax) {
+    throw new Error('memory-layer: defaultDiffMaxEvents must not exceed maxDiffMaxEvents');
+  }
+  return {
+    defaultDiffMaxEvents: resolvedDefault,
+    maxDiffMaxEvents: resolvedMax,
+  };
 }
 
 const TOOLS: McpTool[] = [
@@ -197,7 +222,8 @@ const TOOLS: McpTool[] = [
         entityId: { type: 'string', description: 'Optional entity id filter' },
         maxEvents: {
           type: 'number',
-          description: `Optional maximum event count to accumulate (default ${DEFAULT_DIFF_MAX_EVENTS}, max ${MAX_DIFF_MAX_EVENTS})`,
+          description:
+            'Optional maximum event count to accumulate. Defaults to the server-configured diff cap and must not exceed the configured maximum.',
         },
       },
       required: ['from', 'to'],
@@ -947,6 +973,21 @@ function parseOptionalNonNegativeInteger(value: unknown, name: string): number |
   return value;
 }
 
+function parseRequiredFiniteInteger(
+  value: unknown,
+  name: string,
+  options: {
+    min?: number;
+    max?: number;
+  } = {},
+): number {
+  const parsed = parseOptionalFiniteInteger(value, { name, ...options }, failMcpValidation);
+  if (parsed == null) {
+    throw new McpValidationError(`Missing or invalid field: ${name}`);
+  }
+  return parsed;
+}
+
 function parseOptionalTemporalId(value: unknown, name: string): string | undefined {
   return parseOptionalTemporalIdValue(value, name, failMcpValidation);
 }
@@ -974,6 +1015,10 @@ function resolveScopeInput(
  * For a ready-to-run stdio server, use `startMcpServer()`.
  */
 export function createMcpServerHandler(config: McpServerConfig = {}) {
+  const { defaultDiffMaxEvents, maxDiffMaxEvents } = resolveDiffEventCaps(
+    config.defaultDiffMaxEvents,
+    config.maxDiffMaxEvents,
+  );
   const managers = new Map<string, MemoryManager>();
   const runtimes = new Map<string, MemoryRuntime>();
   const sessionManagers = new Map<string, MemoryManager>();
@@ -1224,7 +1269,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           const to = parseOptionalFiniteNumber(args.to, { name: 'to' }, failMcpValidation);
           const maxEvents = parseOptionalFiniteInteger(
             args.maxEvents,
-            { name: 'maxEvents', min: 1, max: MAX_DIFF_MAX_EVENTS },
+            { name: 'maxEvents', min: 1, max: maxDiffMaxEvents },
             failMcpValidation,
           );
           if (from == null || to == null) {
@@ -1234,7 +1279,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
             sessionId: optionalString(args.sessionId, 'sessionId'),
             entityKind: args.entityKind as never,
             entityId: optionalString(args.entityId, 'entityId'),
-            maxEvents: maxEvents ?? DEFAULT_DIFF_MAX_EVENTS,
+            maxEvents: maxEvents ?? defaultDiffMaxEvents,
           });
           return jsonResult(diff);
         }
@@ -1326,7 +1371,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           return jsonResult({ tracked: true, workItemId: item.id });
         }
         case 'memory_update_work_item': {
-          const item = await requestManager.updateWorkItem(Number(args.id), {
+          const item = await requestManager.updateWorkItem(parseRequiredFiniteInteger(args.id, 'id', { min: 1 }), {
             title: args.title != null ? requireString(args.title, 'title') : undefined,
             detail: args.detail != null ? optionalString(args.detail, 'detail') ?? null : undefined,
             status:
@@ -1354,7 +1399,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           const actor = parseActorRef(args.actor, 'actor');
           if (!actor) throw new McpValidationError('Missing or invalid field: actor');
           const claim = await requestManager.claimWorkItem({
-            workItemId: Number(args.workItemId),
+            workItemId: parseRequiredFiniteInteger(args.workItemId, 'workItemId', { min: 1 }),
             actor,
             leaseSeconds: parseOptionalFiniteInteger(
               args.leaseSeconds,
@@ -1368,7 +1413,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           const actor = parseActorRef(args.actor, 'actor');
           if (!actor) throw new McpValidationError('Missing or invalid field: actor');
           const claim = await requestManager.renewWorkClaim(
-            Number(args.claimId),
+            parseRequiredFiniteInteger(args.claimId, 'claimId', { min: 1 }),
             actor,
             parseOptionalFiniteInteger(
               args.leaseSeconds,
@@ -1382,7 +1427,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           const actor = parseActorRef(args.actor, 'actor');
           if (!actor) throw new McpValidationError('Missing or invalid field: actor');
           const claim = await requestManager.releaseWorkClaim(
-            Number(args.claimId),
+            parseRequiredFiniteInteger(args.claimId, 'claimId', { min: 1 }),
             actor,
             optionalString(args.reason, 'reason'),
           );
@@ -1399,7 +1444,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
             throw new McpValidationError('Missing or invalid field: fromActor/toActor');
           }
           const handoff = await requestManager.handoffWorkItem({
-            workItemId: Number(args.workItemId),
+            workItemId: parseRequiredFiniteInteger(args.workItemId, 'workItemId', { min: 1 }),
             fromActor,
             toActor,
             summary: requireString(args.summary, 'summary'),
@@ -1417,7 +1462,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           const actor = parseActorRef(args.actor, 'actor');
           if (!actor) throw new McpValidationError('Missing or invalid field: actor');
           const handoff = await requestManager.acceptHandoff(
-            Number(args.handoffId),
+            parseRequiredFiniteInteger(args.handoffId, 'handoffId', { min: 1 }),
             actor,
             optionalString(args.reason, 'reason'),
           );
@@ -1427,7 +1472,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           const actor = parseActorRef(args.actor, 'actor');
           if (!actor) throw new McpValidationError('Missing or invalid field: actor');
           const handoff = await requestManager.rejectHandoff(
-            Number(args.handoffId),
+            parseRequiredFiniteInteger(args.handoffId, 'handoffId', { min: 1 }),
             actor,
             optionalString(args.reason, 'reason'),
           );
@@ -1437,7 +1482,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           const actor = parseActorRef(args.actor, 'actor');
           if (!actor) throw new McpValidationError('Missing or invalid field: actor');
           const handoff = await requestManager.cancelHandoff(
-            Number(args.handoffId),
+            parseRequiredFiniteInteger(args.handoffId, 'handoffId', { min: 1 }),
             actor,
             optionalString(args.reason, 'reason'),
           );
@@ -1498,8 +1543,16 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
         case 'memory_search_episodes': {
           const episodeTimeRange = isRecord(args.timeRange)
             ? {
-                start_at: typeof args.timeRange.start_at === 'number' ? args.timeRange.start_at : undefined,
-                end_at: typeof args.timeRange.end_at === 'number' ? args.timeRange.end_at : undefined,
+                start_at: parseOptionalFiniteNumber(
+                  args.timeRange.start_at,
+                  { name: 'timeRange.start_at' },
+                  failMcpValidation,
+                ),
+                end_at: parseOptionalFiniteNumber(
+                  args.timeRange.end_at,
+                  { name: 'timeRange.end_at' },
+                  failMcpValidation,
+                ),
               }
             : undefined;
           const episodes = await requestManager.searchEpisodes({
@@ -1524,8 +1577,16 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
         case 'memory_reflect': {
           const reflectTimeRange = isRecord(args.timeRange)
             ? {
-                start_at: typeof args.timeRange.start_at === 'number' ? args.timeRange.start_at : undefined,
-                end_at: typeof args.timeRange.end_at === 'number' ? args.timeRange.end_at : undefined,
+                start_at: parseOptionalFiniteNumber(
+                  args.timeRange.start_at,
+                  { name: 'timeRange.start_at' },
+                  failMcpValidation,
+                ),
+                end_at: parseOptionalFiniteNumber(
+                  args.timeRange.end_at,
+                  { name: 'timeRange.end_at' },
+                  failMcpValidation,
+                ),
               }
             : undefined;
           const result = await requestManager.reflect({
@@ -1594,10 +1655,11 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
             description: requireString(args.description, 'description'),
             sessionId: requireString(args.sessionId, 'sessionId'),
             tags: Array.isArray(args.tags) ? args.tags.map(String) : undefined,
-            sourceWorkingMemoryId:
-              typeof args.sourceWorkingMemoryId === 'number' && Number.isInteger(args.sourceWorkingMemoryId)
-                ? args.sourceWorkingMemoryId
-                : undefined,
+            sourceWorkingMemoryId: parseOptionalFiniteInteger(
+              args.sourceWorkingMemoryId,
+              { name: 'sourceWorkingMemoryId', min: 1 },
+              failMcpValidation,
+            ),
           });
           return jsonResult({ playbook });
         }
@@ -1613,10 +1675,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           });
         }
         case 'memory_revise_playbook': {
-          const playbookId = args.playbookId;
-          if (typeof playbookId !== 'number' || !Number.isInteger(playbookId)) {
-            throw new McpValidationError('Missing or invalid field: playbookId');
-          }
+          const playbookId = parseRequiredFiniteInteger(args.playbookId, 'playbookId', { min: 1 });
           const result = await requestManager.revisePlaybook(
             playbookId,
             requireString(args.newInstructions, 'newInstructions'),
@@ -1626,20 +1685,14 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           return jsonResult({ playbook: result.playbook, revision: result.revision });
         }
         case 'memory_use_playbook': {
-          const playbookId = args.playbookId;
-          if (typeof playbookId !== 'number' || !Number.isInteger(playbookId)) {
-            throw new McpValidationError('Missing or invalid field: playbookId');
-          }
+          const playbookId = parseRequiredFiniteInteger(args.playbookId, 'playbookId', { min: 1 });
           await requestManager.recordPlaybookUse(playbookId);
           const playbook = await requestManager.getPlaybook(playbookId);
           return jsonResult({ playbook });
         }
         case 'memory_get_associations': {
           const kind = requireEnum(args.kind, ASSOCIATION_TARGET_KINDS, 'kind') as AssociationTargetKind;
-          const id = args.id;
-          if (typeof id !== 'number' || !Number.isInteger(id)) {
-            throw new McpValidationError('Missing or invalid field: id');
-          }
+          const id = parseRequiredFiniteInteger(args.id, 'id', { min: 1 });
           if (args.traverse) {
             const graph = await requestManager.traverseAssociations(kind, id, {
               maxDepth: parseOptionalNonNegativeInteger(args.maxDepth, 'maxDepth'),
@@ -1675,10 +1728,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           return jsonResult({ created: true, associationId: association.id });
         }
         case 'memory_remove_association': {
-          const id = args.id;
-          if (typeof id !== 'number' || !Number.isInteger(id)) {
-            throw new McpValidationError('Missing or invalid field: id');
-          }
+          const id = parseRequiredFiniteInteger(args.id, 'id', { min: 1 });
           await requestManager.removeAssociation(id);
           return jsonResult({ deleted: true });
         }

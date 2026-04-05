@@ -797,6 +797,7 @@ describe('HTTP server', () => {
     expect((await fetch(`${base}/v1/state?as_of=NaN`)).status).toBe(400);
     expect((await fetch(`${base}/v1/timeline?cursor=abc`)).status).toBe(400);
     expect((await fetch(`${base}/v1/state/diff?from=Infinity&to=1`)).status).toBe(400);
+    expect((await fetch(`${base}/v1/episodes?q=test&start_at=NaN`)).status).toBe(400);
     expect((await fetch(`${base}/v1/memory?q=test&minimumTrustScore=Infinity`)).status).toBe(400);
     expect((await fetch(`${base}/v1/profile?min_trust=NaN`)).status).toBe(400);
 
@@ -833,6 +834,34 @@ describe('HTTP server', () => {
             to_actor: { actor_kind: 'human', actor_id: 'operator' },
             summary: 'Take over',
             expires_at: 'Infinity',
+          }),
+        })
+      ).status,
+    ).toBe(400);
+
+    expect(
+      (
+        await fetch(`${base}/v1/reflect`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: 'deploy',
+            timeRange: { start_at: 'bad' },
+          }),
+        })
+      ).status,
+    ).toBe(400);
+
+    expect(
+      (
+        await fetch(`${base}/v1/playbooks/from-task`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: 'Deploy',
+            description: 'Ship it',
+            sessionId: 'session-1',
+            sourceWorkingMemoryId: 'bad',
           }),
         })
       ).status,
