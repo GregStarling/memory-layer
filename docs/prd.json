@@ -1,5 +1,5 @@
 {
-  "goal": "Implement the Ultimate Memory Layer Roadmap: 7 features across 4 phases — episodic recall, cognitive taxonomy, materialized profiles, workspace onboarding, procedural playbooks, typed associations, and session snapshots. Source of truth: docs/ULTIMATE_MEMORY_LAYER_ROADMAP.md.",
+  "goal": "Implement the Ultimate Memory Layer Roadmap: 7 features across 4 phases \u2014 episodic recall, cognitive taxonomy, materialized profiles, workspace onboarding, procedural playbooks, typed associations, and session snapshots. Source of truth: docs/ULTIMATE_MEMORY_LAYER_ROADMAP.md.",
   "fast_checks_default": [
     "npm run lint",
     "npm run test",
@@ -1218,7 +1218,7 @@
       "lane": "python",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t50",
@@ -1276,7 +1276,7 @@
       "lane": "verification",
       "parallel_safe": false,
       "tranche_safe": false,
-      "done": false
+      "done": true
     },
     {
       "id": "t52",
@@ -1299,7 +1299,7 @@
       "lane": "core",
       "parallel_safe": false,
       "tranche_safe": false,
-      "done": false
+      "done": true
     },
     {
       "id": "t53",
@@ -1326,7 +1326,7 @@
       "lane": "core",
       "parallel_safe": false,
       "tranche_safe": false,
-      "done": false
+      "done": true
     },
     {
       "id": "t54",
@@ -1347,7 +1347,7 @@
       "lane": "server",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t55",
@@ -1368,7 +1368,7 @@
       "lane": "server",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t56",
@@ -1392,7 +1392,7 @@
       "lane": "integrations",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t57",
@@ -1414,7 +1414,7 @@
       "lane": "contracts",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t58",
@@ -1441,7 +1441,7 @@
       "lane": "evals",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t59",
@@ -1464,7 +1464,7 @@
       "lane": "python",
       "parallel_safe": true,
       "tranche_safe": true,
-      "done": false
+      "done": true
     },
     {
       "id": "t60",

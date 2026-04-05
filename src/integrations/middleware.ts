@@ -1,5 +1,6 @@
 import type { MemoryManager } from '../core/manager.js';
 import { formatContextForPrompt } from '../core/formatter.js';
+import type { MemoryContext } from './../core/context.js';
 
 export interface MessageLike {
   role: string;
@@ -14,6 +15,12 @@ export interface MemoryMiddlewareOptions {
   injectContext?: boolean;
   contextPosition?: 'system' | 'prepend';
   relevanceFromLastMessage?: boolean;
+  /**
+   * When true, the middleware captures the first `getContext` result and
+   * reuses it for subsequent calls instead of rebuilding context on every
+   * turn. Call the returned handler's `refreshSnapshot()` to invalidate.
+   */
+  snapshotMode?: boolean;
 }
 
 export function wrapWithMemory(
@@ -21,6 +28,8 @@ export function wrapWithMemory(
   memory: MemoryManager,
   options: MemoryMiddlewareOptions = {},
 ): MessageHandler {
+  let cachedContext: MemoryContext | null = null;
+
   return async (messages) => {
     const lastMessage = [...messages].reverse().find((message) => message.role === 'user') ?? messages.at(-1);
     if (!lastMessage) {
@@ -32,7 +41,15 @@ export function wrapWithMemory(
     let nextMessages = messages;
     if (options.injectContext ?? true) {
       const query = (options.relevanceFromLastMessage ?? true) ? lastMessage.content : undefined;
-      const context = await memory.getContext(query);
+      let context: MemoryContext;
+      if (options.snapshotMode) {
+        if (cachedContext == null) {
+          cachedContext = await memory.getContext(query);
+        }
+        context = cachedContext;
+      } else {
+        context = await memory.getContext(query);
+      }
       const memoryMessage = {
         role: 'system',
         content: formatContextForPrompt(context, { includeCitations: true }),

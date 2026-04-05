@@ -12,6 +12,12 @@ export interface ClaudeAgentWrapOptions {
   mapInput?: (input: string | BeforeModelCallInput) => BeforeModelCallInput;
   mapOutput?: (result: unknown) => string;
   actors?: AfterModelCallInput['actors'];
+  /**
+   * When true, ensure a session snapshot is captured on first use so subsequent
+   * `beforeModelCall` calls read from the frozen cache. Requires the underlying
+   * runtime to be constructed with `snapshotMode: true`.
+   */
+  snapshotMode?: boolean;
 }
 
 function toTextResult(result: unknown): string {
@@ -35,7 +41,7 @@ export async function prepareClaudeAgentInput(
 ): Promise<ClaudeAgentPreparedInput> {
   const prepared = await runtime.beforeModelCall(input);
   const resolvedInput = typeof input === 'string' ? input : input.input;
-  const tools = createClaudeMemoryTools(runtime);
+  const tools = createClaudeMemoryTools(runtime, runtime.manager);
 
   return {
     system: prepared.bootstrapPrompt,
@@ -54,6 +60,10 @@ export function wrapClaudeAgentModel<TInput extends string | BeforeModelCallInpu
 ): (input: TInput) => Promise<{ result: TResult; responseText: string }> {
   return async (input) => {
     const runtimeInput = options.mapInput ? options.mapInput(input) : input;
+    if (options.snapshotMode && runtime.getSnapshot() == null) {
+      const relevanceQuery = typeof runtimeInput === 'string' ? undefined : runtimeInput.relevanceQuery;
+      await runtime.refreshSnapshot(relevanceQuery);
+    }
     const prepared = await prepareClaudeAgentInput(runtime, runtimeInput);
     const result = await modelCall(prepared);
     const responseText = options.mapOutput ? options.mapOutput(result) : toTextResult(result);

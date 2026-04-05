@@ -50,6 +50,9 @@ describe('stable snapshots', () => {
       - Keep output stable
 
       Recent Summaries:
+      - None
+
+      Relevant Playbooks:
       - None"
     `);
   });
@@ -68,6 +71,20 @@ describe('stable snapshots', () => {
         "memory_force_compact",
         "memory_get_health",
         "memory_run_maintenance",
+        "memory_search_episodes",
+        "memory_summarize_episode",
+        "memory_reflect",
+        "memory_search_cognitive",
+        "memory_get_profile",
+        "memory_create_playbook",
+        "memory_search_playbooks",
+        "memory_revise_playbook",
+        "memory_create_playbook_from_task",
+        "memory_use_playbook",
+        "memory_get_associations",
+        "memory_add_association",
+        "memory_remove_association",
+        "memory_snapshot",
       ]
     `);
     await handler.close();
