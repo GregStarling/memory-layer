@@ -13,6 +13,7 @@ export interface MaintenanceReport {
   expiredWorkingMemoryIds: number[];
   retiredKnowledgeIds: number[];
   deletedWorkItemIds: number[];
+  deletedAssociationIds: number[];
   reverifiedKnowledgeIds: number[];
   demotedKnowledgeIds: number[];
   expiredCandidateIds: number[];
@@ -28,6 +29,7 @@ export async function runMaintenance(
   const expiredWorkingMemoryIds: number[] = [];
   const retiredKnowledgeIds: number[] = [];
   const deletedWorkItemIds: number[] = [];
+  const deletedAssociationIds: number[] = [];
   const reverifiedKnowledgeIds: number[] = [];
   const demotedKnowledgeIds: number[] = [];
   const expiredCandidateIds: number[] = [];
@@ -122,10 +124,44 @@ export async function runMaintenance(
     deletedWorkItemIds.push(item.id);
   }
 
+  const [associations, activeKnowledgeById, activeWorkItemsById, activePlaybooksById] = await Promise.all([
+    adapter.listAssociations(scope),
+    adapter.getActiveKnowledgeMemory(scope).then((items) => new Set(items.map((item) => item.id))),
+    adapter.getActiveWorkItems(scope).then((items) => new Set(items.map((item) => item.id))),
+    adapter.getActivePlaybooks(scope).then((items) => new Set(items.map((item) => item.id))),
+  ]);
+  for (const association of associations) {
+    const sourceExists =
+      association.source_kind === 'knowledge'
+        ? activeKnowledgeById.has(association.source_id)
+        : association.source_kind === 'work_item'
+          ? activeWorkItemsById.has(association.source_id)
+          : association.source_kind === 'playbook'
+            ? activePlaybooksById.has(association.source_id)
+            : association.source_kind === 'working_memory'
+              ? (await adapter.getWorkingMemoryById(association.source_id)) != null
+              : false;
+    const targetExists =
+      association.target_kind === 'knowledge'
+        ? activeKnowledgeById.has(association.target_id)
+        : association.target_kind === 'work_item'
+          ? activeWorkItemsById.has(association.target_id)
+          : association.target_kind === 'playbook'
+            ? activePlaybooksById.has(association.target_id)
+            : association.target_kind === 'working_memory'
+              ? (await adapter.getWorkingMemoryById(association.target_id)) != null
+              : false;
+    if (!sourceExists || !targetExists) {
+      await adapter.deleteAssociation(association.id);
+      deletedAssociationIds.push(association.id);
+    }
+  }
+
   return {
     expiredWorkingMemoryIds,
     retiredKnowledgeIds,
     deletedWorkItemIds,
+    deletedAssociationIds,
     reverifiedKnowledgeIds,
     demotedKnowledgeIds,
     expiredCandidateIds,

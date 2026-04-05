@@ -151,9 +151,12 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
     getAssociationById: (id) => Promise.resolve(adapter.getAssociationById(id)),
     getAssociationsFrom: (kind, id, scope) => Promise.resolve(adapter.getAssociationsFrom(kind, id, scope)),
     getAssociationsTo: (kind, id, scope) => Promise.resolve(adapter.getAssociationsTo(kind, id, scope)),
+    listAssociations: (scope) => Promise.resolve(adapter.listAssociations(scope)),
     deleteAssociation: (id) => Promise.resolve(adapter.deleteAssociation(id)),
     insertMemoryEvent: (input) => Promise.resolve(adapter.insertMemoryEvent(input)),
     listMemoryEvents: (scope, query) => Promise.resolve(adapter.listMemoryEvents(scope, query)),
+    listMemoryEventsCrossScope: (scope, level, query) =>
+      Promise.resolve(adapter.listMemoryEventsCrossScope(scope, level, query)),
     getMemoryEventsByEntity: (scope, entityKind, entityId, query) =>
       Promise.resolve(adapter.getMemoryEventsByEntity(scope, entityKind, entityId, query)),
     getMemoryEventsBySession: (scope, sessionId, query) =>

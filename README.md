@@ -122,6 +122,16 @@ Memory flows through three tiers, each optimized for a different time horizon:
 | **Medium-term** (Working Memory) | Summaries with entities and topic tags | Days to weeks (TTL) |
 | **Long-term** (Knowledge) | Extracted facts with trust scores and evidence | Weeks to years (lifecycle) |
 
+### Temporal Truth And Projections
+
+The append-only temporal event log is the canonical history.
+
+- `memory_event_log` is the source of truth for replay, timelines, diffs, and exact `getContextAt(asOf)` reconstruction.
+- `session_state_current`, `work_claims_current`, and `handoff_records` are current-state projections for fast reads.
+- Projection tables are caches of the latest state, not the historical record.
+
+This matters operationally: if you need to answer "what did the system know then?" use the temporal APIs and event log-backed replay semantics, not the projection tables directly.
+
 ### Knowledge Trust Lifecycle
 
 Extracted facts aren't blindly trusted. Every fact has a state:

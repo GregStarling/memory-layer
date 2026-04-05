@@ -15,6 +15,38 @@ import type {
 } from './types.js';
 import type { SessionState } from './session-state.js';
 
+export type TemporalId = string;
+export type TemporalIdInput = string | number | bigint;
+
+export function normalizeTemporalId(value: TemporalIdInput): TemporalId {
+  if (typeof value === 'bigint') {
+    if (value < 0n) throw new Error('Temporal ids must be non-negative');
+    return value.toString();
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || value < 0 || !Number.isInteger(value)) {
+      throw new Error('Temporal ids must be non-negative integers');
+    }
+    return String(value);
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!/^\d+$/.test(trimmed)) {
+      throw new Error('Temporal ids must be decimal strings');
+    }
+    return BigInt(trimmed).toString();
+  }
+  throw new Error('Temporal ids must be strings, numbers, or bigints');
+}
+
+export function compareTemporalIds(left: TemporalIdInput, right: TemporalIdInput): number {
+  const a = BigInt(normalizeTemporalId(left));
+  const b = BigInt(normalizeTemporalId(right));
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
 export type MemoryEventEntityKind =
   | 'turn'
   | 'working_memory'
@@ -71,7 +103,7 @@ export type MemoryEventType =
   | 'session_state.seeded';
 
 export interface MemoryEventRecord extends NormalizedMemoryScope {
-  event_id: number;
+  event_id: TemporalId;
   session_id: string | null;
   actor_id: string | null;
   actor_kind: string | null;
@@ -111,24 +143,24 @@ export interface MemoryEventQuery {
   startAt?: number;
   endAt?: number;
   limit?: number;
-  cursor?: number;
+  cursor?: TemporalIdInput;
 }
 
 export type ChangeStreamEvent = MemoryEventRecord;
 
 export interface SessionStateProjection extends NormalizedMemoryScope, SessionState {
   session_id: string;
-  source_event_id: number | null;
+  source_event_id: TemporalId | null;
 }
 
 export interface NewSessionStateProjection extends NormalizedMemoryScope, SessionState {
   session_id: string;
-  source_event_id?: number | null;
+  source_event_id?: TemporalIdInput | null;
 }
 
 export interface TemporalProjectionWatermark {
   projection_name: string;
-  last_event_id: number;
+  last_event_id: TemporalId;
   updated_at: number;
   cutover_at: number | null;
   metadata: Record<string, unknown> | null;
@@ -136,7 +168,7 @@ export interface TemporalProjectionWatermark {
 
 export interface NewTemporalProjectionWatermark {
   projection_name: string;
-  last_event_id: number;
+  last_event_id: TemporalIdInput;
   updated_at?: number;
   cutover_at?: number | null;
   metadata?: Record<string, unknown> | null;
@@ -144,14 +176,14 @@ export interface NewTemporalProjectionWatermark {
 
 export interface TimelineResult {
   events: MemoryEventRecord[];
-  nextCursor: number | null;
+  nextCursor: TemporalId | null;
 }
 
 export interface TemporalStateSnapshot<TContext = unknown> {
   asOf: number;
   exact: boolean;
   cutoverAt: number | null;
-  watermarkEventId: number | null;
+  watermarkEventId: TemporalId | null;
   context: TContext;
   sessionState: SessionState | null;
   turns: Turn[];
@@ -171,8 +203,8 @@ export interface TemporalStateDiff {
   exact: boolean;
   cutoverAt: number | null;
   watermarkRange: {
-    fromEventId: number | null;
-    toEventId: number | null;
+    fromEventId: TemporalId | null;
+    toEventId: TemporalId | null;
   };
   events: MemoryEventRecord[];
   summary: {

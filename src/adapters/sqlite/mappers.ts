@@ -242,6 +242,7 @@ export function rowToPlaybookRevision(row: PlaybookRevision): PlaybookRevision {
 export function rowToMemoryEvent(row: MemoryEventRow): MemoryEventRecord {
   return {
     ...row,
+    event_id: String(row.event_id),
     collaboration_id: row.collaboration_id ?? row.workspace_id,
     session_id: row.session_id ?? null,
     actor_id: row.actor_id ?? null,
@@ -262,6 +263,7 @@ export function rowToSessionStateProjection(row: SessionStateProjectionRow): Ses
     pendingDecisions: parseJsonArray(row.pending_decisions),
     activeTools: parseJsonArray(row.active_tools),
     recentOutputs: parseJsonArray(row.recent_outputs),
+    source_event_id: row.source_event_id != null ? String(row.source_event_id) : null,
   };
 }
 
@@ -278,6 +280,7 @@ export function rowToTemporalProjectionWatermark(
 ): TemporalProjectionWatermark {
   return {
     ...row,
+    last_event_id: String(row.last_event_id),
     metadata: parseJsonObject(row.metadata),
   };
 }

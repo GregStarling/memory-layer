@@ -41,6 +41,12 @@ def _parse_actor_ref(payload: Any) -> "ActorRef":
     )
 
 
+def _parse_temporal_id(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    return str(value)
+
+
 @dataclass(slots=True)
 class MemoryScope:
     tenant_id: str
@@ -143,7 +149,7 @@ class WorkClaim:
     expires_at: int
     released_at: Optional[int]
     release_reason: Optional[str]
-    source_event_id: Optional[int]
+    source_event_id: Optional[str]
     visibility_class: str
     version: int
 
@@ -160,7 +166,7 @@ class WorkClaim:
             expires_at=int(payload["expires_at"]),
             released_at=int(payload["released_at"]) if payload.get("released_at") is not None else None,
             release_reason=payload.get("release_reason"),
-            source_event_id=int(payload["source_event_id"]) if payload.get("source_event_id") is not None else None,
+            source_event_id=_parse_temporal_id(payload.get("source_event_id")),
             visibility_class=str(payload.get("visibility_class", "private")),
             version=int(payload.get("version", 1)),
         )
@@ -182,7 +188,7 @@ class HandoffRecord:
     canceled_at: Optional[int]
     expires_at: Optional[int]
     decision_reason: Optional[str]
-    source_event_id: Optional[int]
+    source_event_id: Optional[str]
     visibility_class: str
     version: int
 
@@ -203,7 +209,7 @@ class HandoffRecord:
             canceled_at=int(payload["canceled_at"]) if payload.get("canceled_at") is not None else None,
             expires_at=int(payload["expires_at"]) if payload.get("expires_at") is not None else None,
             decision_reason=payload.get("decision_reason"),
-            source_event_id=int(payload["source_event_id"]) if payload.get("source_event_id") is not None else None,
+            source_event_id=_parse_temporal_id(payload.get("source_event_id")),
             visibility_class=str(payload.get("visibility_class", "private")),
             version=int(payload.get("version", 1)),
         )
@@ -232,7 +238,7 @@ class CoordinationState:
 
 @dataclass(slots=True)
 class MemoryEventRecord:
-    event_id: int
+    event_id: str
     entity_kind: str
     entity_id: str
     event_type: str
@@ -249,7 +255,7 @@ class MemoryEventRecord:
     def from_dict(cls, payload: dict[str, Any]) -> "MemoryEventRecord":
         actor_metadata = payload.get("actor_metadata")
         return cls(
-            event_id=int(payload["event_id"]),
+            event_id=str(payload["event_id"]),
             entity_kind=str(payload["entity_kind"]),
             entity_id=str(payload["entity_id"]),
             event_type=str(payload["event_type"]),
@@ -451,14 +457,14 @@ class HealthResponse:
 @dataclass(slots=True)
 class TemporalEventLogResponse:
     events: list[MemoryEventRecord]
-    next_cursor: Optional[int]
+    next_cursor: Optional[str]
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "TemporalEventLogResponse":
         next_cursor = payload.get("nextCursor")
         return cls(
             events=[MemoryEventRecord.from_dict(item) for item in payload.get("events", [])],
-            next_cursor=int(next_cursor) if next_cursor is not None else None,
+            next_cursor=_parse_temporal_id(next_cursor),
         )
 
 
@@ -467,7 +473,7 @@ class TemporalStateResponse:
     as_of: int
     exact: bool
     cutover_at: Optional[int]
-    watermark_event_id: Optional[int]
+    watermark_event_id: Optional[str]
     context: ContextResponse
     session_state: Optional[dict[str, Any]]
     turns: list[dict[str, Any]]
@@ -487,7 +493,7 @@ class TemporalStateResponse:
             as_of=int(payload["asOf"]),
             exact=bool(payload["exact"]),
             cutover_at=int(payload["cutoverAt"]) if payload.get("cutoverAt") is not None else None,
-            watermark_event_id=int(payload["watermarkEventId"]) if payload.get("watermarkEventId") is not None else None,
+            watermark_event_id=_parse_temporal_id(payload.get("watermarkEventId")),
             context=ContextResponse.from_dict(context_payload if isinstance(context_payload, dict) else {}),
             session_state=dict(payload.get("sessionState", {})) if isinstance(payload.get("sessionState"), dict) else None,
             turns=list(payload.get("turns", [])),
@@ -926,7 +932,7 @@ class SessionSnapshot:
     bootstrap: dict[str, Any]
     context: dict[str, Any]
     frozen_at: int
-    watermark_event_id: Optional[int]
+    watermark_event_id: Optional[str]
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "SessionSnapshot":
@@ -936,7 +942,7 @@ class SessionSnapshot:
             bootstrap=dict(payload.get("bootstrap", {})),
             context=dict(payload.get("context", {})),
             frozen_at=int(payload["frozenAt"]),
-            watermark_event_id=int(payload["watermarkEventId"]) if payload.get("watermarkEventId") is not None else None,
+            watermark_event_id=_parse_temporal_id(payload.get("watermarkEventId")),
         )
 
 

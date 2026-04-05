@@ -69,6 +69,18 @@ const MAX_LIST_LIMIT = 100;
 const MANAGER_CACHE_LIMIT = 256;
 const SESSION_MANAGER_CACHE_LIMIT = 256;
 const RUNTIME_CACHE_LIMIT = 256;
+const TEMPORAL_ENTITY_KINDS = [
+  'turn',
+  'working_memory',
+  'knowledge_memory',
+  'work_item',
+  'association',
+  'playbook',
+  'playbook_revision',
+  'session_state',
+  'work_claim',
+  'handoff',
+] as const;
 
 const TOOLS: McpTool[] = [
   {
@@ -143,14 +155,17 @@ const TOOLS: McpTool[] = [
         sessionId: { type: 'string', description: 'Optional session filter' },
         entityKind: {
           type: 'string',
-          enum: ['turn', 'working_memory', 'knowledge_memory', 'work_item', 'association', 'playbook', 'playbook_revision', 'session_state'],
+          enum: [...TEMPORAL_ENTITY_KINDS],
           description: 'Optional entity kind filter',
         },
         entityId: { type: 'string', description: 'Optional entity id filter' },
         startAt: { type: 'number', description: 'Optional start unix timestamp' },
         endAt: { type: 'number', description: 'Optional end unix timestamp' },
         limit: { type: 'number', description: 'Optional page size' },
-        cursor: { type: 'number', description: 'Optional event-id cursor' },
+        cursor: {
+          anyOf: [{ type: 'number' }, { type: 'string' }],
+          description: 'Optional event-id cursor',
+        },
       },
     },
   },
@@ -165,7 +180,7 @@ const TOOLS: McpTool[] = [
         sessionId: { type: 'string', description: 'Optional session filter' },
         entityKind: {
           type: 'string',
-          enum: ['turn', 'working_memory', 'knowledge_memory', 'work_item', 'association', 'playbook', 'playbook_revision', 'session_state'],
+          enum: [...TEMPORAL_ENTITY_KINDS],
           description: 'Optional entity kind filter',
         },
         entityId: { type: 'string', description: 'Optional entity id filter' },
@@ -182,14 +197,17 @@ const TOOLS: McpTool[] = [
         sessionId: { type: 'string', description: 'Optional session filter' },
         entityKind: {
           type: 'string',
-          enum: ['turn', 'working_memory', 'knowledge_memory', 'work_item', 'association', 'playbook', 'playbook_revision', 'session_state'],
+          enum: [...TEMPORAL_ENTITY_KINDS],
           description: 'Optional entity kind filter',
         },
         entityId: { type: 'string', description: 'Optional entity id filter' },
         startAt: { type: 'number', description: 'Optional start unix timestamp' },
         endAt: { type: 'number', description: 'Optional end unix timestamp' },
         limit: { type: 'number', description: 'Optional page size' },
-        cursor: { type: 'number', description: 'Optional event-id cursor' },
+        cursor: {
+          anyOf: [{ type: 'number' }, { type: 'string' }],
+          description: 'Optional event-id cursor',
+        },
       },
     },
   },
@@ -390,9 +408,9 @@ const TOOLS: McpTool[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        cursor: { type: 'number' },
+        cursor: { anyOf: [{ type: 'number' }, { type: 'string' }] },
         sessionId: { type: 'string' },
-        entityKind: { type: 'string' },
+        entityKind: { type: 'string', enum: [...TEMPORAL_ENTITY_KINDS] },
         entityId: { type: 'string' },
         limit: { type: 'number' },
       },
@@ -911,6 +929,20 @@ function parseOptionalNonNegativeInteger(value: unknown, name: string): number |
   return value;
 }
 
+function parseOptionalTemporalId(value: unknown, name: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'number') {
+    if (!Number.isInteger(value) || value < 0) {
+      throw new McpValidationError(`Invalid field: ${name} (must be a non-negative integer)`);
+    }
+    return String(value);
+  }
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
+    return BigInt(value.trim()).toString();
+  }
+  throw new McpValidationError(`Invalid field: ${name} (must be a non-negative integer)`);
+}
+
 function resolveScopeInput(
   fallbackScope: string | MemoryScope | undefined,
   args: Record<string, unknown>,
@@ -1181,7 +1213,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
                 ? args.endAt
                 : undefined,
             limit: parseLimit(args.limit),
-            cursor: parseOptionalNonNegativeInteger(args.cursor, 'cursor'),
+            cursor: parseOptionalTemporalId(args.cursor, 'cursor'),
           });
           return jsonResult(serializeTimelineResult(timeline));
         }
@@ -1212,7 +1244,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
                 ? args.endAt
                 : undefined,
             limit: parseLimit(args.limit),
-            cursor: parseOptionalNonNegativeInteger(args.cursor, 'cursor'),
+            cursor: parseOptionalTemporalId(args.cursor, 'cursor'),
           });
           return jsonResult(serializeTimelineResult(events));
         }
@@ -1407,7 +1439,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
         }
         case 'memory_stream_changes': {
           const events = await requestManager.listMemoryEvents({
-            cursor: parseOptionalNonNegativeInteger(args.cursor, 'cursor'),
+            cursor: parseOptionalTemporalId(args.cursor, 'cursor'),
             sessionId: optionalString(args.sessionId, 'sessionId'),
             entityKind: optionalString(args.entityKind, 'entityKind') as never,
             entityId: optionalString(args.entityId, 'entityId'),
@@ -1658,12 +1690,14 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
     callTool,
     manager: undefined,
     async close() {
-      const adapterContext = await getAsyncAdapter();
       managers.clear();
       sessionManagers.clear();
       sessionRuntimes.clear();
       runtimes.clear();
-      await adapterContext.close();
+      if (adapterPromise) {
+        const adapterContext = await adapterPromise;
+        await adapterContext.close();
+      }
     },
   };
 }

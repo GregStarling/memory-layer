@@ -27,9 +27,11 @@ import type {
   NewSessionStateProjection,
   NewTemporalProjectionWatermark,
   SessionStateProjection,
+  TemporalId,
   TemporalProjectionWatermark,
   TimelineResult,
 } from '../../contracts/temporal.js';
+import { compareTemporalIds, normalizeTemporalId } from '../../contracts/temporal.js';
 import type {
   Association,
   AssociationTargetKind,
@@ -254,7 +256,7 @@ function resolveEventQuery(query?: MemoryEventQuery): {
   startAt: number;
   endAt: number;
   limit: number;
-  cursor: number;
+  cursor: TemporalId | null;
 } {
   return {
     sessionId: query?.sessionId ?? '',
@@ -263,7 +265,7 @@ function resolveEventQuery(query?: MemoryEventQuery): {
     startAt: query?.startAt ?? Number.NEGATIVE_INFINITY,
     endAt: query?.endAt ?? Number.POSITIVE_INFINITY,
     limit: query?.limit ?? 100,
-    cursor: query?.cursor ?? 0,
+    cursor: query?.cursor != null ? normalizeTemporalId(query.cursor) : null,
   };
 }
 
@@ -315,6 +317,7 @@ function createAdapterFromDatabase(
   function writeTemporalWatermark(
     input: NewTemporalProjectionWatermark,
   ): TemporalProjectionWatermark {
+    const lastEventId = normalizeTemporalId(input.last_event_id);
     const updatedAt = input.updated_at ?? nowSeconds();
     db.prepare(
       `INSERT INTO projection_watermarks
@@ -327,7 +330,7 @@ function createAdapterFromDatabase(
          metadata = excluded.metadata`,
     ).run(
       input.projection_name,
-      input.last_event_id,
+      lastEventId,
       updatedAt,
       input.cutover_at ?? null,
       serializeObject(input.metadata ?? null),
@@ -369,7 +372,7 @@ function createAdapterFromDatabase(
     const eventId = Number(result.lastInsertRowid);
     writeTemporalWatermark({
       projection_name: 'temporal',
-      last_event_id: eventId,
+      last_event_id: String(eventId),
       updated_at: createdAt,
       cutover_at: readTemporalWatermark('temporal')?.cutover_at ?? createdAt,
       metadata: readTemporalWatermark('temporal')?.metadata ?? null,
@@ -380,6 +383,67 @@ function createAdapterFromDatabase(
     return rowToMemoryEvent(row!);
   }
 
+  function insertMemoryEventsBatchInternal(
+    inputs: NewMemoryEventRecord[],
+  ): MemoryEventRecord[] {
+    if (inputs.length === 0) return [];
+    const insert = db.prepare(
+      `INSERT INTO memory_event_log
+        (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, actor_id,
+         actor_kind, actor_system_id, actor_display_name, actor_metadata,
+         entity_kind, entity_id, event_type, payload, causation_id, correlation_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const read = db.prepare('SELECT * FROM memory_event_log WHERE event_id = ?');
+    const tx = db.transaction((batch: NewMemoryEventRecord[]) => {
+      const records: MemoryEventRecord[] = [];
+      let lastEventId: string | null = null;
+      let lastCreatedAt = nowSeconds();
+      for (const input of batch) {
+        const normalized = normalizeScope(input);
+        const createdAt = input.created_at ?? nowSeconds();
+        const result = insert.run(
+          normalized.tenant_id,
+          normalized.system_id,
+          normalized.workspace_id,
+          normalized.collaboration_id,
+          normalized.scope_id,
+          input.session_id ?? null,
+          input.actor_id ?? null,
+          input.actor_kind ?? null,
+          input.actor_system_id ?? null,
+          input.actor_display_name ?? null,
+          input.actor_metadata ? JSON.stringify(input.actor_metadata) : null,
+          input.entity_kind,
+          input.entity_id,
+          input.event_type,
+          JSON.stringify(input.payload ?? {}),
+          input.causation_id ?? null,
+          input.correlation_id ?? null,
+          createdAt,
+        );
+        const eventId = Number(result.lastInsertRowid);
+        const row = read.get(eventId) as MemoryEventRow | undefined;
+        if (row) {
+          records.push(rowToMemoryEvent(row));
+        }
+        lastEventId = String(eventId);
+        lastCreatedAt = createdAt;
+      }
+      if (lastEventId != null) {
+        writeTemporalWatermark({
+          projection_name: 'temporal',
+          last_event_id: lastEventId,
+          updated_at: lastCreatedAt,
+          cutover_at: readTemporalWatermark('temporal')?.cutover_at ?? lastCreatedAt,
+          metadata: readTemporalWatermark('temporal')?.metadata ?? null,
+        });
+      }
+      return records;
+    });
+    return tx(inputs);
+  }
+
   function listScopedMemoryEvents(
     scope: Parameters<StorageAdapter['listMemoryEvents']>[0],
     query?: MemoryEventQuery,
@@ -387,7 +451,47 @@ function createAdapterFromDatabase(
     const resolved = resolveEventQuery(query);
     const clauses = [SCOPE_WHERE, 'created_at >= ?', 'created_at <= ?'];
     const params: unknown[] = [...scopeValues(scope), resolved.startAt, resolved.endAt];
-    if (resolved.cursor > 0) {
+    if (resolved.cursor != null && compareTemporalIds(resolved.cursor, '0') > 0) {
+      clauses.push('event_id > ?');
+      params.push(resolved.cursor);
+    }
+    if (resolved.sessionId) {
+      clauses.push('session_id = ?');
+      params.push(resolved.sessionId);
+    }
+    if (resolved.entityKind) {
+      clauses.push('entity_kind = ?');
+      params.push(resolved.entityKind);
+    }
+    if (resolved.entityId) {
+      clauses.push('entity_id = ?');
+      params.push(resolved.entityId);
+    }
+    const rows = db
+      .prepare(
+        `SELECT * FROM memory_event_log
+         WHERE ${clauses.join(' AND ')}
+         ORDER BY created_at ASC, event_id ASC
+         LIMIT ?`,
+      )
+      .all(...params, resolved.limit + 1) as MemoryEventRow[];
+    const pageRows = rows.slice(0, resolved.limit).map(rowToMemoryEvent);
+    return {
+      events: pageRows,
+      nextCursor:
+        rows.length > resolved.limit ? pageRows[pageRows.length - 1]?.event_id ?? null : null,
+    };
+  }
+
+  function listScopedMemoryEventsCrossScope(
+    scope: Parameters<StorageAdapter['listMemoryEvents']>[0],
+    level: ScopeLevel,
+    query?: MemoryEventQuery,
+  ): TimelineResult {
+    const resolved = resolveEventQuery(query);
+    const clauses = [scopeWhereForLevel(scope, level), 'created_at >= ?', 'created_at <= ?'];
+    const params: unknown[] = [...scopeParamsForLevel(scope, level), resolved.startAt, resolved.endAt];
+    if (resolved.cursor != null && compareTemporalIds(resolved.cursor, '0') > 0) {
       clauses.push('event_id > ?');
       params.push(resolved.cursor);
     }
@@ -465,7 +569,7 @@ function createAdapterFromDatabase(
       serializeStringArray(input.activeTools),
       serializeStringArray(input.recentOutputs),
       input.updatedAt,
-      input.source_event_id ?? null,
+      input.source_event_id != null ? normalizeTemporalId(input.source_event_id) : null,
     );
     return readSessionStateProjection(normalized, input.session_id)!;
   }
@@ -523,7 +627,7 @@ function createAdapterFromDatabase(
       expires_at: Number(row.expires_at),
       released_at: row.released_at != null ? Number(row.released_at) : null,
       release_reason: row.release_reason != null ? String(row.release_reason) : null,
-      source_event_id: row.source_event_id != null ? Number(row.source_event_id) : null,
+      source_event_id: row.source_event_id != null ? String(row.source_event_id) : null,
       visibility_class: (row.visibility_class as WorkClaim['visibility_class']) ?? 'private',
       version: Number(row.version ?? 1),
     };
@@ -550,7 +654,7 @@ function createAdapterFromDatabase(
       canceled_at: row.canceled_at != null ? Number(row.canceled_at) : null,
       expires_at: row.expires_at != null ? Number(row.expires_at) : null,
       decision_reason: row.decision_reason != null ? String(row.decision_reason) : null,
-      source_event_id: row.source_event_id != null ? Number(row.source_event_id) : null,
+      source_event_id: row.source_event_id != null ? String(row.source_event_id) : null,
       visibility_class: (row.visibility_class as HandoffRecord['visibility_class']) ?? 'private',
       version: Number(row.version ?? 1),
     };
@@ -2612,26 +2716,28 @@ function createAdapterFromDatabase(
         .prepare(`SELECT * FROM knowledge_memory WHERE id IN (${placeholders})`)
         .all(...uniqueIds) as KnowledgeMemoryRow[];
       const afterById = new Map(afterRows.map((row) => [Number(row.id), rowToKnowledgeMemory(row)]));
-      for (const row of beforeRows) {
-        const before = rowToKnowledgeMemory(row);
-        const after = afterById.get(before.id);
-        if (!after) continue;
-        insertMemoryEventInternal({
-          ...normalizeScope(after),
-          entity_kind: 'knowledge_memory',
-          entity_id: String(after.id),
-          event_type: 'knowledge.touched',
-          payload: {
-            before: cloneValue(before),
-            after: cloneValue(after),
-            patch: {
-              last_accessed_at: touchedAt,
-              access_count: after.access_count,
+      insertMemoryEventsBatchInternal(
+        beforeRows.flatMap((row) => {
+          const before = rowToKnowledgeMemory(row);
+          const after = afterById.get(before.id);
+          if (!after) return [];
+          return [{
+            ...normalizeScope(after),
+            entity_kind: 'knowledge_memory' as const,
+            entity_id: String(after.id),
+            event_type: 'knowledge.touched' as const,
+            payload: {
+              before: cloneValue(before),
+              after: cloneValue(after),
+              patch: {
+                last_accessed_at: touchedAt,
+                access_count: after.access_count,
+              },
             },
-          },
-          created_at: touchedAt,
-        });
-      }
+            created_at: touchedAt,
+          }];
+        }),
+      );
     },
 
     retireKnowledgeMemory(id: number, retiredAt = nowSeconds()): void {
@@ -3045,6 +3151,16 @@ function createAdapterFromDatabase(
         auto_generated: row.auto_generated === 1,
       }));
     },
+    listAssociations(scope) {
+      const rows = db
+        .prepare(`SELECT * FROM associations WHERE ${SCOPE_WHERE} ORDER BY id DESC`)
+        .all(...scopeValues(scope)) as any[];
+      return rows.map((row) => ({
+        ...row,
+        collaboration_id: row.collaboration_id ?? row.workspace_id,
+        auto_generated: row.auto_generated === 1,
+      }));
+    },
     deleteAssociation(id: number): void {
       const before = this.getAssociationById(id);
       db.prepare('DELETE FROM associations WHERE id = ?').run(id);
@@ -3068,6 +3184,10 @@ function createAdapterFromDatabase(
 
     listMemoryEvents(scope, query): TimelineResult {
       return listScopedMemoryEvents(scope, query);
+    },
+
+    listMemoryEventsCrossScope(scope, level, query): TimelineResult {
+      return listScopedMemoryEventsCrossScope(scope, level, query);
     },
 
     getMemoryEventsByEntity(scope, entityKind, entityId, query): TimelineResult {

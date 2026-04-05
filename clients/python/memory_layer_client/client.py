@@ -328,7 +328,7 @@ class MemoryClient:
         start_at: Optional[int] = None,
         end_at: Optional[int] = None,
         limit: Optional[int] = None,
-        cursor: Optional[int] = None,
+        cursor: Optional[str | int] = None,
         scope: Optional[MemoryScope] = None,
     ) -> TemporalEventLogResponse:
         params: dict[str, Any] = {
@@ -384,7 +384,7 @@ class MemoryClient:
         start_at: Optional[int] = None,
         end_at: Optional[int] = None,
         limit: Optional[int] = None,
-        cursor: Optional[int] = None,
+        cursor: Optional[str | int] = None,
         scope: Optional[MemoryScope] = None,
     ) -> TemporalEventLogResponse:
         params: dict[str, Any] = {
@@ -1143,7 +1143,7 @@ class MemoryClient:
     def stream_changes(
         self,
         *,
-        cursor: Optional[int] = None,
+        cursor: Optional[str | int] = None,
         session_id: Optional[str] = None,
         entity_kind: Optional[str] = None,
         entity_id: Optional[str] = None,
@@ -1478,7 +1478,7 @@ class AsyncMemoryClient:
         start_at: Optional[int] = None,
         end_at: Optional[int] = None,
         limit: Optional[int] = None,
-        cursor: Optional[int] = None,
+        cursor: Optional[str | int] = None,
         scope: Optional[MemoryScope] = None,
     ) -> TemporalEventLogResponse:
         params: dict[str, Any] = {
@@ -1534,7 +1534,7 @@ class AsyncMemoryClient:
         start_at: Optional[int] = None,
         end_at: Optional[int] = None,
         limit: Optional[int] = None,
-        cursor: Optional[int] = None,
+        cursor: Optional[str | int] = None,
         scope: Optional[MemoryScope] = None,
     ) -> TemporalEventLogResponse:
         params: dict[str, Any] = {
@@ -2299,7 +2299,7 @@ class AsyncMemoryClient:
     async def astream_changes(
         self,
         *,
-        cursor: Optional[int] = None,
+        cursor: Optional[str | int] = None,
         session_id: Optional[str] = None,
         entity_kind: Optional[str] = None,
         entity_id: Optional[str] = None,

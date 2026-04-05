@@ -13,7 +13,12 @@ import type { StorageAdapter } from '../../contracts/storage.js';
 import { UniqueConstraintError } from '../../contracts/storage.js';
 import { ConflictError } from '../../contracts/errors.js';
 import type { SessionState } from '../../contracts/session-state.js';
+import {
+  compareTemporalIds,
+  normalizeTemporalId,
+} from '../../contracts/temporal.js';
 import type {
+  TemporalId,
   MemoryEventEntityKind,
   MemoryEventQuery,
   MemoryEventRecord,
@@ -208,7 +213,7 @@ function normalizeEventQuery(query?: MemoryEventQuery): {
   startAt: number;
   endAt: number;
   limit: number;
-  cursor: number;
+  cursor: TemporalId | null;
 } {
   return {
     sessionId: query?.sessionId ?? '',
@@ -217,7 +222,7 @@ function normalizeEventQuery(query?: MemoryEventQuery): {
     startAt: query?.startAt ?? Number.NEGATIVE_INFINITY,
     endAt: query?.endAt ?? Number.POSITIVE_INFINITY,
     limit: query?.limit ?? 100,
-    cursor: query?.cursor ?? 0,
+    cursor: query?.cursor != null ? normalizeTemporalId(query.cursor) : null,
   };
 }
 
@@ -246,7 +251,9 @@ function isHandoffExpired(handoff: HandoffRecord, now = nowSeconds()): boolean {
 
 function matchesEventQuery(item: MemoryEventRecord, query?: MemoryEventQuery): boolean {
   const resolved = normalizeEventQuery(query);
-  if (resolved.cursor > 0 && item.event_id <= resolved.cursor) return false;
+  if (resolved.cursor != null && compareTemporalIds(item.event_id, resolved.cursor) <= 0) {
+    return false;
+  }
   if (item.created_at < resolved.startAt || item.created_at > resolved.endAt) return false;
   if (resolved.sessionId && item.session_id !== resolved.sessionId) return false;
   if (resolved.entityKind && item.entity_kind !== resolved.entityKind) return false;
@@ -260,7 +267,7 @@ function paginateEvents(
 ): TimelineResult {
   const resolved = normalizeEventQuery(query);
   const ordered = [...items].sort(
-    (a, b) => a.created_at - b.created_at || a.event_id - b.event_id,
+    (a, b) => a.created_at - b.created_at || compareTemporalIds(a.event_id, b.event_id),
   );
   const page = ordered.slice(0, resolved.limit + 1);
   const hasMore = page.length > resolved.limit;
@@ -292,7 +299,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     projectionWatermarks: [
       {
         projection_name: 'temporal',
-        last_event_id: 0,
+        last_event_id: '0',
         updated_at: nowSeconds(),
         cutover_at: nowSeconds(),
         metadata: null,
@@ -1958,6 +1965,9 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         (a) => a.target_kind === kind && a.target_id === id && matchesScope(a, scope),
       );
     },
+    listAssociations(scope): Association[] {
+      return state.associations.filter((association) => matchesScope(association, scope));
+    },
     deleteAssociation(id: number): void {
       const idx = state.associations.findIndex((a) => a.id === id);
       if (idx === -1) return;
@@ -1978,7 +1988,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       const normalized = normalizeScope(input);
       const event: MemoryEventRecord = {
         ...normalized,
-        event_id: ids.memoryEvent++,
+        event_id: String(ids.memoryEvent++),
         session_id: input.session_id ?? null,
         actor_id: input.actor_id ?? null,
         actor_kind: input.actor_kind ?? null,
@@ -2008,6 +2018,15 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       return paginateEvents(
         state.memoryEvents.filter(
           (item) => matchesEventScope(item, scope) && matchesEventQuery(item, query),
+        ),
+        query,
+      );
+    },
+
+    listMemoryEventsCrossScope(scope, level, query) {
+      return paginateEvents(
+        state.memoryEvents.filter(
+          (item) => matchesLevel(item, scope, level) && matchesEventQuery(item, query),
         ),
         query,
       );
@@ -2061,7 +2080,8 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         activeTools: [...input.activeTools],
         recentOutputs: [...input.recentOutputs],
         updatedAt: input.updatedAt,
-        source_event_id: input.source_event_id ?? null,
+        source_event_id:
+          input.source_event_id != null ? normalizeTemporalId(input.source_event_id) : null,
       };
       if (existing) {
         Object.assign(existing, next);
@@ -2092,7 +2112,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       const updatedAt = input.updated_at ?? nowSeconds();
       const next: TemporalProjectionWatermark = {
         projection_name: input.projection_name,
-        last_event_id: input.last_event_id,
+        last_event_id: normalizeTemporalId(input.last_event_id),
         updated_at: updatedAt,
         cutover_at: input.cutover_at ?? null,
         metadata: input.metadata ? cloneValue(input.metadata) : null,

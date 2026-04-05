@@ -247,10 +247,16 @@ export interface AsyncStorageAdapter {
   getAssociationById(id: number): Promise<Association | null>;
   getAssociationsFrom(kind: AssociationTargetKind, id: number, scope: MemoryScope): Promise<Association[]>;
   getAssociationsTo(kind: AssociationTargetKind, id: number, scope: MemoryScope): Promise<Association[]>;
+  listAssociations(scope: MemoryScope): Promise<Association[]>;
   deleteAssociation(id: number): Promise<void>;
 
   insertMemoryEvent(input: NewMemoryEventRecord): Promise<MemoryEventRecord>;
   listMemoryEvents(scope: MemoryScope, query?: MemoryEventQuery): Promise<TimelineResult>;
+  listMemoryEventsCrossScope(
+    scope: MemoryScope,
+    level: ScopeLevel,
+    query?: MemoryEventQuery,
+  ): Promise<TimelineResult>;
   getMemoryEventsByEntity(
     scope: MemoryScope,
     entityKind: MemoryEventEntityKind,

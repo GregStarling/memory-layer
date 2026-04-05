@@ -1,4 +1,5 @@
 import type { NormalizedMemoryScope } from './identity.js';
+import type { TemporalId } from './temporal.js';
 import type { WorkItem } from './types.js';
 
 export type ActorKind = 'agent' | 'human' | 'system' | 'service';
@@ -56,7 +57,7 @@ export interface WorkClaim extends NormalizedMemoryScope {
   expires_at: number;
   released_at: number | null;
   release_reason: string | null;
-  source_event_id: number | null;
+  source_event_id: TemporalId | null;
   visibility_class: MemoryVisibilityClass;
   version: number;
 }
@@ -94,7 +95,7 @@ export interface HandoffRecord extends NormalizedMemoryScope {
   canceled_at: number | null;
   expires_at: number | null;
   decision_reason: string | null;
-  source_event_id: number | null;
+  source_event_id: TemporalId | null;
   visibility_class: MemoryVisibilityClass;
   version: number;
 }

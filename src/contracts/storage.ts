@@ -237,10 +237,16 @@ export interface StorageAdapter {
   getAssociationById(id: number): Association | null;
   getAssociationsFrom(kind: AssociationTargetKind, id: number, scope: MemoryScope): Association[];
   getAssociationsTo(kind: AssociationTargetKind, id: number, scope: MemoryScope): Association[];
+  listAssociations(scope: MemoryScope): Association[];
   deleteAssociation(id: number): void;
 
   insertMemoryEvent(input: NewMemoryEventRecord): MemoryEventRecord;
   listMemoryEvents(scope: MemoryScope, query?: MemoryEventQuery): TimelineResult;
+  listMemoryEventsCrossScope(
+    scope: MemoryScope,
+    level: ScopeLevel,
+    query?: MemoryEventQuery,
+  ): TimelineResult;
   getMemoryEventsByEntity(
     scope: MemoryScope,
     entityKind: MemoryEventEntityKind,

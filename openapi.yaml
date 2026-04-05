@@ -192,7 +192,7 @@ components:
           type: string
           nullable: true
         source_event_id:
-          type: integer
+          type: string
           nullable: true
         visibility_class:
           type: string
@@ -240,7 +240,7 @@ components:
           type: string
           nullable: true
         source_event_id:
-          type: integer
+          type: string
           nullable: true
         visibility_class:
           type: string
@@ -471,14 +471,14 @@ components:
           items:
             $ref: '#/components/schemas/TemporalEventRecord'
         nextCursor:
-          type: integer
+          type: string
           nullable: true
     TemporalEventRecord:
       type: object
       required: [event_id, entity_kind, entity_id, event_type, payload, created_at]
       properties:
         event_id:
-          type: integer
+          type: string
         tenant_id:
           type: string
         system_id:
@@ -537,7 +537,7 @@ components:
           type: integer
           nullable: true
         watermarkEventId:
-          type: integer
+          type: string
           nullable: true
         context:
           $ref: '#/components/schemas/ContextResponse'
@@ -1116,7 +1116,7 @@ paths:
           schema: { type: integer }
         - name: cursor
           in: query
-          schema: { type: integer }
+          schema: { type: string }
         - $ref: '#/components/parameters/ScopeTenant'
         - $ref: '#/components/parameters/ScopeSystem'
         - $ref: '#/components/parameters/ScopeWorkspace'
@@ -1188,7 +1188,7 @@ paths:
           schema: { type: integer }
         - name: cursor
           in: query
-          schema: { type: integer }
+          schema: { type: string }
         - $ref: '#/components/parameters/ScopeTenant'
         - $ref: '#/components/parameters/ScopeSystem'
         - $ref: '#/components/parameters/ScopeWorkspace'
@@ -2244,7 +2244,7 @@ paths:
       parameters:
         - name: cursor
           in: query
-          schema: { type: integer }
+          schema: { type: string }
         - name: session_id
           in: query
           schema: { type: string }
@@ -2314,6 +2314,10 @@ paths:
                     type: integer
                   deletedWorkItems:
                     type: integer
+                  deletedAssociationIds:
+                    type: array
+                    items:
+                      type: integer
   /v1/health:
     get:
       tags: [observability]

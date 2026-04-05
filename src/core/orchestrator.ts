@@ -88,6 +88,24 @@ interface WorkflowTelemetry {
   onEvent?: EventHook;
 }
 
+type KnowledgeCandidateInput = Parameters<StorageAdapter['insertKnowledgeCandidate']>[0];
+type KnowledgeEvidenceInput = Parameters<StorageAdapter['insertKnowledgeEvidenceBatch']>[0][number];
+type KnowledgeAuditInput = Parameters<StorageAdapter['insertKnowledgeMemoryAudit']>[0];
+type PromotedKnowledgeInput = Parameters<StorageAdapter['promoteKnowledgeCandidate']>[1];
+
+interface KnowledgeRelationMatch {
+  relation: KnowledgeRelation | 'created';
+  related: KnowledgeMemory | null;
+}
+
+interface PromotionPersistencePlan {
+  candidateInput: KnowledgeCandidateInput;
+  candidateEvidenceInputs: KnowledgeEvidenceInput[];
+  promotedKnowledgeInput: PromotedKnowledgeInput;
+  auditInput: KnowledgeAuditInput;
+  supersededKnowledgeId: number | null;
+}
+
 function resolveExtractionPolicy(
   policy?: ExtractionPolicy,
 ): Required<ExtractionPolicy> {
@@ -202,6 +220,301 @@ function mergeRecoveredFacts(
     if (merged.length >= maxFactsPerExtraction) break;
   }
   return merged;
+}
+
+function resolveCreatedKnowledgeClass(
+  knowledgeClass: KnowledgeClass,
+  knowledgeState: 'provisional' | 'trusted',
+  evidence: Array<Pick<NewKnowledgeEvidence, 'support_polarity' | 'outcome'>>,
+): KnowledgeClass {
+  const supportEvidence = evidence.filter((item) => item.support_polarity === 'supports');
+  const outcomeFailures = supportEvidence.filter((item) => item.outcome === 'failure').length;
+  const outcomeSuccesses = supportEvidence.filter((item) => item.outcome === 'success').length;
+  if (outcomeFailures > outcomeSuccesses && ['strategy', 'procedure'].includes(knowledgeClass)) {
+    return 'anti_pattern';
+  }
+  if (knowledgeState === 'trusted' && knowledgeClass === 'procedure' && outcomeSuccesses > 0) {
+    return 'strategy';
+  }
+  return knowledgeClass;
+}
+
+function shouldSupersedeExistingKnowledge(
+  relation: KnowledgeRelation | 'created',
+  relatedKnowledge: KnowledgeMemory | null,
+  decision: KnowledgeDecision,
+  conflictStrategy: ConflictStrategy,
+): relatedKnowledge is KnowledgeMemory {
+  return Boolean(
+    relatedKnowledge &&
+      (decision === 'supersede_existing' ||
+        relation === 'update' ||
+        (relation === 'conflict' && conflictStrategy === 'supersede')),
+  );
+}
+
+function buildPromotionAuditPayload(input: {
+  normalizedScope: ReturnType<typeof normalizeScope>;
+  workingMemoryId: number;
+  fact: NormalizedExtractedFact;
+  confidence: FactConfidence;
+  confidenceScore: number;
+  verificationStatus: VerificationStatus;
+  sourceText: string;
+  relation: KnowledgeRelation | 'created';
+  createdKnowledgeId: number;
+  relatedKnowledgeId: number | null;
+  verificationNotes: string | null;
+  conflictStrategy: ConflictStrategy;
+}): Parameters<StorageAdapter['insertKnowledgeMemoryAudit']>[0] {
+  return {
+    ...input.normalizedScope,
+    working_memory_id: input.workingMemoryId,
+    fact: input.fact.fact,
+    fact_type: input.fact.factType,
+    fact_subject: input.fact.subject,
+    fact_attribute: input.fact.attribute,
+    fact_value: input.fact.value,
+    normalized_fact: input.fact.normalizedFact,
+    slot_key: input.fact.slotKey,
+    is_negated: input.fact.isNegated,
+    confidence: input.confidence,
+    confidence_score: input.confidenceScore,
+    verification_status: input.verificationStatus,
+    source_text: input.sourceText,
+    decision:
+      input.relation === 'update'
+        ? 'updated'
+        : input.relation === 'conflict'
+          ? 'conflict'
+          : input.relation === 'compatible'
+            ? 'compatible'
+            : 'created',
+    created_knowledge_id: input.createdKnowledgeId,
+    related_knowledge_id: input.relatedKnowledgeId,
+    detail:
+      input.relation === 'conflict'
+        ? input.verificationNotes ?? `Conflict strategy '${input.conflictStrategy}'`
+        : input.relation === 'update'
+          ? input.verificationNotes ?? 'Superseded prior related knowledge'
+          : input.relation === 'compatible'
+            ? input.verificationNotes ?? 'Created alongside compatible related knowledge'
+            : input.verificationNotes ?? 'Created new knowledge memory',
+  };
+}
+
+function bindCandidateEvidenceToCandidate(
+  candidateEvidenceInputs: KnowledgeEvidenceInput[],
+  candidateId: number,
+): KnowledgeEvidenceInput[] {
+  return candidateEvidenceInputs.map((item) => ({
+    ...item,
+    knowledge_candidate_id: candidateId,
+  }));
+}
+
+function bindCandidateEvidenceToKnowledge(
+  candidateEvidence: Array<{ id: number } & KnowledgeEvidenceInput>,
+  knowledgeId: number,
+): KnowledgeEvidenceInput[] {
+  return candidateEvidence.map(({ id: _id, ...item }) => ({
+    ...item,
+    knowledge_candidate_id: null,
+    knowledge_memory_id: knowledgeId,
+  }));
+}
+
+function buildPromotionPersistencePlan(input: {
+  normalizedScope: ReturnType<typeof normalizeScope>;
+  workingMemoryId: number;
+  fact: NormalizedExtractedFact;
+  candidateInput: KnowledgeCandidateInput;
+  candidateEvidenceInputs: KnowledgeEvidenceInput[];
+  grounded: ReturnType<typeof groundFactAgainstTurns>;
+  trustAssessment: ReturnType<typeof assessCandidateTrust>;
+  strongestRelation: KnowledgeRelationMatch;
+  resolvedConfidence: FactConfidence;
+  resolvedConfidenceScore: number;
+  resolvedVerificationStatus: VerificationStatus;
+  verificationNotes: string | null;
+  conflict: KnowledgeConflict | null;
+  policy: Required<ExtractionPolicy>;
+}): PromotionPersistencePlan {
+  const promotedState = input.trustAssessment.state === 'trusted' ? 'trusted' : 'provisional';
+  const createdKnowledgeClass = resolveCreatedKnowledgeClass(
+    input.grounded.candidate.knowledge_class,
+    promotedState,
+    input.candidateEvidenceInputs,
+  );
+  const promotedKnowledgeInput = buildKnowledgeInput(
+    input.normalizedScope,
+    input.workingMemoryId,
+    input.fact,
+    {
+      confidence: input.resolvedConfidence,
+      confidenceScore: input.resolvedConfidenceScore,
+      trustScore: input.trustAssessment.trust_score,
+      knowledgeState: promotedState,
+      knowledgeClass: createdKnowledgeClass,
+      verificationStatus: input.resolvedVerificationStatus,
+      verificationNotes:
+        input.verificationNotes ??
+        (input.trustAssessment.reasons.length > 0
+          ? input.trustAssessment.reasons.join(', ')
+          : null),
+      contradictionScore: input.conflict?.severity === 'high' ? 1 : 0,
+      sourceTurnIds: input.grounded.supportedTurnIds,
+    },
+  );
+  const auditInput = buildPromotionAuditPayload({
+    normalizedScope: input.normalizedScope,
+    workingMemoryId: input.workingMemoryId,
+    fact: input.fact,
+    confidence: input.resolvedConfidence,
+    confidenceScore: input.trustAssessment.trust_score,
+    verificationStatus: input.resolvedVerificationStatus,
+    sourceText: input.fact.sourceText ?? input.fact.fact,
+    relation: input.strongestRelation.relation,
+    createdKnowledgeId: 0,
+    relatedKnowledgeId: input.strongestRelation.related?.id ?? null,
+    verificationNotes: input.verificationNotes,
+    conflictStrategy: input.policy.conflictStrategy,
+  });
+  return {
+    candidateInput: input.candidateInput,
+    candidateEvidenceInputs: input.candidateEvidenceInputs,
+    promotedKnowledgeInput,
+    auditInput,
+    supersededKnowledgeId: shouldSupersedeExistingKnowledge(
+      input.strongestRelation.relation,
+      input.strongestRelation.related,
+      input.trustAssessment.decision,
+      input.policy.conflictStrategy,
+    )
+      ? input.strongestRelation.related.id
+      : null,
+  };
+}
+
+async function persistRejectedKnowledgeCandidateAsync(
+  adapter: AsyncStorageAdapter,
+  candidateInput: KnowledgeCandidateInput,
+  candidateEvidenceInputs: KnowledgeEvidenceInput[],
+): Promise<void> {
+  const rejectedCandidate = await adapter.insertKnowledgeCandidate(candidateInput);
+  if (candidateEvidenceInputs.length > 0) {
+    await adapter.insertKnowledgeEvidenceBatch(
+      bindCandidateEvidenceToCandidate(candidateEvidenceInputs, rejectedCandidate.id),
+    );
+  }
+}
+
+function persistRejectedKnowledgeCandidateSync(
+  adapter: StorageAdapter,
+  candidateInput: KnowledgeCandidateInput,
+  candidateEvidenceInputs: KnowledgeEvidenceInput[],
+): void {
+  const rejectedCandidate = adapter.insertKnowledgeCandidate(candidateInput);
+  if (candidateEvidenceInputs.length > 0) {
+    adapter.insertKnowledgeEvidenceBatch(
+      bindCandidateEvidenceToCandidate(candidateEvidenceInputs, rejectedCandidate.id),
+    );
+  }
+}
+
+async function persistPromotedKnowledgeAsync(
+  adapter: AsyncStorageAdapter,
+  normalizedScope: ReturnType<typeof normalizeScope>,
+  plan: PromotionPersistencePlan,
+): Promise<KnowledgeMemory> {
+  const candidate = await adapter.insertKnowledgeCandidate(plan.candidateInput);
+  const candidateEvidence =
+    plan.candidateEvidenceInputs.length > 0
+      ? await adapter.insertKnowledgeEvidenceBatch(
+          bindCandidateEvidenceToCandidate(plan.candidateEvidenceInputs, candidate.id),
+        )
+      : [];
+  const knowledge = await adapter.promoteKnowledgeCandidate(
+    candidate.id,
+    plan.promotedKnowledgeInput,
+  );
+
+  if (candidateEvidence.length > 0) {
+    await adapter.insertKnowledgeEvidenceBatch(
+      bindCandidateEvidenceToKnowledge(candidateEvidence, knowledge.id),
+    );
+  }
+
+  if (plan.supersededKnowledgeId != null) {
+    await adapter.supersedeKnowledgeMemory(plan.supersededKnowledgeId, knowledge.id);
+    try {
+      await adapter.insertAssociation({
+        ...normalizedScope,
+        source_kind: 'knowledge',
+        source_id: knowledge.id,
+        target_kind: 'knowledge',
+        target_id: plan.supersededKnowledgeId,
+        association_type: 'supersedes',
+        confidence: 1,
+        auto_generated: true,
+      });
+    } catch (error) {
+      if (!(error instanceof UniqueConstraintError)) {
+        throw error;
+      }
+    }
+  }
+
+  await adapter.insertKnowledgeMemoryAudit({
+    ...plan.auditInput,
+    created_knowledge_id: knowledge.id,
+  });
+  return knowledge;
+}
+
+function persistPromotedKnowledgeSync(
+  adapter: StorageAdapter,
+  normalizedScope: ReturnType<typeof normalizeScope>,
+  plan: PromotionPersistencePlan,
+): KnowledgeMemory {
+  const candidate = adapter.insertKnowledgeCandidate(plan.candidateInput);
+  const candidateEvidence =
+    plan.candidateEvidenceInputs.length > 0
+      ? adapter.insertKnowledgeEvidenceBatch(
+          bindCandidateEvidenceToCandidate(plan.candidateEvidenceInputs, candidate.id),
+        )
+      : [];
+  const knowledge = adapter.promoteKnowledgeCandidate(candidate.id, plan.promotedKnowledgeInput);
+
+  if (candidateEvidence.length > 0) {
+    adapter.insertKnowledgeEvidenceBatch(bindCandidateEvidenceToKnowledge(candidateEvidence, knowledge.id));
+  }
+
+  if (plan.supersededKnowledgeId != null) {
+    adapter.supersedeKnowledgeMemory(plan.supersededKnowledgeId, knowledge.id);
+    try {
+      adapter.insertAssociation({
+        ...normalizedScope,
+        source_kind: 'knowledge',
+        source_id: knowledge.id,
+        target_kind: 'knowledge',
+        target_id: plan.supersededKnowledgeId,
+        association_type: 'supersedes',
+        confidence: 1,
+        auto_generated: true,
+      });
+    } catch (error) {
+      if (!(error instanceof UniqueConstraintError)) {
+        throw error;
+      }
+    }
+  }
+
+  adapter.insertKnowledgeMemoryAudit({
+    ...plan.auditInput,
+    created_knowledge_id: knowledge.id,
+  });
+  return knowledge;
 }
 
 function evidenceSourceTypeForTurn(turn: Turn): EvidenceSourceType {
@@ -768,10 +1081,7 @@ export async function extractKnowledge(
       continue;
     }
 
-    let strongestRelation: {
-      relation: KnowledgeRelation | 'created';
-      related: KnowledgeMemory | null;
-    } = { relation: 'created', related: null };
+    let strongestRelation: KnowledgeRelationMatch = { relation: 'created', related: null };
     for (const existing of normalizedKnowledge) {
       const relation = classifyFactRelation(existing.normalized, fact);
       if (relation === 'duplicate') {
@@ -966,28 +1276,18 @@ export async function extractKnowledge(
     if (trustAssessment.decision === 'reject_candidate') {
       await runAtomicStorage(
         adapter,
-        async () => {
-          const rejectedCandidate = await adapter.insertKnowledgeCandidate(candidateInput);
-          if (candidateEvidenceInputs.length > 0) {
-            await adapter.insertKnowledgeEvidenceBatch(
-              candidateEvidenceInputs.map((item) => ({
-                ...item,
-                knowledge_candidate_id: rejectedCandidate.id,
-              })),
-            );
-          }
-        },
-        (syncAdapter) => {
-          const rejectedCandidate = syncAdapter.insertKnowledgeCandidate(candidateInput);
-          if (candidateEvidenceInputs.length > 0) {
-            syncAdapter.insertKnowledgeEvidenceBatch(
-              candidateEvidenceInputs.map((item) => ({
-                ...item,
-                knowledge_candidate_id: rejectedCandidate.id,
-              })),
-            );
-          }
-        },
+        () =>
+          persistRejectedKnowledgeCandidateAsync(
+            adapter,
+            candidateInput,
+            candidateEvidenceInputs,
+          ),
+        (syncAdapter) =>
+          persistRejectedKnowledgeCandidateSync(
+            syncAdapter,
+            candidateInput,
+            candidateEvidenceInputs,
+          ),
       );
       await adapter.insertKnowledgeMemoryAudit({
         ...normalizedScope,
@@ -1073,230 +1373,27 @@ export async function extractKnowledge(
       continue;
     }
 
+    const promotionPlan = buildPromotionPersistencePlan({
+      normalizedScope,
+      workingMemoryId,
+      fact,
+      candidateInput,
+      candidateEvidenceInputs,
+      grounded,
+      trustAssessment,
+      strongestRelation,
+      resolvedConfidence,
+      resolvedConfidenceScore,
+      resolvedVerificationStatus,
+      verificationNotes,
+      conflict,
+      policy,
+    });
+
     const createdFact = await runAtomicStorage(
       adapter,
-      async () => {
-        const candidate = await adapter.insertKnowledgeCandidate(candidateInput);
-        const candidateEvidence =
-          candidateEvidenceInputs.length > 0
-            ? await adapter.insertKnowledgeEvidenceBatch(
-                candidateEvidenceInputs.map((item) => ({
-                  ...item,
-                  knowledge_candidate_id: candidate.id,
-                })),
-              )
-            : [];
-        const supportEvidence = candidateEvidence.filter((item) => item.support_polarity === 'supports');
-        const outcomeFailures = supportEvidence.filter((item) => item.outcome === 'failure').length;
-        const outcomeSuccesses = supportEvidence.filter((item) => item.outcome === 'success').length;
-        const createdKnowledgeClass =
-          outcomeFailures > outcomeSuccesses &&
-          ['strategy', 'procedure'].includes(grounded.candidate.knowledge_class)
-            ? 'anti_pattern'
-            : trustAssessment.state === 'trusted' &&
-                grounded.candidate.knowledge_class === 'procedure' &&
-                outcomeSuccesses > 0
-              ? 'strategy'
-              : grounded.candidate.knowledge_class;
-        const knowledge = await adapter.promoteKnowledgeCandidate(
-          candidate.id,
-          buildKnowledgeInput(normalizedScope, workingMemoryId, fact, {
-            confidence: resolvedConfidence,
-            confidenceScore: resolvedConfidenceScore,
-            trustScore: trustAssessment.trust_score,
-            knowledgeState: trustAssessment.state === 'trusted' ? 'trusted' : 'provisional',
-            knowledgeClass: createdKnowledgeClass,
-            verificationStatus: resolvedVerificationStatus,
-            verificationNotes:
-              verificationNotes ?? (trustAssessment.reasons.length > 0 ? trustAssessment.reasons.join(', ') : null),
-            contradictionScore: conflict?.severity === 'high' ? 1 : 0,
-            sourceTurnIds: grounded.supportedTurnIds,
-          }),
-        );
-
-        if (candidateEvidence.length > 0) {
-          await adapter.insertKnowledgeEvidenceBatch(
-            candidateEvidence.map(({ id: _id, ...item }) => ({
-              ...item,
-              knowledge_candidate_id: null,
-              knowledge_memory_id: knowledge.id,
-            })),
-          );
-        }
-
-        if (
-          strongestRelation.related &&
-          (trustAssessment.decision === 'supersede_existing' ||
-            strongestRelation.relation === 'update' ||
-            (strongestRelation.relation === 'conflict' && policy.conflictStrategy === 'supersede'))
-        ) {
-          await adapter.supersedeKnowledgeMemory(strongestRelation.related.id, knowledge.id);
-          try {
-            await adapter.insertAssociation({
-              ...normalizedScope,
-              source_kind: 'knowledge',
-              source_id: knowledge.id,
-              target_kind: 'knowledge',
-              target_id: strongestRelation.related.id,
-              association_type: 'supersedes',
-              confidence: 1,
-              auto_generated: true,
-            });
-          } catch (error) {
-            if (!(error instanceof UniqueConstraintError)) {
-              throw error;
-            }
-          }
-        }
-
-        await adapter.insertKnowledgeMemoryAudit({
-          ...normalizedScope,
-          working_memory_id: workingMemoryId,
-          fact: fact.fact,
-          fact_type: fact.factType,
-          fact_subject: fact.subject,
-          fact_attribute: fact.attribute,
-          fact_value: fact.value,
-          normalized_fact: fact.normalizedFact,
-          slot_key: fact.slotKey,
-          is_negated: fact.isNegated,
-          confidence: resolvedConfidence,
-          confidence_score: trustAssessment.trust_score,
-          verification_status: resolvedVerificationStatus,
-          source_text: fact.sourceText ?? fact.fact,
-          decision:
-            strongestRelation.relation === 'update'
-              ? 'updated'
-              : strongestRelation.relation === 'conflict'
-                ? 'conflict'
-                : strongestRelation.relation === 'compatible'
-                  ? 'compatible'
-                  : 'created',
-          created_knowledge_id: knowledge.id,
-          related_knowledge_id: strongestRelation.related?.id ?? null,
-          detail:
-            strongestRelation.relation === 'conflict'
-              ? verificationNotes ?? `Conflict strategy '${policy.conflictStrategy}'`
-              : strongestRelation.relation === 'update'
-                ? verificationNotes ?? 'Superseded prior related knowledge'
-                : strongestRelation.relation === 'compatible'
-                  ? verificationNotes ?? 'Created alongside compatible related knowledge'
-                  : verificationNotes ?? 'Created new knowledge memory',
-        });
-
-        return knowledge;
-      },
-      (syncAdapter) => {
-        const candidate = syncAdapter.insertKnowledgeCandidate(candidateInput);
-        const candidateEvidence =
-          candidateEvidenceInputs.length > 0
-            ? syncAdapter.insertKnowledgeEvidenceBatch(
-                candidateEvidenceInputs.map((item) => ({
-                  ...item,
-                  knowledge_candidate_id: candidate.id,
-                })),
-              )
-            : [];
-        const supportEvidence = candidateEvidence.filter((item) => item.support_polarity === 'supports');
-        const outcomeFailures = supportEvidence.filter((item) => item.outcome === 'failure').length;
-        const outcomeSuccesses = supportEvidence.filter((item) => item.outcome === 'success').length;
-        const createdKnowledgeClass =
-          outcomeFailures > outcomeSuccesses &&
-          ['strategy', 'procedure'].includes(grounded.candidate.knowledge_class)
-            ? 'anti_pattern'
-            : trustAssessment.state === 'trusted' &&
-                grounded.candidate.knowledge_class === 'procedure' &&
-                outcomeSuccesses > 0
-              ? 'strategy'
-              : grounded.candidate.knowledge_class;
-        const knowledge = syncAdapter.promoteKnowledgeCandidate(
-          candidate.id,
-          buildKnowledgeInput(normalizedScope, workingMemoryId, fact, {
-            confidence: resolvedConfidence,
-            confidenceScore: resolvedConfidenceScore,
-            trustScore: trustAssessment.trust_score,
-            knowledgeState: trustAssessment.state === 'trusted' ? 'trusted' : 'provisional',
-            knowledgeClass: createdKnowledgeClass,
-            verificationStatus: resolvedVerificationStatus,
-            verificationNotes:
-              verificationNotes ?? (trustAssessment.reasons.length > 0 ? trustAssessment.reasons.join(', ') : null),
-            contradictionScore: conflict?.severity === 'high' ? 1 : 0,
-            sourceTurnIds: grounded.supportedTurnIds,
-          }),
-        );
-
-        if (candidateEvidence.length > 0) {
-          syncAdapter.insertKnowledgeEvidenceBatch(
-            candidateEvidence.map(({ id: _id, ...item }) => ({
-              ...item,
-              knowledge_candidate_id: null,
-              knowledge_memory_id: knowledge.id,
-            })),
-          );
-        }
-
-        if (
-          strongestRelation.related &&
-          (trustAssessment.decision === 'supersede_existing' ||
-            strongestRelation.relation === 'update' ||
-            (strongestRelation.relation === 'conflict' && policy.conflictStrategy === 'supersede'))
-        ) {
-          syncAdapter.supersedeKnowledgeMemory(strongestRelation.related.id, knowledge.id);
-          try {
-            syncAdapter.insertAssociation({
-              ...normalizedScope,
-              source_kind: 'knowledge',
-              source_id: knowledge.id,
-              target_kind: 'knowledge',
-              target_id: strongestRelation.related.id,
-              association_type: 'supersedes',
-              confidence: 1,
-              auto_generated: true,
-            });
-          } catch (error) {
-            if (!(error instanceof UniqueConstraintError)) {
-              throw error;
-            }
-          }
-        }
-
-        syncAdapter.insertKnowledgeMemoryAudit({
-          ...normalizedScope,
-          working_memory_id: workingMemoryId,
-          fact: fact.fact,
-          fact_type: fact.factType,
-          fact_subject: fact.subject,
-          fact_attribute: fact.attribute,
-          fact_value: fact.value,
-          normalized_fact: fact.normalizedFact,
-          slot_key: fact.slotKey,
-          is_negated: fact.isNegated,
-          confidence: resolvedConfidence,
-          confidence_score: trustAssessment.trust_score,
-          verification_status: resolvedVerificationStatus,
-          source_text: fact.sourceText ?? fact.fact,
-          decision:
-            strongestRelation.relation === 'update'
-              ? 'updated'
-              : strongestRelation.relation === 'conflict'
-                ? 'conflict'
-                : strongestRelation.relation === 'compatible'
-                  ? 'compatible'
-                  : 'created',
-          created_knowledge_id: knowledge.id,
-          related_knowledge_id: strongestRelation.related?.id ?? null,
-          detail:
-            strongestRelation.relation === 'conflict'
-              ? verificationNotes ?? `Conflict strategy '${policy.conflictStrategy}'`
-              : strongestRelation.relation === 'update'
-                ? verificationNotes ?? 'Superseded prior related knowledge'
-                : strongestRelation.relation === 'compatible'
-                  ? verificationNotes ?? 'Created alongside compatible related knowledge'
-                  : verificationNotes ?? 'Created new knowledge memory',
-        });
-
-        return knowledge;
-      },
+      () => persistPromotedKnowledgeAsync(adapter, normalizedScope, promotionPlan),
+      (syncAdapter) => persistPromotedKnowledgeSync(syncAdapter, normalizedScope, promotionPlan),
     );
 
     duplicateLookup.set(normalizedFact, createdFact);

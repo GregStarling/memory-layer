@@ -9,7 +9,9 @@ import type {
   WorkItemPatch,
 } from '../contracts/coordination.js';
 import { normalizeScope, type MemoryScope, type ScopeLevel } from '../contracts/identity.js';
+import { compareTemporalIds, normalizeTemporalId } from '../contracts/temporal.js';
 import type {
+  TemporalId,
   MemoryEventQuery,
   MemoryEventRecord,
   SessionStateProjection,
@@ -59,7 +61,7 @@ export interface ReplayedTemporalState {
   associations: Association[];
   playbooks: Playbook[];
   sessionStates: SessionStateProjection[];
-  watermarkEventId: number | null;
+  watermarkEventId: TemporalId | null;
 }
 
 function unsupported(name: string): never {
@@ -141,6 +143,27 @@ export async function listAllMemoryEvents(
   return events;
 }
 
+export async function listAllMemoryEventsCrossScope(
+  adapter: AsyncStorageAdapter,
+  scope: MemoryScope,
+  level: ScopeLevel,
+  query?: MemoryEventQuery,
+): Promise<MemoryEventRecord[]> {
+  const events: MemoryEventRecord[] = [];
+  let cursor = query?.cursor;
+  for (;;) {
+    const page: TimelineResult = await adapter.listMemoryEventsCrossScope(scope, level, {
+      ...query,
+      cursor,
+      limit: query?.limit ?? 500,
+    });
+    events.push(...page.events);
+    if (page.nextCursor == null) break;
+    cursor = page.nextCursor;
+  }
+  return events;
+}
+
 export function foldTemporalState(
   events: MemoryEventRecord[],
   options: {
@@ -157,7 +180,9 @@ export function foldTemporalState(
   const playbooks = new Map<string, Playbook>();
   const sessionStates = new Map<string, SessionStateProjection>();
 
-  for (const event of [...events].sort((a, b) => a.created_at - b.created_at || a.event_id - b.event_id)) {
+  for (const event of [...events].sort(
+    (a, b) => a.created_at - b.created_at || compareTemporalIds(a.event_id, b.event_id),
+  )) {
     const payload = event.payload ?? {};
     const after = payload.after as Record<string, unknown> | undefined;
     const before = payload.before as Record<string, unknown> | undefined;
@@ -514,9 +539,12 @@ export function createTemporalReplayAdapter(
         (item) =>
           matchesScope(item, scope) && item.target_kind === kind && item.target_id === id,
       ),
+    listAssociations: async (scope) =>
+      state.associations.filter((item) => matchesScope(item, scope)),
     deleteAssociation: () => unsupported('deleteAssociation'),
     insertMemoryEvent: () => unsupported('insertMemoryEvent'),
     listMemoryEvents: async () => unsupported('listMemoryEvents'),
+    listMemoryEventsCrossScope: async () => unsupported('listMemoryEventsCrossScope'),
     getMemoryEventsByEntity: async () => unsupported('getMemoryEventsByEntity'),
     getMemoryEventsBySession: async () => unsupported('getMemoryEventsBySession'),
     getSessionState: async (scope, sessionId) =>
@@ -533,11 +561,14 @@ export function createTemporalReplayAdapter(
       activeTools: [...input.activeTools],
       recentOutputs: [...input.recentOutputs],
       updatedAt: input.updatedAt,
-      source_event_id: input.source_event_id ?? state.watermarkEventId ?? null,
+      source_event_id:
+        input.source_event_id != null
+          ? normalizeTemporalId(input.source_event_id)
+          : state.watermarkEventId ?? null,
     }),
     getTemporalWatermark: async (): Promise<TemporalProjectionWatermark | null> => ({
       projection_name: 'temporal',
-      last_event_id: state.watermarkEventId ?? 0,
+      last_event_id: state.watermarkEventId ?? '0',
       updated_at: asOf,
       cutover_at: asOf,
       metadata: null,

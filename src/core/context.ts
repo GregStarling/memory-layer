@@ -47,7 +47,6 @@ export interface ContextAssemblyOptions {
   view?: ContextViewPolicy;
   viewer?: ActorRef;
   includeCoordinationState?: boolean;
-  persistSessionStateProjection?: boolean;
 }
 
 export interface KnowledgeSelectionReason {
@@ -426,7 +425,6 @@ function collectSignalSnippets(
 function deriveSessionState(
   workingMemory: WorkingMemory | null,
   activeTurns: Turn[],
-  relevantKnowledge: KnowledgeMemory[],
   activeObjectives: WorkItem[],
   contextWorkItems: WorkItem[],
   recentSummaries: WorkingMemory[],
@@ -446,9 +444,6 @@ function deriveSessionState(
   const assumptions = collectSignalSnippets(recentTexts, ASSUMPTION_PATTERN);
   const pendingDecisions = [
     ...collectSignalSnippets(recentTexts, DECISION_PATTERN),
-    ...relevantKnowledge
-      .filter((knowledge) => knowledge.fact_type === 'decision')
-      .map((knowledge) => compactSnippet(knowledge.fact)),
     ...activeObjectives
       .filter((item) => DECISION_PATTERN.test(item.title))
       .map((item) => compactSnippet(item.title)),
@@ -511,12 +506,11 @@ async function getContextWorkItems(
     .sort((a, b) => b.updated_at - a.updated_at || b.created_at - a.created_at || b.id - a.id);
 }
 
-function resolveContextScopeLevel(
+export function resolveContextScopeLevel(
   crossScopeLevel: ScopeLevel | undefined,
   view: ContextViewPolicy | undefined,
 ): ScopeLevel | undefined {
-  if (crossScopeLevel === 'tenant') return 'tenant';
-  if (view && view !== 'local_only') return 'workspace';
+  if (view && view !== 'local_only') return crossScopeLevel ?? 'workspace';
   return crossScopeLevel;
 }
 
@@ -1141,7 +1135,6 @@ export async function buildMemoryContext(
   const derivedSessionState = deriveSessionState(
     workingMemory,
     activeTurns,
-    relevantKnowledge,
     activeObjectives,
     contextWorkItems,
     trimmedSummaries,
@@ -1162,21 +1155,6 @@ export async function buildMemoryContext(
         updatedAt: projectedSessionState.updatedAt,
       }
     : derivedSessionState;
-  if (asOf == null && options?.sessionId && options.persistSessionStateProjection) {
-    const watermark = await adapter.getTemporalWatermark('temporal');
-    if (
-      !projectedSessionState ||
-      projectedSessionState.updatedAt !== derivedSessionState.updatedAt ||
-      projectedSessionState.currentObjective !== derivedSessionState.currentObjective
-    ) {
-      await adapter.upsertSessionState({
-        ...normalizedScope,
-        session_id: options.sessionId,
-        ...derivedSessionState,
-        source_event_id: watermark?.last_event_id ?? null,
-      });
-    }
-  }
   const debugTrace: ContextDebugTrace = {
     scope: {
       normalizedScope,

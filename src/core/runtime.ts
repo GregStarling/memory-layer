@@ -30,7 +30,7 @@ export interface SessionSnapshot {
   bootstrap: SessionBootstrap;
   context: MemoryContext;
   frozenAt: number;
-  watermarkEventId: number | null;
+  watermarkEventId: string | null;
   profile?: Profile | null;
 }
 

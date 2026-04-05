@@ -6,7 +6,11 @@ import {
 } from '../core/quick.js';
 import type { MemoryManager } from '../core/manager.js';
 import type { MemoryContext } from '../core/context.js';
-import type { TemporalStateSnapshot, TimelineResult } from '../contracts/temporal.js';
+import type {
+  TemporalIdInput,
+  TemporalStateSnapshot,
+  TimelineResult,
+} from '../contracts/temporal.js';
 import type {
   ActorRef,
   ContextViewPolicy,
@@ -327,6 +331,11 @@ function parseOptionalInteger(value: string | undefined): number | undefined {
   return Number.isInteger(parsed) ? parsed : undefined;
 }
 
+function parseOptionalTemporalId(value: string | undefined): string | undefined {
+  if (value == null || value === '') return undefined;
+  return /^\d+$/.test(value.trim()) ? BigInt(value.trim()).toString() : undefined;
+}
+
 function normalizePath(path: string): string {
   if (path.length > 1 && path.endsWith('/')) {
     return path.slice(0, -1);
@@ -576,7 +585,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
     bootstrap: unknown;
     context: unknown;
     frozenAt: number;
-    watermarkEventId: number | null;
+    watermarkEventId: string | null;
   };
   const sessionSnapshots = new Map<string, SessionSnapshotCacheEntry>();
   function touchManagerCache(
@@ -855,7 +864,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
         const startAt = query.start_at != null ? Number(query.start_at) : undefined;
         const endAt = query.end_at != null ? Number(query.end_at) : undefined;
-        const cursor = parseOptionalInteger(query.cursor);
+        const cursor = parseOptionalTemporalId(query.cursor);
         const limit = parseLimit(query.limit);
         if (
           (query.start_at != null && !Number.isFinite(startAt)) ||
@@ -901,7 +910,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
         const startAt = query.start_at != null ? Number(query.start_at) : undefined;
         const endAt = query.end_at != null ? Number(query.end_at) : undefined;
-        const cursor = parseOptionalInteger(query.cursor);
+        const cursor = parseOptionalTemporalId(query.cursor);
         const limit = parseLimit(query.limit);
         if (
           (query.start_at != null && !Number.isFinite(startAt)) ||
@@ -938,13 +947,8 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           closed = true;
           abortController.abort();
         });
-        const cursor = parseOptionalInteger(query.cursor);
-        const initialCursor =
-          cursor ??
-          (await requestManager.listMemoryEvents({
-            limit: 1,
-          })).events[0]?.event_id ??
-          0;
+        const cursor = parseOptionalTemporalId(query.cursor);
+        const initialCursor = await requestManager.resolveChangeStreamCursor(cursor);
         const iterator = requestManager.streamChanges({
           cursor,
           sessionId: query.session_id || undefined,

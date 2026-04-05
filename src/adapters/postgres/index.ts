@@ -14,6 +14,7 @@ import type {
   WorkItemPatch,
 } from '../../contracts/coordination.js';
 import type {
+  TemporalId,
   MemoryEventEntityKind,
   MemoryEventQuery,
   MemoryEventRecord,
@@ -24,6 +25,7 @@ import type {
   TemporalProjectionWatermark,
   TimelineResult,
 } from '../../contracts/temporal.js';
+import { compareTemporalIds, normalizeTemporalId } from '../../contracts/temporal.js';
 import type {
   EmbeddingAdapter,
   EmbeddingVector,
@@ -428,7 +430,7 @@ function mapWorkClaim(row: Record<string, unknown>): WorkClaim {
     expires_at: Number(row.expires_at),
     released_at: row.released_at != null ? Number(row.released_at) : null,
     release_reason: row.release_reason != null ? String(row.release_reason) : null,
-    source_event_id: row.source_event_id != null ? Number(row.source_event_id) : null,
+    source_event_id: row.source_event_id != null ? String(row.source_event_id) : null,
     visibility_class: row.visibility_class as WorkClaim['visibility_class'],
     version: Number(row.version ?? 1),
   };
@@ -455,7 +457,7 @@ function mapHandoff(row: Record<string, unknown>): HandoffRecord {
     canceled_at: row.canceled_at != null ? Number(row.canceled_at) : null,
     expires_at: row.expires_at != null ? Number(row.expires_at) : null,
     decision_reason: row.decision_reason != null ? String(row.decision_reason) : null,
-    source_event_id: row.source_event_id != null ? Number(row.source_event_id) : null,
+    source_event_id: row.source_event_id != null ? String(row.source_event_id) : null,
     visibility_class: row.visibility_class as HandoffRecord['visibility_class'],
     version: Number(row.version ?? 1),
   };
@@ -588,7 +590,7 @@ function mapKnowledgeEvidenceRow(row: Record<string, unknown>): KnowledgeEvidenc
 
 function mapMemoryEventRecord(row: Record<string, unknown>): MemoryEventRecord {
   return {
-    event_id: Number(row.event_id),
+    event_id: String(row.event_id),
     tenant_id: String(row.tenant_id),
     system_id: String(row.system_id),
     workspace_id: String(row.workspace_id ?? ''),
@@ -625,7 +627,7 @@ function mapSessionStateProjection(row: Record<string, unknown>): SessionStatePr
     activeTools: parseJsonStringArray(row.active_tools),
     recentOutputs: parseJsonStringArray(row.recent_outputs),
     updatedAt: Number(row.updated_at),
-    source_event_id: row.source_event_id != null ? Number(row.source_event_id) : null,
+    source_event_id: row.source_event_id != null ? String(row.source_event_id) : null,
   };
 }
 
@@ -634,7 +636,7 @@ function mapTemporalProjectionWatermark(
 ): TemporalProjectionWatermark {
   return {
     projection_name: String(row.projection_name),
-    last_event_id: Number(row.last_event_id),
+    last_event_id: String(row.last_event_id),
     updated_at: Number(row.updated_at),
     cutover_at: row.cutover_at != null ? Number(row.cutover_at) : null,
     metadata: parseJsonObject(row.metadata),
@@ -684,7 +686,7 @@ export function createPostgresAdapter(
     startAt: number;
     endAt: number;
     limit: number;
-    cursor: number;
+    cursor: TemporalId | null;
   } {
     return {
       sessionId: query?.sessionId ?? '',
@@ -693,7 +695,7 @@ export function createPostgresAdapter(
       startAt: query?.startAt ?? Number.NEGATIVE_INFINITY,
       endAt: query?.endAt ?? Number.POSITIVE_INFINITY,
       limit: query?.limit ?? 100,
-      cursor: query?.cursor ?? 0,
+      cursor: query?.cursor != null ? normalizeTemporalId(query.cursor) : null,
     };
   }
 
@@ -705,7 +707,7 @@ export function createPostgresAdapter(
         const cutoverAt = now();
         await writeTemporalWatermark({
           projection_name: 'temporal',
-          last_event_id: current?.last_event_id ?? 0,
+          last_event_id: current?.last_event_id ?? '0',
           updated_at: cutoverAt,
           cutover_at: cutoverAt,
           metadata: current?.metadata ?? null,
@@ -728,6 +730,7 @@ export function createPostgresAdapter(
   async function writeTemporalWatermark(
     input: NewTemporalProjectionWatermark,
   ): Promise<TemporalProjectionWatermark> {
+    const lastEventId = normalizeTemporalId(input.last_event_id);
     const updatedAt = input.updated_at ?? now();
     const { rows } = await pool.query(
       `INSERT INTO projection_watermarks
@@ -741,7 +744,7 @@ export function createPostgresAdapter(
        RETURNING *`,
       [
         input.projection_name,
-        input.last_event_id,
+        lastEventId,
         updatedAt,
         input.cutover_at ?? null,
         input.metadata ? JSON.stringify(input.metadata) : null,
@@ -750,9 +753,9 @@ export function createPostgresAdapter(
     if (rows[0]) {
       return mapTemporalProjectionWatermark(rows[0]);
     }
-    return {
+      return {
       projection_name: input.projection_name,
-      last_event_id: input.last_event_id,
+      last_event_id: lastEventId,
       updated_at: updatedAt,
       cutover_at: input.cutover_at ?? null,
       metadata: input.metadata ?? null,
@@ -797,7 +800,9 @@ export function createPostgresAdapter(
     const record = rows[0]
       ? mapMemoryEventRecord(rows[0])
       : {
-          event_id: (previousWatermark?.last_event_id ?? 0) + 1,
+          event_id: normalizeTemporalId(
+            BigInt(previousWatermark?.last_event_id ?? '0') + 1n,
+          ),
           tenant_id: normalized.tenant_id,
           system_id: normalized.system_id,
           workspace_id: normalized.workspace_id,
@@ -827,6 +832,68 @@ export function createPostgresAdapter(
     return record;
   }
 
+  async function insertMemoryEventsBatchInternal(
+    inputs: NewMemoryEventRecord[],
+  ): Promise<MemoryEventRecord[]> {
+    if (inputs.length === 0) return [];
+    await ensureTemporalCutover();
+    const previousWatermark = await readTemporalWatermark('temporal');
+    const values: string[] = [];
+    const params: unknown[] = [];
+    let nextParam = 1;
+    for (const input of inputs) {
+      const normalized = normalizeScope(input);
+      const createdAt = input.created_at ?? now();
+      values.push(
+        `($${nextParam}, $${nextParam + 1}, $${nextParam + 2}, $${nextParam + 3}, $${nextParam + 4}, $${nextParam + 5}, $${nextParam + 6}, $${nextParam + 7}, $${nextParam + 8}, $${nextParam + 9}, $${nextParam + 10}::jsonb, $${nextParam + 11}, $${nextParam + 12}, $${nextParam + 13}, $${nextParam + 14}::jsonb, $${nextParam + 15}, $${nextParam + 16}, $${nextParam + 17})`,
+      );
+      params.push(
+        normalized.tenant_id,
+        normalized.system_id,
+        normalized.workspace_id,
+        normalized.collaboration_id,
+        normalized.scope_id,
+        input.session_id ?? null,
+        input.actor_id ?? null,
+        input.actor_kind ?? null,
+        input.actor_system_id ?? null,
+        input.actor_display_name ?? null,
+        input.actor_metadata ? JSON.stringify(input.actor_metadata) : null,
+        input.entity_kind,
+        input.entity_id,
+        input.event_type,
+        JSON.stringify(input.payload ?? {}),
+        input.causation_id ?? null,
+        input.correlation_id ?? null,
+        createdAt,
+      );
+      nextParam += 18;
+    }
+    const { rows } = await pool.query(
+      `INSERT INTO memory_event_log
+        (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, actor_id,
+         actor_kind, actor_system_id, actor_display_name, actor_metadata,
+         entity_kind, entity_id, event_type, payload, causation_id, correlation_id, created_at)
+       VALUES ${values.join(', ')}
+       RETURNING *`,
+      params,
+    );
+    const records = rows
+      .map(mapMemoryEventRecord)
+      .sort((a, b) => a.created_at - b.created_at || compareTemporalIds(a.event_id, b.event_id));
+    const lastRecord = records[records.length - 1];
+    if (lastRecord) {
+      await writeTemporalWatermark({
+        projection_name: 'temporal',
+        last_event_id: lastRecord.event_id,
+        updated_at: lastRecord.created_at,
+        cutover_at: previousWatermark?.cutover_at ?? lastRecord.created_at,
+        metadata: previousWatermark?.metadata ?? null,
+      });
+    }
+    return records;
+  }
+
   async function listScopedMemoryEvents(
     scope: MemoryScope,
     query?: MemoryEventQuery,
@@ -836,7 +903,52 @@ export function createPostgresAdapter(
     const params: unknown[] = [...scopeParams(scope), resolved.startAt, resolved.endAt];
     const clauses = [`${scopeWhere()}`, `created_at >= $6`, `created_at <= $7`];
     let nextParam = 8;
-    if (resolved.cursor > 0) {
+    if (resolved.cursor != null && compareTemporalIds(resolved.cursor, '0') > 0) {
+      clauses.push(`event_id > $${nextParam}`);
+      params.push(resolved.cursor);
+      nextParam += 1;
+    }
+    if (resolved.sessionId) {
+      clauses.push(`session_id = $${nextParam}`);
+      params.push(resolved.sessionId);
+      nextParam += 1;
+    }
+    if (resolved.entityKind) {
+      clauses.push(`entity_kind = $${nextParam}`);
+      params.push(resolved.entityKind);
+      nextParam += 1;
+    }
+    if (resolved.entityId) {
+      clauses.push(`entity_id = $${nextParam}`);
+      params.push(resolved.entityId);
+      nextParam += 1;
+    }
+    params.push(resolved.limit + 1);
+    const { rows } = await pool.query(
+      `SELECT * FROM memory_event_log
+       WHERE ${clauses.join(' AND ')}
+       ORDER BY created_at ASC, event_id ASC
+       LIMIT $${nextParam}`,
+      params,
+    );
+    const items = rows.slice(0, resolved.limit).map(mapMemoryEventRecord);
+    return {
+      events: items,
+      nextCursor: rows.length > resolved.limit ? items[items.length - 1]?.event_id ?? null : null,
+    };
+  }
+
+  async function listScopedMemoryEventsCrossScope(
+    scope: MemoryScope,
+    level: ScopeLevel,
+    query?: MemoryEventQuery,
+  ): Promise<TimelineResult> {
+    await ensureTemporalCutover();
+    const resolved = resolveEventQuery(query);
+    const params: unknown[] = [...wideScopeParams(scope, level), resolved.startAt, resolved.endAt];
+    const clauses = [`${wideScopeWhere(scope, level)}`, `created_at >= $${params.length - 1}`, `created_at <= $${params.length}`];
+    let nextParam = params.length + 1;
+    if (resolved.cursor != null && compareTemporalIds(resolved.cursor, '0') > 0) {
       clauses.push(`event_id > $${nextParam}`);
       params.push(resolved.cursor);
       nextParam += 1;
@@ -916,7 +1028,7 @@ export function createPostgresAdapter(
         JSON.stringify(input.activeTools),
         JSON.stringify(input.recentOutputs),
         input.updatedAt,
-        input.source_event_id ?? null,
+        input.source_event_id != null ? normalizeTemporalId(input.source_event_id) : null,
       ],
     );
     return mapSessionStateProjection(rows[0]);
@@ -1686,40 +1798,41 @@ export function createPostgresAdapter(
       );
       if (beforeRows.length === 0) return;
       const touchedAt = now();
-      await pool.query(
+      const before = beforeRows.map(mapKnowledgeMemory);
+      const { rows: afterRows } = await pool.query(
         `UPDATE knowledge_memory
          SET access_count = access_count + 1, last_accessed_at = $2
-         WHERE id = ANY($1::int[])`,
+         WHERE id = ANY($1::int[])
+         RETURNING *`,
         [uniqueIds, touchedAt],
       );
-      const { rows: afterRows } = await pool.query(
-        'SELECT * FROM knowledge_memory WHERE id = ANY($1::int[])',
-        [uniqueIds],
+      const afterById = new Map(
+        afterRows.map((row) => {
+          const mapped = mapKnowledgeMemory(row);
+          return [mapped.id, mapped] as const;
+        }),
       );
-      const afterById = new Map(afterRows.map((row) => {
-        const mapped = mapKnowledgeMemory(row);
-        return [mapped.id, mapped] as const;
-      }));
-      for (const row of beforeRows) {
-        const before = mapKnowledgeMemory(row);
-        const after = afterById.get(before.id);
-        if (!after) continue;
-        await insertMemoryEventInternal({
-          ...normalizeScope(after),
-          entity_kind: 'knowledge_memory',
-          entity_id: String(after.id),
-          event_type: 'knowledge.touched',
-          payload: {
-            before,
-            after,
-            patch: {
-              last_accessed_at: touchedAt,
-              access_count: after.access_count,
+      await insertMemoryEventsBatchInternal(
+        before.flatMap((item) => {
+          const after = afterById.get(item.id);
+          if (!after) return [];
+          return [{
+            ...normalizeScope(after),
+            entity_kind: 'knowledge_memory' as const,
+            entity_id: String(after.id),
+            event_type: 'knowledge.touched' as const,
+            payload: {
+              before: item,
+              after,
+              patch: {
+                last_accessed_at: touchedAt,
+                access_count: after.access_count,
+              },
             },
-          },
-          created_at: touchedAt,
-        });
-      }
+            created_at: touchedAt,
+          }];
+        }),
+      );
     },
 
     async retireKnowledgeMemory(id, retiredAt) {
@@ -2801,6 +2914,16 @@ export function createPostgresAdapter(
       );
       return rows.map(mapAssociation);
     },
+    async listAssociations(scope) {
+      const n = normalizeScope(scope);
+      const { rows } = await pool.query(
+        `SELECT * FROM associations
+         WHERE tenant_id = $1 AND system_id = $2 AND workspace_id = $3 AND collaboration_id = $4 AND scope_id = $5
+         ORDER BY id DESC`,
+        [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id],
+      );
+      return rows.map(mapAssociation);
+    },
     async deleteAssociation(id) {
       const before = await this.getAssociationById(id);
       await pool.query('DELETE FROM associations WHERE id = $1', [id]);
@@ -2824,6 +2947,10 @@ export function createPostgresAdapter(
 
     async listMemoryEvents(scope, query) {
       return listScopedMemoryEvents(scope, query);
+    },
+
+    async listMemoryEventsCrossScope(scope, level, query) {
+      return listScopedMemoryEventsCrossScope(scope, level, query);
     },
 
     async getMemoryEventsByEntity(scope, entityKind, entityId, query) {

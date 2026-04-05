@@ -57,7 +57,11 @@ import type {
   WorkItem,
   WorkingMemory,
 } from '../contracts/types.js';
-import { buildMemoryContext, type MemoryContext } from './context.js';
+import {
+  buildMemoryContext,
+  resolveContextScopeLevel,
+  type MemoryContext,
+} from './context.js';
 import type { MemoryEventEmitter } from './events.js';
 import type { Extractor } from './extractor.js';
 import type { SessionBootstrap } from './formatter.js';
@@ -90,12 +94,15 @@ import type {
   CognitiveSearchResult,
 } from '../contracts/cognitive.js';
 import type {
+  TemporalId,
+  TemporalIdInput,
   MemoryEventEntityKind,
   MemoryEventRecord,
   TemporalStateDiff,
   TemporalStateSnapshot,
   TimelineResult,
 } from '../contracts/temporal.js';
+import { normalizeTemporalId } from '../contracts/temporal.js';
 import type { StructuredGenerationClient } from '../summarizers/client.js';
 import { searchEpisodes, summarizeEpisode, reflect } from './episodic.js';
 import { searchCognitive } from './cognitive.js';
@@ -113,6 +120,7 @@ import {
   createTemporalReplayAdapter,
   foldTemporalState,
   listAllMemoryEvents,
+  listAllMemoryEventsCrossScope,
 } from './temporal.js';
 
 export interface MemoryManagerConfig {
@@ -191,7 +199,7 @@ export interface MemoryManager {
     startAt?: number;
     endAt?: number;
     limit?: number;
-    cursor?: number;
+    cursor?: TemporalIdInput;
   }): Promise<TimelineResult>;
   diffState(
     from: number,
@@ -205,7 +213,7 @@ export interface MemoryManager {
     startAt?: number;
     endAt?: number;
     limit?: number;
-    cursor?: number;
+    cursor?: TemporalIdInput;
   }): Promise<TimelineResult>;
   getSessionBootstrap(
     relevanceQuery?: string,
@@ -287,13 +295,14 @@ export interface MemoryManager {
     direction?: 'inbound' | 'outbound' | 'all';
   }): Promise<HandoffRecord[]>;
   streamChanges(options?: {
-    cursor?: number;
+    cursor?: TemporalIdInput;
     sessionId?: string;
     entityKind?: MemoryEventEntityKind;
     entityId?: string;
     pollIntervalMs?: number;
     signal?: AbortSignal;
   }): AsyncIterable<MemoryEventRecord>;
+  resolveChangeStreamCursor(cursor?: TemporalIdInput): Promise<TemporalId>;
   inspectKnowledge(id: number): Promise<{
     knowledge: KnowledgeMemory | null;
     evidence: KnowledgeEvidence[];
@@ -795,9 +804,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       .slice(0, options?.limit ?? 10);
 
     if (config.contextPolicy?.touchSelectedKnowledge ?? true) {
-      for (const result of results) {
-        await asyncAdapter.touchKnowledgeMemory(result.item.id);
-      }
+      await asyncAdapter.touchKnowledgeMemories(results.map((result) => result.item.id));
     }
 
     return results;
@@ -841,9 +848,37 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     });
   }
 
+  async function refreshSessionStateProjection(): Promise<void> {
+    const sessionStateContext = await buildMemoryContext(asyncAdapter, config.scope, {
+      sessionId: config.sessionId,
+      crossScopeLevel: 'scope',
+      policy: {
+        ...(config.contextPolicy ?? {}),
+        touchSelectedKnowledge: false,
+      },
+      tokenEstimator,
+      logger: config.logger,
+      onEvent,
+    });
+    const watermark = await asyncAdapter.getTemporalWatermark('temporal');
+    await asyncAdapter.upsertSessionState({
+      ...normalizeScope(config.scope),
+      session_id: config.sessionId,
+      ...sessionStateContext.sessionState,
+      source_event_id: watermark?.last_event_id ?? null,
+    });
+  }
+
   async function getTemporalCutoverAt(): Promise<number | null> {
     const watermark = await asyncAdapter.getTemporalWatermark('temporal');
     return watermark?.cutover_at ?? null;
+  }
+
+  async function resolveChangeStreamCursorInternal(
+    cursor?: TemporalIdInput,
+  ): Promise<TemporalId> {
+    if (cursor != null) return normalizeTemporalId(cursor);
+    return (await asyncAdapter.getTemporalWatermark('temporal'))?.last_event_id ?? '0';
   }
 
   async function buildReplayedContext(
@@ -857,7 +892,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
   ): Promise<{
     context: MemoryContext;
     events: MemoryEventRecord[];
-    watermarkEventId: number | null;
+    watermarkEventId: TemporalId | null;
     exact: boolean;
     cutoverAt: number | null;
   }> {
@@ -872,10 +907,17 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       };
     }
 
-    const events = await listAllMemoryEvents(asyncAdapter, config.scope, {
-      endAt: asOf,
-      limit: 500,
-    });
+    const replayScopeLevel = resolveContextScopeLevel(config.crossScopeLevel, options?.view);
+    const events =
+      replayScopeLevel != null && replayScopeLevel !== 'scope'
+        ? await listAllMemoryEventsCrossScope(asyncAdapter, config.scope, replayScopeLevel, {
+            endAt: asOf,
+            limit: 500,
+          })
+        : await listAllMemoryEvents(asyncAdapter, config.scope, {
+            endAt: asOf,
+            limit: 500,
+          });
     const replayed = foldTemporalState(events, { sessionId: config.sessionId });
     const replayAdapter = createTemporalReplayAdapter(replayed, asOf);
     const inferredQuery =
@@ -971,6 +1013,8 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         extracted.forEach((knowledge) => emitKnowledgeChange('promoted', knowledge));
     }
 
+    await refreshSessionStateProjection();
+
     return result;
   }
 
@@ -1063,6 +1107,8 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         await runCompaction(activeTurns);
       }
 
+      await refreshSessionStateProjection();
+
       return turn;
     },
 
@@ -1093,6 +1139,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       const compactionResult = autoCompact
         ? await runCompaction(await asyncAdapter.getActiveTurns(config.scope, config.sessionId))
         : null;
+      await refreshSessionStateProjection();
       return {
         userTurn,
         assistantTurn,
@@ -1334,7 +1381,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     },
 
     async trackWorkItem(title, kind = 'objective', status = 'open', detail, options) {
-      return asyncAdapter.insertWorkItem({
+      const workItem = await asyncAdapter.insertWorkItem({
         ...config.scope,
         session_id: config.sessionId,
         visibility_class: options?.visibilityClass ?? 'private',
@@ -1346,10 +1393,14 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
             ? config.redactText({ kind: 'work_item', text: detail })
             : detail,
       });
+      await refreshSessionStateProjection();
+      return workItem;
     },
 
     async updateWorkItem(id, patch, options) {
-      return asyncAdapter.updateWorkItem(id, patch, options);
+      const workItem = await asyncAdapter.updateWorkItem(id, patch, options);
+      await refreshSessionStateProjection();
+      return workItem;
     },
 
     async claimWorkItem(input) {
@@ -1414,11 +1465,12 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       });
     },
 
+    async resolveChangeStreamCursor(cursor) {
+      return resolveChangeStreamCursorInternal(cursor);
+    },
+
     async *streamChanges(options) {
-      let cursor =
-        options?.cursor ??
-        (await asyncAdapter.getTemporalWatermark('temporal'))?.last_event_id ??
-        0;
+      let cursor = await resolveChangeStreamCursorInternal(options?.cursor);
       while (!options?.signal?.aborted) {
         const page = await asyncAdapter.listMemoryEvents(config.scope, {
           cursor,
@@ -1625,9 +1677,11 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         expiredWorkingMemoryCount: report.expiredWorkingMemoryIds.length,
         retiredKnowledgeCount: report.retiredKnowledgeIds.length,
         deletedWorkItemCount: report.deletedWorkItemIds.length,
+        deletedAssociationCount: report.deletedAssociationIds.length,
         reverifiedKnowledgeCount: report.reverifiedKnowledgeIds.length,
         demotedKnowledgeCount: report.demotedKnowledgeIds.length,
       });
+      await refreshSessionStateProjection();
       return report;
     },
 
