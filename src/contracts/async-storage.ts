@@ -1,5 +1,26 @@
 import type { MemoryScope, ScopeLevel } from './identity.js';
 import type {
+  ActorRef,
+  HandoffQuery,
+  HandoffRecord,
+  NewHandoffInput,
+  NewWorkClaimInput,
+  WorkClaim,
+  WorkClaimQuery,
+  WorkItemPatch,
+} from './coordination.js';
+import type {
+  MemoryEventEntityKind,
+  MemoryEventQuery,
+  MemoryEventRecord,
+  NewMemoryEventRecord,
+  NewSessionStateProjection,
+  NewTemporalProjectionWatermark,
+  SessionStateProjection,
+  TemporalProjectionWatermark,
+  TimelineResult,
+} from './temporal.js';
+import type {
   Association,
   AssociationTargetKind,
   CompactionLog,
@@ -147,7 +168,22 @@ export interface AsyncStorageAdapter {
   getActiveWorkItems(scope: MemoryScope): Promise<WorkItem[]>;
   getWorkItemsByTimeRange(scope: MemoryScope, range: TimeRange): Promise<WorkItem[]>;
   updateWorkItemStatus(id: number, status: WorkItem['status']): Promise<void>;
+  updateWorkItem(
+    id: number,
+    patch: WorkItemPatch,
+    options?: { expectedVersion?: number },
+  ): Promise<WorkItem | null>;
   deleteWorkItem(id: number): Promise<void>;
+  claimWorkItem(input: NewWorkClaimInput): Promise<WorkClaim>;
+  renewWorkClaim(claimId: number, actor: ActorRef, leaseSeconds?: number): Promise<WorkClaim | null>;
+  releaseWorkClaim(claimId: number, actor: ActorRef, reason?: string): Promise<WorkClaim | null>;
+  getActiveWorkClaim(workItemId: number): Promise<WorkClaim | null>;
+  listWorkClaims(scope: MemoryScope, options?: WorkClaimQuery): Promise<WorkClaim[]>;
+  createHandoff(input: NewHandoffInput): Promise<HandoffRecord>;
+  acceptHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null>;
+  rejectHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null>;
+  cancelHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null>;
+  listHandoffs(scope: MemoryScope, options?: HandoffQuery): Promise<HandoffRecord[]>;
 
   upsertContextMonitor(input: ContextMonitorUpsert): Promise<ContextMonitor>;
   getContextMonitor(scope: MemoryScope): Promise<ContextMonitor | null>;
@@ -187,6 +223,26 @@ export interface AsyncStorageAdapter {
   getAssociationsFrom(kind: AssociationTargetKind, id: number, scope: MemoryScope): Promise<Association[]>;
   getAssociationsTo(kind: AssociationTargetKind, id: number, scope: MemoryScope): Promise<Association[]>;
   deleteAssociation(id: number): Promise<void>;
+
+  insertMemoryEvent(input: NewMemoryEventRecord): Promise<MemoryEventRecord>;
+  listMemoryEvents(scope: MemoryScope, query?: MemoryEventQuery): Promise<TimelineResult>;
+  getMemoryEventsByEntity(
+    scope: MemoryScope,
+    entityKind: MemoryEventEntityKind,
+    entityId: string,
+    query?: Omit<MemoryEventQuery, 'entityKind' | 'entityId'>,
+  ): Promise<TimelineResult>;
+  getMemoryEventsBySession(
+    scope: MemoryScope,
+    sessionId: string,
+    query?: Omit<MemoryEventQuery, 'sessionId'>,
+  ): Promise<TimelineResult>;
+  getSessionState(scope: MemoryScope, sessionId: string): Promise<SessionStateProjection | null>;
+  upsertSessionState(input: NewSessionStateProjection): Promise<SessionStateProjection>;
+  getTemporalWatermark(projectionName?: string): Promise<TemporalProjectionWatermark | null>;
+  upsertTemporalWatermark(
+    input: NewTemporalProjectionWatermark,
+  ): Promise<TemporalProjectionWatermark>;
 
   transaction<T>(fn: () => Promise<T>): Promise<T>;
   close(): Promise<void>;

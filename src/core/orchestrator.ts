@@ -1,6 +1,11 @@
 import type { MemoryScope } from '../contracts/identity.js';
 import { normalizeScope } from '../contracts/identity.js';
 import type { EventHook, Logger } from '../contracts/observability.js';
+import {
+  ResourceNotFoundError,
+  ScopeMismatchError,
+  ValidationError,
+} from '../contracts/errors.js';
 import type { ConflictStrategy, ExtractionPolicy } from '../contracts/policy.js';
 import { DEFAULT_EXTRACTION_POLICY } from '../contracts/policy.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
@@ -341,7 +346,7 @@ function assertTurnsMatchScope(turns: Turn[], scope: MemoryScope, sessionId: str
   const normalized = normalizeScope(scope);
   for (const turn of turns) {
     if (turn.session_id !== sessionId) {
-      throw new Error(
+      throw new ValidationError(
         `Memory validation: turn ${turn.id} session_id '${turn.session_id}' does not match '${sessionId}'`,
       );
     }
@@ -352,7 +357,9 @@ function assertTurnsMatchScope(turns: Turn[], scope: MemoryScope, sessionId: str
       turn.collaboration_id !== normalized.collaboration_id ||
       turn.scope_id !== normalized.scope_id
     ) {
-      throw new Error(`Memory validation: turn ${turn.id} does not belong to the requested scope`);
+      throw new ScopeMismatchError(
+        `Memory validation: turn ${turn.id} does not belong to the requested scope`,
+      );
     }
   }
 }
@@ -385,7 +392,7 @@ export async function commitCompaction(
 
   const turnsToArchive = sortTurnsAscending(input.turnsToArchive);
   if (turnsToArchive.length === 0) {
-    throw new Error("Memory validation: 'turnsToArchive' must not be empty");
+    throw new ValidationError("Memory validation: 'turnsToArchive' must not be empty");
   }
   assertTurnsMatchScope(turnsToArchive, normalizedScope, input.sessionId);
 
@@ -500,7 +507,7 @@ export async function compactTurns(
 ): Promise<CompactionResult> {
   assertCompactionTrigger(trigger, 'trigger');
   if (!Number.isInteger(retainedTurnCount) || retainedTurnCount < 0) {
-    throw new Error(
+    throw new ValidationError(
       `Memory validation: 'retainedTurnCount' must be a non-negative integer, got '${retainedTurnCount}'`,
     );
   }
@@ -509,7 +516,7 @@ export async function compactTurns(
   assertTurnsMatchScope(orderedTurns, scope, sessionId);
   const turnsToArchive = orderedTurns.slice(0, Math.max(0, orderedTurns.length - retainedTurnCount));
   if (turnsToArchive.length === 0) {
-    throw new Error('Memory validation: no turns are eligible for compaction');
+    throw new ValidationError('Memory validation: no turns are eligible for compaction');
   }
 
   const startedAtMs = Date.now();
@@ -551,7 +558,9 @@ export async function promoteToKnowledge(
   const normalizedScope = normalizeScope(input.scope);
   const workingMemory = await adapter.getWorkingMemoryById(workingMemoryId);
   if (!workingMemory) {
-    throw new Error(`Memory validation: working memory ${workingMemoryId} was not found`);
+    throw new ResourceNotFoundError(
+      `Memory validation: working memory ${workingMemoryId} was not found`,
+    );
   }
   if (
     workingMemory.tenant_id !== normalizedScope.tenant_id ||
@@ -560,7 +569,7 @@ export async function promoteToKnowledge(
     workingMemory.collaboration_id !== normalizedScope.collaboration_id ||
     workingMemory.scope_id !== normalizedScope.scope_id
   ) {
-    throw new Error(
+    throw new ScopeMismatchError(
       `Memory validation: working memory ${workingMemoryId} does not belong to the requested scope`,
     );
   }
@@ -624,7 +633,9 @@ export async function extractKnowledge(
   const policy = resolveExtractionPolicy(options?.policy);
   const workingMemory = await adapter.getWorkingMemoryById(workingMemoryId);
   if (!workingMemory) {
-    throw new Error(`Memory validation: working memory ${workingMemoryId} was not found`);
+    throw new ResourceNotFoundError(
+      `Memory validation: working memory ${workingMemoryId} was not found`,
+    );
   }
   if (
     workingMemory.tenant_id !== normalizedScope.tenant_id ||
@@ -633,7 +644,7 @@ export async function extractKnowledge(
     workingMemory.collaboration_id !== normalizedScope.collaboration_id ||
     workingMemory.scope_id !== normalizedScope.scope_id
   ) {
-    throw new Error(
+    throw new ScopeMismatchError(
       `Memory validation: working memory ${workingMemoryId} does not belong to the requested scope`,
     );
   }

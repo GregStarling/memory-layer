@@ -1,6 +1,28 @@
 import { normalizeScope, type MemoryScope, type ScopeLevel } from '../../contracts/identity.js';
+import type {
+  ActorRef,
+  HandoffQuery,
+  HandoffRecord,
+  NewHandoffInput,
+  NewWorkClaimInput,
+  WorkClaim,
+  WorkClaimQuery,
+  WorkItemPatch,
+} from '../../contracts/coordination.js';
 import type { StorageAdapter } from '../../contracts/storage.js';
 import { UniqueConstraintError } from '../../contracts/storage.js';
+import { ConflictError } from '../../contracts/errors.js';
+import type { SessionState } from '../../contracts/session-state.js';
+import type {
+  MemoryEventEntityKind,
+  MemoryEventQuery,
+  MemoryEventRecord,
+  MemoryEventType,
+  NewSessionStateProjection,
+  SessionStateProjection,
+  TemporalProjectionWatermark,
+  TimelineResult,
+} from '../../contracts/temporal.js';
 import type {
   Association,
   CompactionLog,
@@ -36,7 +58,9 @@ import { estimateTokens } from '../../core/tokens.js';
 import { emitMemoryEvent, type TelemetryOptions } from '../../core/telemetry.js';
 import { matchesKnowledgeSearchOptions } from '../../core/retrieval.js';
 import {
+  assertActorRef,
   assertArchiveInput,
+  assertMemoryVisibilityClass,
   nowSeconds,
   validateContextMonitorUpsert,
   validateNewCompactionLog,
@@ -61,11 +85,16 @@ interface MemoryState {
   knowledgeEvidence: KnowledgeEvidence[];
   knowledgeAudits: KnowledgeMemoryAudit[];
   workItems: WorkItem[];
+  workClaims: WorkClaim[];
+  handoffs: HandoffRecord[];
   contextMonitors: ContextMonitor[];
   compactionLogs: CompactionLog[];
   playbooks: Playbook[];
   playbookRevisions: PlaybookRevision[];
   associations: Association[];
+  memoryEvents: MemoryEventRecord[];
+  sessionStates: SessionStateProjection[];
+  projectionWatermarks: TemporalProjectionWatermark[];
 }
 
 function matchesScope(item: MemoryScope, scope: MemoryScope): boolean {
@@ -176,6 +205,76 @@ function paginateItems<T extends { id: number }>(
   };
 }
 
+function cloneValue<T>(value: T): T {
+  return structuredClone(value);
+}
+
+function normalizeEventQuery(query?: MemoryEventQuery): {
+  sessionId: string;
+  entityKind: MemoryEventEntityKind | null;
+  entityId: string;
+  startAt: number;
+  endAt: number;
+  limit: number;
+  cursor: number;
+} {
+  return {
+    sessionId: query?.sessionId ?? '',
+    entityKind: query?.entityKind ?? null,
+    entityId: query?.entityId ?? '',
+    startAt: query?.startAt ?? Number.NEGATIVE_INFINITY,
+    endAt: query?.endAt ?? Number.POSITIVE_INFINITY,
+    limit: query?.limit ?? 100,
+    cursor: query?.cursor ?? 0,
+  };
+}
+
+function matchesEventScope(item: MemoryEventRecord, scope: MemoryScope): boolean {
+  return matchesScope(item, scope);
+}
+
+function matchesActor(
+  actor: Pick<ActorRef, 'actor_kind' | 'actor_id'>,
+  target: ActorRef,
+): boolean {
+  return actor.actor_kind === target.actor_kind && actor.actor_id === target.actor_id;
+}
+
+function makeClaimToken(): string {
+  return `claim-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function isClaimExpired(claim: WorkClaim, now = nowSeconds()): boolean {
+  return claim.status === 'active' && claim.expires_at <= now;
+}
+
+function matchesEventQuery(item: MemoryEventRecord, query?: MemoryEventQuery): boolean {
+  const resolved = normalizeEventQuery(query);
+  if (resolved.cursor > 0 && item.event_id <= resolved.cursor) return false;
+  if (item.created_at < resolved.startAt || item.created_at > resolved.endAt) return false;
+  if (resolved.sessionId && item.session_id !== resolved.sessionId) return false;
+  if (resolved.entityKind && item.entity_kind !== resolved.entityKind) return false;
+  if (resolved.entityId && item.entity_id !== resolved.entityId) return false;
+  return true;
+}
+
+function paginateEvents(
+  items: MemoryEventRecord[],
+  query?: MemoryEventQuery,
+): TimelineResult {
+  const resolved = normalizeEventQuery(query);
+  const ordered = [...items].sort(
+    (a, b) => a.created_at - b.created_at || a.event_id - b.event_id,
+  );
+  const page = ordered.slice(0, resolved.limit + 1);
+  const hasMore = page.length > resolved.limit;
+  const events = hasMore ? page.slice(0, resolved.limit) : page;
+  return {
+    events,
+    nextCursor: hasMore ? events[events.length - 1]?.event_id ?? null : null,
+  };
+}
+
 export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdapter {
   const state: MemoryState = {
     turns: [],
@@ -185,11 +284,24 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     knowledgeEvidence: [],
     knowledgeAudits: [],
     workItems: [],
+    workClaims: [],
+    handoffs: [],
     contextMonitors: [],
     compactionLogs: [],
     playbooks: [],
     playbookRevisions: [],
     associations: [],
+    memoryEvents: [],
+    sessionStates: [],
+    projectionWatermarks: [
+      {
+        projection_name: 'temporal',
+        last_event_id: 0,
+        updated_at: nowSeconds(),
+        cutover_at: nowSeconds(),
+        metadata: null,
+      },
+    ],
   };
 
   const ids = {
@@ -200,11 +312,14 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     knowledgeEvidence: 1,
     knowledgeAudit: 1,
     workItem: 1,
+    workClaim: 1,
+    handoff: 1,
     contextMonitor: 1,
     compactionLog: 1,
     playbook: 1,
     playbookRevision: 1,
     association: 1,
+    memoryEvent: 1,
   };
 
   return {
@@ -225,6 +340,18 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         schema_version: SCHEMA_VERSION,
       };
       state.turns.push(turn);
+      this.insertMemoryEvent({
+        ...scope,
+        session_id: turn.session_id,
+        actor_id: turn.actor,
+        entity_kind: 'turn',
+        entity_id: String(turn.id),
+        event_type: 'turn.created',
+        payload: {
+          after: cloneValue(turn),
+        },
+        created_at: turn.created_at,
+      });
       return turn;
     },
 
@@ -277,8 +404,26 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       assertArchiveInput(id, archivedAt, compactionLogId);
       const turn = state.turns.find((item) => item.id === id);
       if (!turn) return;
+      const before = cloneValue(turn);
       turn.archived_at = archivedAt;
       turn.compaction_log_id = compactionLogId;
+      this.insertMemoryEvent({
+        ...normalizeScope(turn),
+        session_id: turn.session_id,
+        actor_id: turn.actor,
+        entity_kind: 'turn',
+        entity_id: String(turn.id),
+        event_type: 'turn.archived',
+        payload: {
+          before,
+          after: cloneValue(turn),
+          patch: {
+            archived_at: archivedAt,
+            compaction_log_id: compactionLogId,
+          },
+        },
+        created_at: archivedAt,
+      });
     },
 
     getArchivedTurnRange(sessionId, startId, endId, scope) {
@@ -313,6 +458,17 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         schema_version: SCHEMA_VERSION,
       };
       state.workingMemory.push(record);
+      this.insertMemoryEvent({
+        ...scope,
+        session_id: record.session_id,
+        entity_kind: 'working_memory',
+        entity_id: String(record.id),
+        event_type: 'working_memory.created',
+        payload: {
+          after: cloneValue(record),
+        },
+        created_at: record.created_at,
+      });
       return record;
     },
 
@@ -347,12 +503,47 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
 
     expireWorkingMemory(id) {
       const item = state.workingMemory.find((entry) => entry.id === id);
-      if (item) item.expires_at = nowSeconds();
+      if (!item) return;
+      const before = cloneValue(item);
+      const expiredAt = nowSeconds();
+      item.expires_at = expiredAt;
+      this.insertMemoryEvent({
+        ...normalizeScope(item),
+        session_id: item.session_id,
+        entity_kind: 'working_memory',
+        entity_id: String(item.id),
+        event_type: 'working_memory.expired',
+        payload: {
+          before,
+          after: cloneValue(item),
+          patch: {
+            expires_at: expiredAt,
+          },
+        },
+        created_at: expiredAt,
+      });
     },
 
     markWorkingMemoryPromoted(id, knowledgeMemoryId) {
       const item = state.workingMemory.find((entry) => entry.id === id);
-      if (item) item.promoted_to_knowledge_id = knowledgeMemoryId;
+      if (!item) return;
+      const before = cloneValue(item);
+      item.promoted_to_knowledge_id = knowledgeMemoryId;
+      this.insertMemoryEvent({
+        ...normalizeScope(item),
+        session_id: item.session_id,
+        entity_kind: 'working_memory',
+        entity_id: String(item.id),
+        event_type: 'working_memory.promoted',
+        payload: {
+          before,
+          after: cloneValue(item),
+          refs: {
+            knowledge_memory_id: knowledgeMemoryId,
+          },
+        },
+        created_at: nowSeconds(),
+      });
     },
 
     insertKnowledgeMemory(input: NewKnowledgeMemory): KnowledgeMemory {
@@ -361,6 +552,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       const record: KnowledgeMemory = {
         ...scope,
         id: ids.knowledgeMemory++,
+        visibility_class: input.visibility_class ?? 'private',
         fact: input.fact,
         fact_type: input.fact_type,
         knowledge_state: input.knowledge_state ?? 'trusted',
@@ -402,6 +594,16 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         schema_version: SCHEMA_VERSION,
       };
       state.knowledgeMemory.push(record);
+      this.insertMemoryEvent({
+        ...scope,
+        entity_kind: 'knowledge_memory',
+        entity_id: String(record.id),
+        event_type: 'knowledge.created',
+        payload: {
+          after: cloneValue(record),
+        },
+        created_at: record.created_at,
+      });
       return record;
     },
 
@@ -647,6 +849,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     updateKnowledgeMemory(id, patch) {
       const item = state.knowledgeMemory.find((entry) => entry.id === id);
       if (!item) return null;
+      const before = cloneValue(item);
       if (patch.knowledge_state !== undefined) item.knowledge_state = patch.knowledge_state;
       if (patch.knowledge_class !== undefined) item.knowledge_class = patch.knowledge_class;
       if (patch.trust_score !== undefined) item.trust_score = patch.trust_score;
@@ -664,27 +867,86 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       if (patch.superseded_at !== undefined) item.superseded_at = patch.superseded_at;
       if (patch.successful_use_count !== undefined) item.successful_use_count = patch.successful_use_count;
       if (patch.failed_use_count !== undefined) item.failed_use_count = patch.failed_use_count;
+      this.insertMemoryEvent({
+        ...normalizeScope(item),
+        entity_kind: 'knowledge_memory',
+        entity_id: String(item.id),
+        event_type: 'knowledge.updated',
+        payload: {
+          before,
+          after: cloneValue(item),
+          patch: cloneValue(patch as Record<string, unknown>),
+        },
+        created_at: nowSeconds(),
+      });
       return item;
     },
 
     touchKnowledgeMemory(id) {
       const item = state.knowledgeMemory.find((entry) => entry.id === id);
       if (!item) return;
+      const before = cloneValue(item);
       item.last_accessed_at = nowSeconds();
       item.access_count += 1;
+      this.insertMemoryEvent({
+        ...normalizeScope(item),
+        entity_kind: 'knowledge_memory',
+        entity_id: String(item.id),
+        event_type: 'knowledge.touched',
+        payload: {
+          before,
+          after: cloneValue(item),
+          patch: {
+            last_accessed_at: item.last_accessed_at,
+            access_count: item.access_count,
+          },
+        },
+        created_at: item.last_accessed_at,
+      });
     },
 
     retireKnowledgeMemory(id, retiredAt = nowSeconds()) {
       const item = state.knowledgeMemory.find((entry) => entry.id === id);
-      if (item) item.retired_at = retiredAt;
+      if (!item) return;
+      const before = cloneValue(item);
+      item.retired_at = retiredAt;
+      this.insertMemoryEvent({
+        ...normalizeScope(item),
+        entity_kind: 'knowledge_memory',
+        entity_id: String(item.id),
+        event_type: 'knowledge.retired',
+        payload: {
+          before,
+          after: cloneValue(item),
+          patch: {
+            retired_at: retiredAt,
+          },
+        },
+        created_at: retiredAt,
+      });
     },
 
     supersedeKnowledgeMemory(oldId, newId) {
       const item = state.knowledgeMemory.find((entry) => entry.id === oldId);
       if (item) {
+        const before = cloneValue(item);
         item.superseded_by_id = newId;
         item.superseded_at = nowSeconds();
         item.knowledge_state = 'superseded';
+        this.insertMemoryEvent({
+          ...normalizeScope(item),
+          entity_kind: 'knowledge_memory',
+          entity_id: String(item.id),
+          event_type: 'knowledge.superseded',
+          payload: {
+            before,
+            after: cloneValue(item),
+            refs: {
+              new_id: newId,
+            },
+          },
+          created_at: item.superseded_at,
+        });
       }
     },
 
@@ -695,15 +957,28 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         ...scope,
         id: ids.workItem++,
         session_id: input.session_id ?? null,
+        visibility_class: input.visibility_class ?? 'private',
         kind: input.kind,
         title: input.title,
         detail: input.detail ?? null,
         status: input.status ?? 'open',
         source_working_memory_id: input.source_working_memory_id ?? null,
+        version: 1,
         created_at: createdAt,
         updated_at: createdAt,
       };
       state.workItems.push(item);
+      this.insertMemoryEvent({
+        ...scope,
+        session_id: item.session_id,
+        entity_kind: 'work_item',
+        entity_id: String(item.id),
+        event_type: 'work_item.created',
+        payload: {
+          after: cloneValue(item),
+        },
+        created_at: item.created_at,
+      });
       return item;
     },
 
@@ -722,13 +997,409 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     updateWorkItemStatus(id, status) {
       const item = state.workItems.find((entry) => entry.id === id);
       if (!item) return;
+      const before = cloneValue(item);
       item.status = status;
       item.updated_at = nowSeconds();
+      item.version += 1;
+      this.insertMemoryEvent({
+        ...normalizeScope(item),
+        session_id: item.session_id,
+        entity_kind: 'work_item',
+        entity_id: String(item.id),
+        event_type: 'work_item.status_changed',
+        payload: {
+          before,
+          after: cloneValue(item),
+          patch: {
+            status,
+            updated_at: item.updated_at,
+          },
+        },
+        created_at: item.updated_at,
+      });
+    },
+
+    updateWorkItem(id, patch: WorkItemPatch, options?: { expectedVersion?: number }) {
+      const item = state.workItems.find((entry) => entry.id === id);
+      if (!item) return null;
+      if (options?.expectedVersion != null && item.version !== options.expectedVersion) {
+        throw new ConflictError(`Work item ${id} version mismatch`);
+      }
+      const before = cloneValue(item);
+      if (patch.title !== undefined) item.title = patch.title;
+      if (patch.detail !== undefined) item.detail = patch.detail ?? null;
+      if (patch.status !== undefined) item.status = patch.status;
+      if (patch.visibility_class !== undefined) {
+        assertMemoryVisibilityClass(patch.visibility_class);
+        item.visibility_class = patch.visibility_class;
+      }
+      item.updated_at = nowSeconds();
+      item.version += 1;
+      this.insertMemoryEvent({
+        ...normalizeScope(item),
+        session_id: item.session_id,
+        entity_kind: 'work_item',
+        entity_id: String(item.id),
+        event_type:
+          patch.visibility_class !== undefined &&
+          patch.title === undefined &&
+          patch.detail === undefined &&
+          patch.status === undefined
+            ? 'work_item.visibility_changed'
+            : 'work_item.updated',
+        payload: {
+          before,
+          after: cloneValue(item),
+          patch: cloneValue(patch as Record<string, unknown>),
+        },
+        created_at: item.updated_at,
+      });
+      return cloneValue(item);
     },
 
     deleteWorkItem(id) {
       const index = state.workItems.findIndex((item) => item.id === id);
-      if (index >= 0) state.workItems.splice(index, 1);
+      if (index < 0) return;
+      const [item] = state.workItems.splice(index, 1);
+      this.insertMemoryEvent({
+        ...normalizeScope(item),
+        session_id: item.session_id,
+        entity_kind: 'work_item',
+        entity_id: String(item.id),
+        event_type: 'work_item.deleted',
+        payload: {
+          before: cloneValue(item),
+        },
+        created_at: nowSeconds(),
+      });
+    },
+
+    claimWorkItem(input: NewWorkClaimInput): WorkClaim {
+      assertActorRef(input.actor);
+      const workItem = state.workItems.find((item) => item.id === input.work_item_id);
+      if (!workItem) {
+        throw new ConflictError(`Work item ${input.work_item_id} does not exist`);
+      }
+      if (workItem.status === 'done') {
+        throw new ConflictError(`Work item ${input.work_item_id} is already done`);
+      }
+      const now = input.claimed_at ?? nowSeconds();
+      const existing = state.workClaims.find((claim) => claim.work_item_id === input.work_item_id);
+      if (existing && isClaimExpired(existing, now)) {
+        const before = cloneValue(existing);
+        existing.status = 'expired';
+        existing.released_at = now;
+        existing.release_reason = 'expired';
+        existing.version += 1;
+        this.insertMemoryEvent({
+          ...normalizeScope(existing),
+          session_id: existing.session_id,
+          actor_id: existing.actor.actor_id,
+          actor_kind: existing.actor.actor_kind,
+          actor_system_id: existing.actor.system_id,
+          actor_display_name: existing.actor.display_name,
+          actor_metadata: existing.actor.metadata,
+          entity_kind: 'work_claim',
+          entity_id: String(existing.id),
+          event_type: 'work_claim.expired',
+          payload: { before, after: cloneValue(existing) },
+          created_at: now,
+        });
+      }
+      const active = state.workClaims.find(
+        (claim) => claim.work_item_id === input.work_item_id && claim.status === 'active',
+      );
+      if (active) {
+        if (!matchesActor(input.actor, active.actor)) {
+          throw new ConflictError(`Work item ${input.work_item_id} is already claimed`);
+        }
+        active.expires_at = Math.max(active.expires_at, now) + (input.lease_seconds ?? 300);
+        active.version += 1;
+        this.insertMemoryEvent({
+          ...normalizeScope(active),
+          session_id: active.session_id,
+          actor_id: active.actor.actor_id,
+          actor_kind: active.actor.actor_kind,
+          actor_system_id: active.actor.system_id,
+          actor_display_name: active.actor.display_name,
+          actor_metadata: active.actor.metadata,
+          entity_kind: 'work_claim',
+          entity_id: String(active.id),
+          event_type: 'work_claim.renewed',
+          payload: { after: cloneValue(active) },
+          created_at: now,
+        });
+        return cloneValue(active);
+      }
+      const normalized = normalizeScope(input);
+      const claim: WorkClaim = {
+        ...normalized,
+        id: ids.workClaim++,
+        work_item_id: input.work_item_id,
+        actor: cloneValue(input.actor),
+        session_id: input.session_id ?? null,
+        claim_token: makeClaimToken(),
+        status: 'active',
+        claimed_at: now,
+        expires_at: now + (input.lease_seconds ?? 300),
+        released_at: null,
+        release_reason: null,
+        source_event_id: null,
+        visibility_class: input.visibility_class,
+        version: 1,
+      };
+      state.workClaims = state.workClaims.filter(
+        (entry) => !(entry.work_item_id === claim.work_item_id && entry.status === 'active'),
+      );
+      state.workClaims.push(claim);
+      this.insertMemoryEvent({
+        ...normalized,
+        session_id: claim.session_id,
+        actor_id: claim.actor.actor_id,
+        actor_kind: claim.actor.actor_kind,
+        actor_system_id: claim.actor.system_id,
+        actor_display_name: claim.actor.display_name,
+        actor_metadata: claim.actor.metadata,
+        entity_kind: 'work_claim',
+        entity_id: String(claim.id),
+        event_type: 'work_claim.claimed',
+        payload: { after: cloneValue(claim) },
+        created_at: now,
+      });
+      return cloneValue(claim);
+    },
+
+    renewWorkClaim(claimId, actor, leaseSeconds = 300) {
+      assertActorRef(actor);
+      const claim = state.workClaims.find((entry) => entry.id === claimId);
+      if (!claim) return null;
+      if (!matchesActor(actor, claim.actor)) {
+        throw new ConflictError(`Claim ${claimId} is owned by another actor`);
+      }
+      const now = nowSeconds();
+      claim.expires_at = Math.max(claim.expires_at, now) + leaseSeconds;
+      claim.version += 1;
+      this.insertMemoryEvent({
+        ...normalizeScope(claim),
+        session_id: claim.session_id,
+        actor_id: claim.actor.actor_id,
+        actor_kind: claim.actor.actor_kind,
+        actor_system_id: claim.actor.system_id,
+        actor_display_name: claim.actor.display_name,
+        actor_metadata: claim.actor.metadata,
+        entity_kind: 'work_claim',
+        entity_id: String(claim.id),
+        event_type: 'work_claim.renewed',
+        payload: { after: cloneValue(claim) },
+        created_at: now,
+      });
+      return cloneValue(claim);
+    },
+
+    releaseWorkClaim(claimId, actor, reason) {
+      assertActorRef(actor);
+      const claim = state.workClaims.find((entry) => entry.id === claimId);
+      if (!claim) return null;
+      if (!matchesActor(actor, claim.actor)) {
+        throw new ConflictError(`Claim ${claimId} is owned by another actor`);
+      }
+      const now = nowSeconds();
+      claim.status = 'released';
+      claim.released_at = now;
+      claim.release_reason = reason ?? null;
+      claim.version += 1;
+      this.insertMemoryEvent({
+        ...normalizeScope(claim),
+        session_id: claim.session_id,
+        actor_id: claim.actor.actor_id,
+        actor_kind: claim.actor.actor_kind,
+        actor_system_id: claim.actor.system_id,
+        actor_display_name: claim.actor.display_name,
+        actor_metadata: claim.actor.metadata,
+        entity_kind: 'work_claim',
+        entity_id: String(claim.id),
+        event_type: 'work_claim.released',
+        payload: { after: cloneValue(claim) },
+        created_at: now,
+      });
+      return cloneValue(claim);
+    },
+
+    getActiveWorkClaim(workItemId) {
+      const claim = state.workClaims.find(
+        (entry) => entry.work_item_id === workItemId && entry.status === 'active' && !isClaimExpired(entry),
+      );
+      return claim ? cloneValue(claim) : null;
+    },
+
+    listWorkClaims(scope, options?: WorkClaimQuery) {
+      return state.workClaims.filter((claim) => {
+        if (!matchesScope(claim, scope)) return false;
+        if (!options?.includeExpired && claim.status === 'expired') return false;
+        if (!options?.includeReleased && claim.status === 'released') return false;
+        if (options?.sessionId && claim.session_id !== options.sessionId) return false;
+        if (options?.visibilityClass && claim.visibility_class !== options.visibilityClass) return false;
+        if (options?.actor && !matchesActor(options.actor, claim.actor)) return false;
+        return true;
+      }).map(cloneValue);
+    },
+
+    createHandoff(input: NewHandoffInput) {
+      assertActorRef(input.from_actor, 'from_actor');
+      assertActorRef(input.to_actor, 'to_actor');
+      const normalized = normalizeScope(input);
+      const handoff: HandoffRecord = {
+        ...normalized,
+        id: ids.handoff++,
+        work_item_id: input.work_item_id,
+        from_actor: cloneValue(input.from_actor),
+        to_actor: cloneValue(input.to_actor),
+        session_id: input.session_id ?? null,
+        summary: input.summary,
+        context_bundle_ref: input.context_bundle_ref ?? null,
+        status: 'pending',
+        created_at: input.created_at ?? nowSeconds(),
+        accepted_at: null,
+        rejected_at: null,
+        canceled_at: null,
+        expires_at: input.expires_at ?? null,
+        decision_reason: null,
+        source_event_id: null,
+        visibility_class: input.visibility_class,
+        version: 1,
+      };
+      state.handoffs.push(handoff);
+      this.insertMemoryEvent({
+        ...normalized,
+        session_id: handoff.session_id,
+        actor_id: handoff.from_actor.actor_id,
+        actor_kind: handoff.from_actor.actor_kind,
+        actor_system_id: handoff.from_actor.system_id,
+        actor_display_name: handoff.from_actor.display_name,
+        actor_metadata: handoff.from_actor.metadata,
+        entity_kind: 'handoff',
+        entity_id: String(handoff.id),
+        event_type: 'handoff.created',
+        payload: { after: cloneValue(handoff) },
+        created_at: handoff.created_at,
+      });
+      return cloneValue(handoff);
+    },
+
+    acceptHandoff(handoffId, actor, reason) {
+      assertActorRef(actor);
+      const handoff = state.handoffs.find((entry) => entry.id === handoffId);
+      if (!handoff) return null;
+      if (!matchesActor(actor, handoff.to_actor)) {
+        throw new ConflictError(`Handoff ${handoffId} is assigned to another actor`);
+      }
+      const activeClaim = state.workClaims.find(
+        (claim) => claim.work_item_id === handoff.work_item_id && claim.status === 'active' && !isClaimExpired(claim),
+      );
+      if (activeClaim && !matchesActor(handoff.from_actor, activeClaim.actor)) {
+        throw new ConflictError(`Work item ${handoff.work_item_id} has another active owner`);
+      }
+      const now = nowSeconds();
+      if (activeClaim && matchesActor(handoff.from_actor, activeClaim.actor)) {
+        this.releaseWorkClaim(activeClaim.id, handoff.from_actor, 'handoff_accepted');
+      }
+      this.claimWorkItem({
+        ...normalizeScope(handoff),
+        work_item_id: handoff.work_item_id,
+        actor,
+        session_id: handoff.session_id,
+        visibility_class: handoff.visibility_class,
+      });
+      handoff.status = 'accepted';
+      handoff.accepted_at = now;
+      handoff.decision_reason = reason ?? null;
+      handoff.version += 1;
+      this.insertMemoryEvent({
+        ...normalizeScope(handoff),
+        session_id: handoff.session_id,
+        actor_id: actor.actor_id,
+        actor_kind: actor.actor_kind,
+        actor_system_id: actor.system_id,
+        actor_display_name: actor.display_name,
+        actor_metadata: actor.metadata,
+        entity_kind: 'handoff',
+        entity_id: String(handoff.id),
+        event_type: 'handoff.accepted',
+        payload: { after: cloneValue(handoff) },
+        created_at: now,
+      });
+      return cloneValue(handoff);
+    },
+
+    rejectHandoff(handoffId, actor, reason) {
+      assertActorRef(actor);
+      const handoff = state.handoffs.find((entry) => entry.id === handoffId);
+      if (!handoff) return null;
+      if (!matchesActor(actor, handoff.to_actor)) {
+        throw new ConflictError(`Handoff ${handoffId} is assigned to another actor`);
+      }
+      handoff.status = 'rejected';
+      handoff.rejected_at = nowSeconds();
+      handoff.decision_reason = reason ?? null;
+      handoff.version += 1;
+      this.insertMemoryEvent({
+        ...normalizeScope(handoff),
+        session_id: handoff.session_id,
+        actor_id: actor.actor_id,
+        actor_kind: actor.actor_kind,
+        actor_system_id: actor.system_id,
+        actor_display_name: actor.display_name,
+        actor_metadata: actor.metadata,
+        entity_kind: 'handoff',
+        entity_id: String(handoff.id),
+        event_type: 'handoff.rejected',
+        payload: { after: cloneValue(handoff) },
+        created_at: handoff.rejected_at,
+      });
+      return cloneValue(handoff);
+    },
+
+    cancelHandoff(handoffId, actor, reason) {
+      assertActorRef(actor);
+      const handoff = state.handoffs.find((entry) => entry.id === handoffId);
+      if (!handoff) return null;
+      if (!matchesActor(actor, handoff.from_actor)) {
+        throw new ConflictError(`Handoff ${handoffId} was created by another actor`);
+      }
+      handoff.status = 'canceled';
+      handoff.canceled_at = nowSeconds();
+      handoff.decision_reason = reason ?? null;
+      handoff.version += 1;
+      this.insertMemoryEvent({
+        ...normalizeScope(handoff),
+        session_id: handoff.session_id,
+        actor_id: actor.actor_id,
+        actor_kind: actor.actor_kind,
+        actor_system_id: actor.system_id,
+        actor_display_name: actor.display_name,
+        actor_metadata: actor.metadata,
+        entity_kind: 'handoff',
+        entity_id: String(handoff.id),
+        event_type: 'handoff.canceled',
+        payload: { after: cloneValue(handoff) },
+        created_at: handoff.canceled_at,
+      });
+      return cloneValue(handoff);
+    },
+
+    listHandoffs(scope, options?: HandoffQuery) {
+      return state.handoffs.filter((handoff) => {
+        if (!matchesScope(handoff, scope)) return false;
+        if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
+        if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
+        if (!options?.actor) return true;
+        if (options.direction === 'inbound') return matchesActor(options.actor, handoff.to_actor);
+        if (options.direction === 'outbound') return matchesActor(options.actor, handoff.from_actor);
+        return (
+          matchesActor(options.actor, handoff.to_actor) ||
+          matchesActor(options.actor, handoff.from_actor)
+        );
+      }).map(cloneValue);
     },
 
     upsertContextMonitor(input: ContextMonitorUpsert): ContextMonitor {
@@ -802,6 +1473,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       const record: Playbook = {
         ...scope,
         id: ids.playbook++,
+        visibility_class: input.visibility_class ?? 'private',
         title: input.title,
         description: input.description,
         instructions: input.instructions,
@@ -821,6 +1493,17 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         schema_version: SCHEMA_VERSION,
       };
       state.playbooks.push(record);
+      this.insertMemoryEvent({
+        ...scope,
+        session_id: record.source_session_id,
+        entity_kind: 'playbook',
+        entity_id: String(record.id),
+        event_type: 'playbook.created',
+        payload: {
+          after: cloneValue(record),
+        },
+        created_at: record.created_at,
+      });
       return record;
     },
     getPlaybookById(id: number): Playbook | null {
@@ -849,6 +1532,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     updatePlaybook(id, patch): Playbook | null {
       const playbook = state.playbooks.find((p) => p.id === id);
       if (!playbook) return null;
+      const before = cloneValue(playbook);
       if (patch.title != null) playbook.title = patch.title;
       if (patch.description != null) playbook.description = patch.description;
       if (patch.instructions != null) playbook.instructions = patch.instructions;
@@ -859,13 +1543,42 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       if (patch.tags != null) playbook.tags = [...patch.tags];
       if (patch.status != null) playbook.status = patch.status;
       playbook.updated_at = nowSeconds();
+      this.insertMemoryEvent({
+        ...normalizeScope(playbook),
+        session_id: playbook.source_session_id,
+        entity_kind: 'playbook',
+        entity_id: String(playbook.id),
+        event_type: 'playbook.updated',
+        payload: {
+          before,
+          after: cloneValue(playbook),
+          patch: cloneValue(patch as Record<string, unknown>),
+        },
+        created_at: playbook.updated_at,
+      });
       return playbook;
     },
     recordPlaybookUse(id: number): void {
       const playbook = state.playbooks.find((p) => p.id === id);
       if (playbook) {
+        const before = cloneValue(playbook);
         playbook.use_count += 1;
         playbook.last_used_at = nowSeconds();
+        this.insertMemoryEvent({
+          ...normalizeScope(playbook),
+          session_id: playbook.source_session_id,
+          entity_kind: 'playbook',
+          entity_id: String(playbook.id),
+          event_type: 'playbook.used',
+          payload: {
+            before,
+            after: cloneValue(playbook),
+            refs: {
+              use_count: playbook.use_count,
+            },
+          },
+          created_at: playbook.last_used_at ?? nowSeconds(),
+        });
       }
     },
     insertPlaybookRevision(input: NewPlaybookRevision): PlaybookRevision {
@@ -889,6 +1602,20 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       };
       state.playbookRevisions.push(record);
       playbook.revision_count += 1;
+      this.insertMemoryEvent({
+        ...normalizeScope(record),
+        session_id: record.source_session_id,
+        entity_kind: 'playbook_revision',
+        entity_id: String(record.id),
+        event_type: 'playbook.revised',
+        payload: {
+          after: cloneValue(record),
+          refs: {
+            playbook_id: record.playbook_id,
+          },
+        },
+        created_at: record.created_at,
+      });
       return record;
     },
     getPlaybookRevisions(playbookId: number): PlaybookRevision[] {
@@ -916,6 +1643,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       const record: Association = {
         ...scope,
         id: ids.association++,
+        visibility_class: input.visibility_class ?? 'private',
         source_kind: input.source_kind,
         source_id: input.source_id,
         target_kind: input.target_kind,
@@ -926,6 +1654,16 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         created_at: input.created_at ?? nowSeconds(),
       };
       state.associations.push(record);
+      this.insertMemoryEvent({
+        ...scope,
+        entity_kind: 'association',
+        entity_id: String(record.id),
+        event_type: 'association.created',
+        payload: {
+          after: cloneValue(record),
+        },
+        created_at: record.created_at,
+      });
       return record;
     },
     getAssociationById(id: number): Association | null {
@@ -943,7 +1681,152 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     },
     deleteAssociation(id: number): void {
       const idx = state.associations.findIndex((a) => a.id === id);
-      if (idx !== -1) state.associations.splice(idx, 1);
+      if (idx === -1) return;
+      const [association] = state.associations.splice(idx, 1);
+      this.insertMemoryEvent({
+        ...normalizeScope(association),
+        entity_kind: 'association',
+        entity_id: String(association.id),
+        event_type: 'association.deleted',
+        payload: {
+          before: cloneValue(association),
+        },
+        created_at: nowSeconds(),
+      });
+    },
+
+    insertMemoryEvent(input) {
+      const normalized = normalizeScope(input);
+      const event: MemoryEventRecord = {
+        ...normalized,
+        event_id: ids.memoryEvent++,
+        session_id: input.session_id ?? null,
+        actor_id: input.actor_id ?? null,
+        actor_kind: input.actor_kind ?? null,
+        actor_system_id: input.actor_system_id ?? null,
+        actor_display_name: input.actor_display_name ?? null,
+        actor_metadata: input.actor_metadata ? cloneValue(input.actor_metadata) : null,
+        entity_kind: input.entity_kind,
+        entity_id: input.entity_id,
+        event_type: input.event_type,
+        payload: cloneValue(input.payload),
+        causation_id: input.causation_id ?? null,
+        correlation_id: input.correlation_id ?? null,
+        created_at: input.created_at ?? nowSeconds(),
+      };
+      state.memoryEvents.push(event);
+      const existing = state.projectionWatermarks.find(
+        (item) => item.projection_name === 'temporal',
+      );
+      if (existing) {
+        existing.last_event_id = event.event_id;
+        existing.updated_at = event.created_at;
+      }
+      return cloneValue(event);
+    },
+
+    listMemoryEvents(scope, query) {
+      return paginateEvents(
+        state.memoryEvents.filter(
+          (item) => matchesEventScope(item, scope) && matchesEventQuery(item, query),
+        ),
+        query,
+      );
+    },
+
+    getMemoryEventsByEntity(scope, entityKind, entityId, query) {
+      return paginateEvents(
+        state.memoryEvents.filter(
+          (item) =>
+            matchesEventScope(item, scope) &&
+            item.entity_kind === entityKind &&
+            item.entity_id === entityId &&
+            matchesEventQuery(item, query),
+        ),
+        query,
+      );
+    },
+
+    getMemoryEventsBySession(scope, sessionId, query) {
+      return paginateEvents(
+        state.memoryEvents.filter(
+          (item) =>
+            matchesEventScope(item, scope) &&
+            item.session_id === sessionId &&
+            matchesEventQuery(item, query),
+        ),
+        query,
+      );
+    },
+
+    getSessionState(scope, sessionId) {
+      const item =
+        state.sessionStates.find(
+          (entry) => matchesScope(entry, scope) && entry.session_id === sessionId,
+        ) ?? null;
+      return item ? cloneValue(item) : null;
+    },
+
+    upsertSessionState(input: NewSessionStateProjection) {
+      const normalized = normalizeScope(input);
+      const existing = state.sessionStates.find(
+        (entry) => matchesScope(entry, normalized) && entry.session_id === input.session_id,
+      );
+      const next: SessionStateProjection = {
+        ...normalized,
+        session_id: input.session_id,
+        currentObjective: input.currentObjective,
+        blockers: [...input.blockers],
+        assumptions: [...input.assumptions],
+        pendingDecisions: [...input.pendingDecisions],
+        activeTools: [...input.activeTools],
+        recentOutputs: [...input.recentOutputs],
+        updatedAt: input.updatedAt,
+        source_event_id: input.source_event_id ?? null,
+      };
+      if (existing) {
+        Object.assign(existing, next);
+      } else {
+        state.sessionStates.push(next);
+      }
+      this.insertMemoryEvent({
+        ...normalized,
+        session_id: input.session_id,
+        entity_kind: 'session_state',
+        entity_id: input.session_id,
+        event_type: 'session_state.updated',
+        payload: {
+          after: cloneValue(next),
+        },
+        created_at: input.updatedAt,
+      });
+      return cloneValue(next);
+    },
+
+    getTemporalWatermark(projectionName = 'temporal') {
+      const watermark =
+        state.projectionWatermarks.find((item) => item.projection_name === projectionName) ?? null;
+      return watermark ? cloneValue(watermark) : null;
+    },
+
+    upsertTemporalWatermark(input) {
+      const updatedAt = input.updated_at ?? nowSeconds();
+      const next: TemporalProjectionWatermark = {
+        projection_name: input.projection_name,
+        last_event_id: input.last_event_id,
+        updated_at: updatedAt,
+        cutover_at: input.cutover_at ?? null,
+        metadata: input.metadata ? cloneValue(input.metadata) : null,
+      };
+      const existing = state.projectionWatermarks.find(
+        (item) => item.projection_name === input.projection_name,
+      );
+      if (existing) {
+        Object.assign(existing, next);
+      } else {
+        state.projectionWatermarks.push(next);
+      }
+      return cloneValue(next);
     },
 
     transaction(fn) {

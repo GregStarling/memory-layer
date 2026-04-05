@@ -12,6 +12,8 @@
 --   v10 working_memory.episode_recap
 --   v11 playbooks + playbook_revisions
 --   v12 associations + full knowledge_memory parity with SQLite
+--   v13 temporal event log + session_state_current + projection_watermarks
+--   v14 coordination visibility + work claims + handoffs
 -- Postgres tracks applied versions in schema_version.
 
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -112,6 +114,7 @@ CREATE TABLE IF NOT EXISTS knowledge_memory (
   source_scope_id TEXT,
   source_collaboration_id TEXT,
   source_working_memory_id INTEGER,
+  visibility_class TEXT NOT NULL DEFAULT 'private',
   source_turn_ids JSONB NOT NULL DEFAULT '[]',
   successful_use_count INTEGER NOT NULL DEFAULT 0,
   failed_use_count INTEGER NOT NULL DEFAULT 0,
@@ -143,6 +146,7 @@ ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS next_reverification_at INT
 ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS last_confirmed_at INTEGER;
 ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS confirmation_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS source_turn_ids JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS visibility_class TEXT NOT NULL DEFAULT 'private';
 ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS successful_use_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS failed_use_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS disputed_at INTEGER;
@@ -333,12 +337,16 @@ CREATE TABLE IF NOT EXISTS work_items (
   kind TEXT NOT NULL DEFAULT 'objective' CHECK (kind IN ('objective', 'unresolved_work', 'constraint')),
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'in_progress', 'blocked', 'done')),
   detail TEXT,
+  visibility_class TEXT NOT NULL DEFAULT 'private',
   source_working_memory_id INTEGER,
+  version INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER),
   updated_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
 );
 
 ALTER TABLE work_items ADD COLUMN IF NOT EXISTS source_working_memory_id INTEGER;
+ALTER TABLE work_items ADD COLUMN IF NOT EXISTS visibility_class TEXT NOT NULL DEFAULT 'private';
+ALTER TABLE work_items ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
 
 CREATE INDEX IF NOT EXISTS idx_wi_scope ON work_items (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
 
@@ -431,6 +439,7 @@ CREATE TABLE IF NOT EXISTS playbooks (
   title TEXT NOT NULL,
   description TEXT NOT NULL,
   instructions TEXT NOT NULL,
+  visibility_class TEXT NOT NULL DEFAULT 'private',
   references_json JSONB NOT NULL DEFAULT '[]',
   templates JSONB NOT NULL DEFAULT '[]',
   scripts JSONB NOT NULL DEFAULT '[]',
@@ -448,6 +457,7 @@ CREATE TABLE IF NOT EXISTS playbooks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_pb_scope ON playbooks (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
+ALTER TABLE playbooks ADD COLUMN IF NOT EXISTS visibility_class TEXT NOT NULL DEFAULT 'private';
 
 -- Full-text search on playbooks
 ALTER TABLE playbooks ADD COLUMN IF NOT EXISTS search_vector TSVECTOR;
@@ -500,6 +510,7 @@ CREATE TABLE IF NOT EXISTS associations (
   target_kind TEXT NOT NULL,
   target_id INTEGER NOT NULL,
   association_type TEXT NOT NULL,
+  visibility_class TEXT NOT NULL DEFAULT 'private',
   confidence REAL NOT NULL DEFAULT 0.5,
   auto_generated BOOLEAN NOT NULL DEFAULT FALSE,
   created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER),
@@ -509,9 +520,142 @@ CREATE TABLE IF NOT EXISTS associations (
 CREATE INDEX IF NOT EXISTS idx_assoc_source ON associations (source_kind, source_id);
 CREATE INDEX IF NOT EXISTS idx_assoc_target ON associations (target_kind, target_id);
 CREATE INDEX IF NOT EXISTS idx_assoc_scope ON associations (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
+ALTER TABLE associations ADD COLUMN IF NOT EXISTS visibility_class TEXT NOT NULL DEFAULT 'private';
+
+CREATE TABLE IF NOT EXISTS memory_event_log (
+  event_id BIGSERIAL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  system_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL DEFAULT '',
+  collaboration_id TEXT NOT NULL DEFAULT '',
+  scope_id TEXT NOT NULL,
+  session_id TEXT,
+  actor_id TEXT,
+  actor_kind TEXT,
+  actor_system_id TEXT,
+  actor_display_name TEXT,
+  actor_metadata JSONB,
+  entity_kind TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  causation_id TEXT,
+  correlation_id TEXT,
+  created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
+);
+
+ALTER TABLE memory_event_log ADD COLUMN IF NOT EXISTS actor_kind TEXT;
+ALTER TABLE memory_event_log ADD COLUMN IF NOT EXISTS actor_system_id TEXT;
+ALTER TABLE memory_event_log ADD COLUMN IF NOT EXISTS actor_display_name TEXT;
+ALTER TABLE memory_event_log ADD COLUMN IF NOT EXISTS actor_metadata JSONB;
+
+CREATE INDEX IF NOT EXISTS idx_event_log_scope_created
+  ON memory_event_log (tenant_id, system_id, workspace_id, collaboration_id, scope_id, created_at, event_id);
+CREATE INDEX IF NOT EXISTS idx_event_log_entity_created
+  ON memory_event_log (entity_kind, entity_id, created_at, event_id);
+CREATE INDEX IF NOT EXISTS idx_event_log_session_created
+  ON memory_event_log (session_id, created_at, event_id);
+CREATE INDEX IF NOT EXISTS idx_event_log_correlation
+  ON memory_event_log (correlation_id);
+
+CREATE TABLE IF NOT EXISTS session_state_current (
+  tenant_id TEXT NOT NULL,
+  system_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL DEFAULT '',
+  collaboration_id TEXT NOT NULL DEFAULT '',
+  scope_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  current_objective TEXT,
+  blockers JSONB NOT NULL DEFAULT '[]',
+  assumptions JSONB NOT NULL DEFAULT '[]',
+  pending_decisions JSONB NOT NULL DEFAULT '[]',
+  active_tools JSONB NOT NULL DEFAULT '[]',
+  recent_outputs JSONB NOT NULL DEFAULT '[]',
+  updated_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER),
+  source_event_id BIGINT,
+  PRIMARY KEY (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id)
+);
+
+CREATE TABLE IF NOT EXISTS projection_watermarks (
+  projection_name TEXT PRIMARY KEY,
+  last_event_id BIGINT NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER),
+  cutover_at INTEGER,
+  metadata JSONB
+);
+
+CREATE TABLE IF NOT EXISTS work_claims_current (
+  id BIGSERIAL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  system_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL DEFAULT '',
+  collaboration_id TEXT NOT NULL DEFAULT '',
+  scope_id TEXT NOT NULL,
+  work_item_id INTEGER NOT NULL UNIQUE REFERENCES work_items(id) ON DELETE CASCADE,
+  session_id TEXT,
+  actor_kind TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  actor_system_id TEXT,
+  actor_display_name TEXT,
+  actor_metadata JSONB,
+  claim_token TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  claimed_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  released_at INTEGER,
+  release_reason TEXT,
+  source_event_id BIGINT,
+  visibility_class TEXT NOT NULL DEFAULT 'private',
+  version INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_claims_actor_status
+  ON work_claims_current (actor_kind, actor_id, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_work_claims_scope_visibility
+  ON work_claims_current (tenant_id, system_id, workspace_id, collaboration_id, scope_id, visibility_class);
+
+CREATE TABLE IF NOT EXISTS handoff_records (
+  id BIGSERIAL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  system_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL DEFAULT '',
+  collaboration_id TEXT NOT NULL DEFAULT '',
+  scope_id TEXT NOT NULL,
+  work_item_id INTEGER NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+  session_id TEXT,
+  from_actor_kind TEXT NOT NULL,
+  from_actor_id TEXT NOT NULL,
+  from_actor_system_id TEXT,
+  from_actor_display_name TEXT,
+  from_actor_metadata JSONB,
+  to_actor_kind TEXT NOT NULL,
+  to_actor_id TEXT NOT NULL,
+  to_actor_system_id TEXT,
+  to_actor_display_name TEXT,
+  to_actor_metadata JSONB,
+  summary TEXT NOT NULL,
+  context_bundle_ref TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER),
+  accepted_at INTEGER,
+  rejected_at INTEGER,
+  canceled_at INTEGER,
+  expires_at INTEGER,
+  decision_reason TEXT,
+  source_event_id BIGINT,
+  visibility_class TEXT NOT NULL DEFAULT 'private',
+  version INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_handoffs_to_actor_status
+  ON handoff_records (to_actor_kind, to_actor_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_handoffs_from_actor_status
+  ON handoff_records (from_actor_kind, from_actor_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_handoffs_work_item_status
+  ON handoff_records (work_item_id, status);
 
 -- Record all applied schema versions so upgrades are visible and auditable.
 -- ON CONFLICT DO NOTHING keeps this idempotent across repeated applies.
 INSERT INTO schema_version (version) VALUES
-  (1), (9), (10), (11), (12)
+  (1), (9), (10), (11), (12), (13), (14)
 ON CONFLICT DO NOTHING;

@@ -3,12 +3,21 @@ import {
   type CreateMemoryOptions,
 } from '../core/quick.js';
 import type { MemoryManager } from '../core/manager.js';
+import type { MemoryContext } from '../core/context.js';
 import { createMemoryRuntime, type MemoryRuntime } from '../core/runtime.js';
+import type {
+  ActorRef,
+  HandoffRecord,
+  WorkClaim,
+} from '../contracts/coordination.js';
 import { normalizeScope, type MemoryScope, type ScopeLevel } from '../contracts/identity.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type { EmbeddingAdapter } from '../contracts/embedding.js';
+import { isMemoryDomainError } from '../contracts/errors.js';
+import type { TemporalStateSnapshot, TimelineResult } from '../contracts/temporal.js';
 import type { FactType, FactConfidence, EpisodeDetailLevel, AssociationTargetKind, AssociationType } from '../contracts/types.js';
 import { ASSOCIATION_TARGET_KINDS, ASSOCIATION_TYPES } from '../contracts/types.js';
+import { ACTOR_KINDS, CONTEXT_VIEW_POLICIES, MEMORY_VISIBILITY_CLASSES } from '../contracts/coordination.js';
 import type { ProfileView, ProfileSection } from '../contracts/profile.js';
 import type { CognitiveMemoryType } from '../contracts/cognitive.js';
 import { createSQLiteAdapterWithEmbeddings } from '../adapters/sqlite/index.js';
@@ -56,6 +65,11 @@ interface McpToolResult {
 
 class McpValidationError extends Error {}
 
+const MAX_LIST_LIMIT = 100;
+const MANAGER_CACHE_LIMIT = 256;
+const SESSION_MANAGER_CACHE_LIMIT = 256;
+const RUNTIME_CACHE_LIMIT = 256;
+
 const TOOLS: McpTool[] = [
   {
     name: 'memory_store_turn',
@@ -89,6 +103,79 @@ const TOOLS: McpTool[] = [
       type: 'object',
       properties: {
         relevanceQuery: { type: 'string', description: 'Optional query to rank knowledge by relevance' },
+        includeDebug: { type: 'boolean', description: 'Include selection reasons and debug trace' },
+      },
+    },
+  },
+  {
+    name: 'memory_get_state_at',
+    description: 'Get exact temporal state and assembled context at a specific unix timestamp.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        asOf: { type: 'number', description: 'Unix timestamp to replay at' },
+        relevanceQuery: { type: 'string', description: 'Optional query to rank knowledge' },
+        includeDebug: { type: 'boolean', description: 'Include debug traces in the context payload' },
+      },
+      required: ['asOf'],
+    },
+  },
+  {
+    name: 'memory_get_timeline',
+    description: 'List memory events in chronological order.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string', description: 'Optional session filter' },
+        entityKind: {
+          type: 'string',
+          enum: ['turn', 'working_memory', 'knowledge_memory', 'work_item', 'association', 'playbook', 'playbook_revision', 'session_state'],
+          description: 'Optional entity kind filter',
+        },
+        entityId: { type: 'string', description: 'Optional entity id filter' },
+        startAt: { type: 'number', description: 'Optional start unix timestamp' },
+        endAt: { type: 'number', description: 'Optional end unix timestamp' },
+        limit: { type: 'number', description: 'Optional page size' },
+        cursor: { type: 'number', description: 'Optional event-id cursor' },
+      },
+    },
+  },
+  {
+    name: 'memory_diff_state',
+    description: 'Summarize memory events between two unix timestamps.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from: { type: 'number', description: 'Start unix timestamp (exclusive)' },
+        to: { type: 'number', description: 'End unix timestamp (inclusive)' },
+        sessionId: { type: 'string', description: 'Optional session filter' },
+        entityKind: {
+          type: 'string',
+          enum: ['turn', 'working_memory', 'knowledge_memory', 'work_item', 'association', 'playbook', 'playbook_revision', 'session_state'],
+          description: 'Optional entity kind filter',
+        },
+        entityId: { type: 'string', description: 'Optional entity id filter' },
+      },
+      required: ['from', 'to'],
+    },
+  },
+  {
+    name: 'memory_list_events',
+    description: 'List memory events in reverse chronological order for inspection.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string', description: 'Optional session filter' },
+        entityKind: {
+          type: 'string',
+          enum: ['turn', 'working_memory', 'knowledge_memory', 'work_item', 'association', 'playbook', 'playbook_revision', 'session_state'],
+          description: 'Optional entity kind filter',
+        },
+        entityId: { type: 'string', description: 'Optional entity id filter' },
+        startAt: { type: 'number', description: 'Optional start unix timestamp' },
+        endAt: { type: 'number', description: 'Optional end unix timestamp' },
+        limit: { type: 'number', description: 'Optional page size' },
+        cursor: { type: 'number', description: 'Optional event-id cursor' },
       },
     },
   },
@@ -154,6 +241,147 @@ const TOOLS: McpTool[] = [
         detail: { type: 'string', description: 'Additional detail' },
       },
       required: ['title'],
+    },
+  },
+  {
+    name: 'memory_update_work_item',
+    description: 'Update an existing work item.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'number' },
+        title: { type: 'string' },
+        detail: { type: 'string' },
+        status: { type: 'string', enum: ['open', 'in_progress', 'blocked', 'done'] },
+        visibility_class: { type: 'string', enum: ['private', 'shared_collaboration', 'workspace', 'tenant'] },
+        expectedVersion: { type: 'number' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'memory_claim_work_item',
+    description: 'Acquire or renew an exclusive claim on a work item.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workItemId: { type: 'number' },
+        actor: { type: 'object' },
+        leaseSeconds: { type: 'number' },
+      },
+      required: ['workItemId', 'actor'],
+    },
+  },
+  {
+    name: 'memory_renew_work_claim',
+    description: 'Renew an exclusive claim on a work item.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        claimId: { type: 'number' },
+        actor: { type: 'object' },
+        leaseSeconds: { type: 'number' },
+      },
+      required: ['claimId', 'actor'],
+    },
+  },
+  {
+    name: 'memory_release_work_claim',
+    description: 'Release a claimed work item.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        claimId: { type: 'number' },
+        actor: { type: 'object' },
+        reason: { type: 'string' },
+      },
+      required: ['claimId', 'actor'],
+    },
+  },
+  {
+    name: 'memory_list_work_claims',
+    description: 'List current work claims.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'memory_handoff_work_item',
+    description: 'Create a handoff for a work item.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workItemId: { type: 'number' },
+        fromActor: { type: 'object' },
+        toActor: { type: 'object' },
+        summary: { type: 'string' },
+        contextBundleRef: { type: 'string' },
+      },
+      required: ['workItemId', 'fromActor', 'toActor', 'summary'],
+    },
+  },
+  {
+    name: 'memory_accept_handoff',
+    description: 'Accept a handoff.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        handoffId: { type: 'number' },
+        actor: { type: 'object' },
+        reason: { type: 'string' },
+      },
+      required: ['handoffId', 'actor'],
+    },
+  },
+  {
+    name: 'memory_reject_handoff',
+    description: 'Reject a handoff.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        handoffId: { type: 'number' },
+        actor: { type: 'object' },
+        reason: { type: 'string' },
+      },
+      required: ['handoffId', 'actor'],
+    },
+  },
+  {
+    name: 'memory_cancel_handoff',
+    description: 'Cancel a handoff.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        handoffId: { type: 'number' },
+        actor: { type: 'object' },
+        reason: { type: 'string' },
+      },
+      required: ['handoffId', 'actor'],
+    },
+  },
+  {
+    name: 'memory_list_pending_handoffs',
+    description: 'List pending handoffs.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        direction: { type: 'string', enum: ['inbound', 'outbound', 'all'] },
+      },
+    },
+  },
+  {
+    name: 'memory_stream_changes',
+    description: 'List durable change events after an optional cursor.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cursor: { type: 'number' },
+        sessionId: { type: 'string' },
+        entityKind: { type: 'string' },
+        entityId: { type: 'string' },
+        limit: { type: 'number' },
+      },
     },
   },
   {
@@ -444,6 +672,159 @@ function jsonResult(data: unknown): McpToolResult {
   };
 }
 
+function serializeContextResponse(
+  context: MemoryContext,
+  options: { includeDebug?: boolean } = {},
+): Record<string, unknown> {
+  return {
+    currentObjective: context.currentObjective,
+    sessionState: context.sessionState,
+    activeTurnCount: context.activeTurns.length,
+    workingMemory: context.workingMemory
+      ? {
+          summary: context.workingMemory.summary,
+          key_entities: context.workingMemory.key_entities,
+          topic_tags: context.workingMemory.topic_tags,
+        }
+      : null,
+    relevantKnowledge: context.relevantKnowledge.map((knowledge) => ({
+      id: knowledge.id,
+      fact: knowledge.fact,
+      fact_type: knowledge.fact_type,
+      confidence: knowledge.confidence,
+    })),
+    activeObjectives: context.activeObjectives.map((objective) => ({
+      id: objective.id,
+      title: objective.title,
+      status: objective.status,
+      visibility_class: objective.visibility_class,
+    })),
+    associatedKnowledge: context.associatedKnowledge.map((knowledge) => ({
+      id: knowledge.id,
+      fact: knowledge.fact,
+      fact_type: knowledge.fact_type,
+      knowledge_class: knowledge.knowledge_class,
+      trust_score: knowledge.trust_score,
+    })),
+    unresolvedWork: context.unresolvedWork,
+    coordinationState: context.coordinationState
+      ? {
+          ownedClaims: context.coordinationState.ownedClaims.map(serializeWorkClaim),
+          pendingInboundHandoffs: context.coordinationState.pendingInboundHandoffs.map(
+            serializeHandoffRecord,
+          ),
+          pendingOutboundHandoffs: context.coordinationState.pendingOutboundHandoffs.map(
+            serializeHandoffRecord,
+          ),
+          sharedWorkItems: context.coordinationState.sharedWorkItems.map((item) => ({
+            id: item.id,
+            title: item.title,
+            status: item.status,
+            visibility_class: item.visibility_class,
+          })),
+        }
+      : null,
+    tokenEstimate: context.tokenEstimate,
+    ...(options.includeDebug
+      ? {
+          debugTrace: context.debugTrace,
+          knowledgeSelectionReasons: context.knowledgeSelectionReasons,
+        }
+      : {}),
+  };
+}
+
+function serializeActorRef(actor: ActorRef): Record<string, unknown> {
+  return {
+    actor_kind: actor.actor_kind,
+    actor_id: actor.actor_id,
+    system_id: actor.system_id,
+    display_name: actor.display_name,
+    metadata: actor.metadata,
+  };
+}
+
+function serializeWorkClaim(claim: WorkClaim): Record<string, unknown> {
+  return {
+    id: claim.id,
+    work_item_id: claim.work_item_id,
+    actor: serializeActorRef(claim.actor),
+    session_id: claim.session_id,
+    claim_token: claim.claim_token,
+    status: claim.status,
+    claimed_at: claim.claimed_at,
+    expires_at: claim.expires_at,
+    released_at: claim.released_at,
+    release_reason: claim.release_reason,
+    visibility_class: claim.visibility_class,
+    version: claim.version,
+  };
+}
+
+function serializeHandoffRecord(handoff: HandoffRecord): Record<string, unknown> {
+  return {
+    id: handoff.id,
+    work_item_id: handoff.work_item_id,
+    from_actor: serializeActorRef(handoff.from_actor),
+    to_actor: serializeActorRef(handoff.to_actor),
+    session_id: handoff.session_id,
+    summary: handoff.summary,
+    context_bundle_ref: handoff.context_bundle_ref,
+    status: handoff.status,
+    created_at: handoff.created_at,
+    accepted_at: handoff.accepted_at,
+    rejected_at: handoff.rejected_at,
+    canceled_at: handoff.canceled_at,
+    expires_at: handoff.expires_at,
+    decision_reason: handoff.decision_reason,
+    visibility_class: handoff.visibility_class,
+    version: handoff.version,
+  };
+}
+
+function serializeTimelineResult(result: TimelineResult): Record<string, unknown> {
+  return {
+    events: result.events,
+    nextCursor: result.nextCursor,
+  };
+}
+
+function serializeTemporalState(
+  state: TemporalStateSnapshot<MemoryContext>,
+  options: { includeDebug?: boolean } = {},
+): Record<string, unknown> {
+  return {
+    asOf: state.asOf,
+    exact: state.exact,
+    cutoverAt: state.cutoverAt,
+    watermarkEventId: state.watermarkEventId,
+    context: serializeContextResponse(state.context, {
+      includeDebug: options.includeDebug,
+    }),
+    sessionState: state.sessionState,
+    turns: state.turns,
+    workingMemory: state.workingMemory,
+    knowledge: state.knowledge,
+    workItems: state.workItems,
+    workClaims: state.workClaims.map(serializeWorkClaim),
+    handoffs: state.handoffs.map(serializeHandoffRecord),
+    coordinationState: state.coordinationState
+      ? {
+          ownedClaims: state.coordinationState.ownedClaims.map(serializeWorkClaim),
+          pendingInboundHandoffs: state.coordinationState.pendingInboundHandoffs.map(
+            serializeHandoffRecord,
+          ),
+          pendingOutboundHandoffs: state.coordinationState.pendingOutboundHandoffs.map(
+            serializeHandoffRecord,
+          ),
+          sharedWorkItems: state.coordinationState.sharedWorkItems,
+        }
+      : null,
+    associations: state.associations,
+    playbooks: state.playbooks,
+  };
+}
+
 function errorResult(message: string): McpToolResult {
   return {
     content: [{ type: 'text', text: message }],
@@ -470,6 +851,26 @@ function optionalString(value: unknown, name: string): string | undefined {
   return value;
 }
 
+function parseContextViewPolicy(value: unknown, name = 'view') {
+  if (value == null) return undefined;
+  return requireEnum(value, CONTEXT_VIEW_POLICIES, name);
+}
+
+function parseActorRef(value: unknown, name = 'actor'): ActorRef | undefined {
+  if (value == null) return undefined;
+  if (!isRecord(value)) {
+    throw new McpValidationError(`Invalid field: ${name}`);
+  }
+  return {
+    actor_kind: requireEnum(value.actor_kind, ACTOR_KINDS, `${name}.actor_kind`),
+    actor_id: requireString(value.actor_id, `${name}.actor_id`),
+    system_id: value.system_id == null ? null : requireString(value.system_id, `${name}.system_id`),
+    display_name:
+      value.display_name == null ? null : requireString(value.display_name, `${name}.display_name`),
+    metadata: isRecord(value.metadata) ? value.metadata : null,
+  };
+}
+
 function requireEnum<T extends string>(value: unknown, allowed: readonly T[], name: string): T {
   if (typeof value !== 'string' || !allowed.includes(value as T)) {
     throw new McpValidationError(`Invalid field: ${name}`);
@@ -481,6 +882,9 @@ function parseLimit(value: unknown): number | undefined {
   if (value == null) return undefined;
   if (typeof value !== 'number' || !Number.isInteger(value)) {
     throw new McpValidationError('Invalid field: limit');
+  }
+  if (value > MAX_LIST_LIMIT) {
+    throw new McpValidationError(`Invalid field: limit (maximum ${MAX_LIST_LIMIT})`);
   }
   return value;
 }
@@ -518,10 +922,30 @@ function resolveScopeInput(
 export function createMcpServerHandler(config: McpServerConfig = {}) {
   const managers = new Map<string, MemoryManager>();
   const runtimes = new Map<string, MemoryRuntime>();
+  const sessionManagers = new Map<string, MemoryManager>();
+  const sessionRuntimes = new Map<string, MemoryRuntime>();
   let adapterPromise: Promise<{
     asyncAdapter: AsyncStorageAdapter;
     embeddingAdapter?: EmbeddingAdapter;
   }> | null = null;
+
+  function touchCache<T>(
+    cache: Map<string, T>,
+    key: string,
+    value: T,
+    limit: number,
+    onEvict?: (evictedKey: string, evictedValue: T) => void,
+  ): void {
+    cache.delete(key);
+    cache.set(key, value);
+    while (cache.size > limit) {
+      const oldestEntry = cache.entries().next().value as [string, T] | undefined;
+      if (!oldestEntry) break;
+      const [oldestKey, oldestValue] = oldestEntry;
+      cache.delete(oldestKey);
+      onEvict?.(oldestKey, oldestValue);
+    }
+  }
 
   async function getAsyncAdapter(): Promise<{
     asyncAdapter: AsyncStorageAdapter;
@@ -565,10 +989,11 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
         ? `scope:${scopeInput}`
         : JSON.stringify(normalizeScope(scopeInput));
     const existing = managers.get(key);
-    if (existing) return existing;
+    if (existing) {
+      touchCache(managers, key, existing, MANAGER_CACHE_LIMIT);
+      return existing;
+    }
     const baseOptions: CreateMemoryOptions = {
-      adapter: 'sqlite',
-      path: config.dbPath ?? ':memory:',
       scope: scopeInput,
       summarizer: config.summarizer ?? 'extractive',
       extractor: config.extractor ?? 'regex',
@@ -585,7 +1010,10 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
       asyncAdapter: adapterContext.asyncAdapter,
       embeddingAdapter: adapterContext.embeddingAdapter,
     });
-    managers.set(key, manager);
+    touchCache(managers, key, manager, MANAGER_CACHE_LIMIT, (evictedKey, evictedManager) => {
+      runtimes.delete(evictedKey);
+      void evictedManager.close().catch(() => undefined);
+    });
     return manager;
   }
 
@@ -595,10 +1023,14 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
         ? `scope:${scopeInput}`
         : JSON.stringify(normalizeScope(scopeInput));
     const existing = runtimes.get(key);
-    if (existing) return existing;
+    if (existing) {
+      runtimes.delete(key);
+      runtimes.set(key, existing);
+      return existing;
+    }
     const manager = await getManager(scopeInput);
     const runtime = createMemoryRuntime(manager, { snapshotMode: true });
-    runtimes.set(key, runtime);
+    touchCache(runtimes, key, runtime, RUNTIME_CACHE_LIMIT);
     return runtime;
   }
 
@@ -608,8 +1040,6 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
    * collapses snapshots across multiple URL-named sessions. Snapshot actions
    * must route to a manager whose bound sessionId matches the caller.
    */
-  const sessionManagers = new Map<string, MemoryManager>();
-  const sessionRuntimes = new Map<string, MemoryRuntime>();
   async function getSessionRuntime(
     scopeInput: string | MemoryScope,
     sessionId: string,
@@ -620,10 +1050,12 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
         : JSON.stringify(normalizeScope(scopeInput));
     const key = `${scopeKey}|session:${sessionId}`;
     const existing = sessionRuntimes.get(key);
-    if (existing) return existing;
+    if (existing) {
+      sessionRuntimes.delete(key);
+      sessionRuntimes.set(key, existing);
+      return existing;
+    }
     const baseOptions: CreateMemoryOptions = {
-      adapter: 'sqlite',
-      path: config.dbPath ?? ':memory:',
       scope: scopeInput,
       sessionId,
       summarizer: config.summarizer ?? 'extractive',
@@ -641,9 +1073,18 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
       asyncAdapter: adapterContext.asyncAdapter,
       embeddingAdapter: adapterContext.embeddingAdapter,
     });
-    sessionManagers.set(key, manager);
+    touchCache(
+      sessionManagers,
+      key,
+      manager,
+      SESSION_MANAGER_CACHE_LIMIT,
+      (evictedKey, evictedManager) => {
+        sessionRuntimes.delete(evictedKey);
+        void evictedManager.close().catch(() => undefined);
+      },
+    );
     const runtime = createMemoryRuntime(manager, { snapshotMode: true });
-    sessionRuntimes.set(key, runtime);
+    touchCache(sessionRuntimes, key, runtime, RUNTIME_CACHE_LIMIT);
     return runtime;
   }
 
@@ -676,30 +1117,81 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
         case 'memory_get_context': {
           const context = await requestManager.getContext(
             args.relevanceQuery ? String(args.relevanceQuery) : undefined,
+            {
+              view: parseContextViewPolicy(args.view),
+              includeCoordinationState: args.includeCoordinationState === true,
+            },
           );
-          return jsonResult({
-            currentObjective: context.currentObjective,
-            activeTurnCount: context.activeTurns.length,
-            workingMemory: context.workingMemory
-              ? {
-                  summary: context.workingMemory.summary,
-                  key_entities: context.workingMemory.key_entities,
-                  topic_tags: context.workingMemory.topic_tags,
-                }
-              : null,
-            relevantKnowledge: context.relevantKnowledge.map((k) => ({
-              id: k.id,
-              fact: k.fact,
-              fact_type: k.fact_type,
-              confidence: k.confidence,
-            })),
-            activeObjectives: context.activeObjectives.map((o) => ({
-              title: o.title,
-              status: o.status,
-            })),
-            unresolvedWork: context.unresolvedWork,
-            tokenEstimate: context.tokenEstimate,
+          return jsonResult(
+            serializeContextResponse(context, {
+              includeDebug: args.includeDebug === true,
+            }),
+          );
+        }
+        case 'memory_get_state_at': {
+          const asOf = typeof args.asOf === 'number' ? args.asOf : NaN;
+          if (!Number.isFinite(asOf)) {
+            throw new McpValidationError('Missing or invalid field: asOf');
+          }
+          const state = await requestManager.getStateAt(asOf, {
+            relevanceQuery: optionalString(args.relevanceQuery, 'relevanceQuery'),
+            view: parseContextViewPolicy(args.view),
+            includeCoordinationState: args.includeCoordinationState === true,
           });
+          return jsonResult(
+            serializeTemporalState(state, {
+              includeDebug: args.includeDebug === true,
+            }),
+          );
+        }
+        case 'memory_get_timeline': {
+          const timeline = await requestManager.getTimeline({
+            sessionId: optionalString(args.sessionId, 'sessionId'),
+            entityKind: args.entityKind as never,
+            entityId: optionalString(args.entityId, 'entityId'),
+            startAt:
+              typeof args.startAt === 'number' && Number.isFinite(args.startAt)
+                ? args.startAt
+                : undefined,
+            endAt:
+              typeof args.endAt === 'number' && Number.isFinite(args.endAt)
+                ? args.endAt
+                : undefined,
+            limit: parseLimit(args.limit),
+            cursor: parseOptionalNonNegativeInteger(args.cursor, 'cursor'),
+          });
+          return jsonResult(serializeTimelineResult(timeline));
+        }
+        case 'memory_diff_state': {
+          const from = typeof args.from === 'number' ? args.from : NaN;
+          const to = typeof args.to === 'number' ? args.to : NaN;
+          if (!Number.isFinite(from) || !Number.isFinite(to)) {
+            throw new McpValidationError('Missing or invalid fields: from/to');
+          }
+          const diff = await requestManager.diffState(from, to, {
+            sessionId: optionalString(args.sessionId, 'sessionId'),
+            entityKind: args.entityKind as never,
+            entityId: optionalString(args.entityId, 'entityId'),
+          });
+          return jsonResult(diff);
+        }
+        case 'memory_list_events': {
+          const events = await requestManager.listMemoryEvents({
+            sessionId: optionalString(args.sessionId, 'sessionId'),
+            entityKind: args.entityKind as never,
+            entityId: optionalString(args.entityId, 'entityId'),
+            startAt:
+              typeof args.startAt === 'number' && Number.isFinite(args.startAt)
+                ? args.startAt
+                : undefined,
+            endAt:
+              typeof args.endAt === 'number' && Number.isFinite(args.endAt)
+                ? args.endAt
+                : undefined,
+            limit: parseLimit(args.limit),
+            cursor: parseOptionalNonNegativeInteger(args.cursor, 'cursor'),
+          });
+          return jsonResult(serializeTimelineResult(events));
         }
         case 'memory_search': {
           const results = await requestManager.search(
@@ -763,8 +1255,142 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
               | 'blocked'
               | 'done',
             optionalString(args.detail, 'detail'),
+            {
+              visibilityClass:
+                args.visibility_class == null
+                  ? undefined
+                  : requireEnum(
+                      args.visibility_class,
+                      MEMORY_VISIBILITY_CLASSES,
+                      'visibility_class',
+                    ),
+            },
           );
           return jsonResult({ tracked: true, workItemId: item.id });
+        }
+        case 'memory_update_work_item': {
+          const item = await requestManager.updateWorkItem(Number(args.id), {
+            title: args.title != null ? requireString(args.title, 'title') : undefined,
+            detail: args.detail != null ? optionalString(args.detail, 'detail') ?? null : undefined,
+            status:
+              args.status != null
+                ? (requireEnum(args.status, ['open', 'in_progress', 'blocked', 'done'], 'status') as
+                    | 'open'
+                    | 'in_progress'
+                    | 'blocked'
+                    | 'done')
+                : undefined,
+            visibility_class:
+              args.visibility_class != null
+                ? requireEnum(args.visibility_class, MEMORY_VISIBILITY_CLASSES, 'visibility_class')
+                : undefined,
+          }, {
+            expectedVersion:
+              typeof args.expectedVersion === 'number' ? args.expectedVersion : undefined,
+          });
+          return jsonResult({ workItem: item });
+        }
+        case 'memory_claim_work_item': {
+          const actor = parseActorRef(args.actor, 'actor');
+          if (!actor) throw new McpValidationError('Missing or invalid field: actor');
+          const claim = await requestManager.claimWorkItem({
+            workItemId: Number(args.workItemId),
+            actor,
+            leaseSeconds:
+              typeof args.leaseSeconds === 'number' ? args.leaseSeconds : undefined,
+          });
+          return jsonResult({ claim: serializeWorkClaim(claim) });
+        }
+        case 'memory_renew_work_claim': {
+          const actor = parseActorRef(args.actor, 'actor');
+          if (!actor) throw new McpValidationError('Missing or invalid field: actor');
+          const claim = await requestManager.renewWorkClaim(
+            Number(args.claimId),
+            actor,
+            typeof args.leaseSeconds === 'number' ? args.leaseSeconds : undefined,
+          );
+          return jsonResult({ claim: claim ? serializeWorkClaim(claim) : null });
+        }
+        case 'memory_release_work_claim': {
+          const actor = parseActorRef(args.actor, 'actor');
+          if (!actor) throw new McpValidationError('Missing or invalid field: actor');
+          const claim = await requestManager.releaseWorkClaim(
+            Number(args.claimId),
+            actor,
+            optionalString(args.reason, 'reason'),
+          );
+          return jsonResult({ claim: claim ? serializeWorkClaim(claim) : null });
+        }
+        case 'memory_list_work_claims': {
+          const claims = await requestManager.listWorkClaims();
+          return jsonResult({ claims: claims.map(serializeWorkClaim) });
+        }
+        case 'memory_handoff_work_item': {
+          const fromActor = parseActorRef(args.fromActor, 'fromActor');
+          const toActor = parseActorRef(args.toActor, 'toActor');
+          if (!fromActor || !toActor) {
+            throw new McpValidationError('Missing or invalid field: fromActor/toActor');
+          }
+          const handoff = await requestManager.handoffWorkItem({
+            workItemId: Number(args.workItemId),
+            fromActor,
+            toActor,
+            summary: requireString(args.summary, 'summary'),
+            contextBundleRef: optionalString(args.contextBundleRef, 'contextBundleRef') ?? null,
+          });
+          return jsonResult({ handoff: serializeHandoffRecord(handoff) });
+        }
+        case 'memory_accept_handoff': {
+          const actor = parseActorRef(args.actor, 'actor');
+          if (!actor) throw new McpValidationError('Missing or invalid field: actor');
+          const handoff = await requestManager.acceptHandoff(
+            Number(args.handoffId),
+            actor,
+            optionalString(args.reason, 'reason'),
+          );
+          return jsonResult({ handoff: handoff ? serializeHandoffRecord(handoff) : null });
+        }
+        case 'memory_reject_handoff': {
+          const actor = parseActorRef(args.actor, 'actor');
+          if (!actor) throw new McpValidationError('Missing or invalid field: actor');
+          const handoff = await requestManager.rejectHandoff(
+            Number(args.handoffId),
+            actor,
+            optionalString(args.reason, 'reason'),
+          );
+          return jsonResult({ handoff: handoff ? serializeHandoffRecord(handoff) : null });
+        }
+        case 'memory_cancel_handoff': {
+          const actor = parseActorRef(args.actor, 'actor');
+          if (!actor) throw new McpValidationError('Missing or invalid field: actor');
+          const handoff = await requestManager.cancelHandoff(
+            Number(args.handoffId),
+            actor,
+            optionalString(args.reason, 'reason'),
+          );
+          return jsonResult({ handoff: handoff ? serializeHandoffRecord(handoff) : null });
+        }
+        case 'memory_list_pending_handoffs': {
+          const handoffs = await requestManager.listPendingHandoffs({
+            direction:
+              args.direction == null
+                ? 'all'
+                : (requireEnum(args.direction, ['inbound', 'outbound', 'all'], 'direction') as
+                    | 'inbound'
+                    | 'outbound'
+                    | 'all'),
+          });
+          return jsonResult({ handoffs: handoffs.map(serializeHandoffRecord) });
+        }
+        case 'memory_stream_changes': {
+          const events = await requestManager.listMemoryEvents({
+            cursor: parseOptionalNonNegativeInteger(args.cursor, 'cursor'),
+            sessionId: optionalString(args.sessionId, 'sessionId'),
+            entityKind: optionalString(args.entityKind, 'entityKind') as never,
+            entityId: optionalString(args.entityId, 'entityId'),
+            limit: parseLimit(args.limit),
+          });
+          return jsonResult(serializeTimelineResult(events));
         }
         case 'memory_force_compact': {
           const result = await requestManager.forceCompact();
@@ -774,13 +1400,18 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           });
         }
         case 'memory_get_health': {
-          const context = await requestManager.getContext();
+          const [context, diagnostics] = await Promise.all([
+            requestManager.getContext(),
+            requestManager.getRuntimeDiagnostics(),
+          ]);
           return jsonResult({
             activeTurnCount: context.activeTurns.length,
             tokenEstimate: context.tokenEstimate,
             knowledgeCount: context.relevantKnowledge.length,
             objectiveCount: context.activeObjectives.length,
             unresolvedWorkCount: context.unresolvedWork.length,
+            sessionStateUpdatedAt: context.sessionState.updatedAt,
+            circuitBreakers: diagnostics.circuitBreakers,
           });
         }
         case 'memory_run_maintenance': {
@@ -992,6 +1623,9 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           return errorResult(`Unknown tool: ${name}`);
       }
     } catch (error) {
+      if (isMemoryDomainError(error)) {
+        return errorResult(`Error in ${name}: ${error.message}`);
+      }
       return errorResult(`Error in ${name}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
@@ -1002,17 +1636,24 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
     manager: undefined,
     async close() {
       const manager = await managerPromise;
+      const closedManagers = new Set<MemoryManager>();
       for (const cachedManager of managers.values()) {
+        if (closedManagers.has(cachedManager)) continue;
+        closedManagers.add(cachedManager);
         await cachedManager.close();
       }
       managers.clear();
       for (const cachedManager of sessionManagers.values()) {
+        if (closedManagers.has(cachedManager)) continue;
+        closedManagers.add(cachedManager);
         await cachedManager.close();
       }
       sessionManagers.clear();
       sessionRuntimes.clear();
       runtimes.clear();
-      await manager.close();
+      if (!closedManagers.has(manager)) {
+        await manager.close();
+      }
     },
   };
 }

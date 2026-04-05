@@ -68,7 +68,20 @@ export function createInMemoryEmbeddingAdapter(adapter: StorageAdapter): Embeddi
       return scoreKnowledge(ids, queryVector, limit, minSimilarity);
     },
 
-    deleteEmbedding(knowledgeMemoryId): void {
+    deleteEmbedding(knowledgeMemoryId, scope): void {
+      if (scope) {
+        const knowledge = adapter.getKnowledgeMemoryById(knowledgeMemoryId);
+        if (
+          !knowledge ||
+          knowledge.tenant_id !== scope.tenant_id ||
+          knowledge.system_id !== scope.system_id ||
+          (knowledge.workspace_id ?? '') !== (scope.workspace_id ?? 'default') ||
+          (knowledge.collaboration_id ?? '') !== (scope.collaboration_id ?? '') ||
+          knowledge.scope_id !== scope.scope_id
+        ) {
+          return;
+        }
+      }
       vectors.delete(knowledgeMemoryId);
     },
   };

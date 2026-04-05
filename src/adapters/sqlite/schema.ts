@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-export const CURRENT_SCHEMA_VERSION = 12;
+export const CURRENT_SCHEMA_VERSION = 14;
 
 export function createSQLiteSchema(database: Database.Database): void {
   database.pragma('journal_mode = WAL');
@@ -285,7 +285,9 @@ export function createSQLiteSchema(database: Database.Database): void {
       title                  TEXT    NOT NULL,
       detail                 TEXT,
       status                 TEXT    NOT NULL DEFAULT 'open',
+      visibility_class       TEXT    NOT NULL DEFAULT 'private',
       source_working_memory_id INTEGER REFERENCES working_memory(id),
+      version                INTEGER NOT NULL DEFAULT 1,
       created_at             INTEGER NOT NULL,
       updated_at             INTEGER NOT NULL
     );
@@ -366,6 +368,26 @@ export function createSQLiteSchema(database: Database.Database): void {
   ];
 
   for (const statement of collaborationAlterStatements) {
+    try {
+      database.exec(statement);
+    } catch {
+      // Column already exists on upgraded databases.
+    }
+  }
+
+  const coordinationAlterStatements = [
+    "ALTER TABLE knowledge_memory ADD COLUMN visibility_class TEXT NOT NULL DEFAULT 'private'",
+    "ALTER TABLE work_items ADD COLUMN visibility_class TEXT NOT NULL DEFAULT 'private'",
+    'ALTER TABLE work_items ADD COLUMN version INTEGER NOT NULL DEFAULT 1',
+    "ALTER TABLE playbooks ADD COLUMN visibility_class TEXT NOT NULL DEFAULT 'private'",
+    "ALTER TABLE associations ADD COLUMN visibility_class TEXT NOT NULL DEFAULT 'private'",
+    'ALTER TABLE memory_event_log ADD COLUMN actor_kind TEXT',
+    'ALTER TABLE memory_event_log ADD COLUMN actor_system_id TEXT',
+    'ALTER TABLE memory_event_log ADD COLUMN actor_display_name TEXT',
+    'ALTER TABLE memory_event_log ADD COLUMN actor_metadata TEXT',
+  ];
+
+  for (const statement of coordinationAlterStatements) {
     try {
       database.exec(statement);
     } catch {
@@ -482,6 +504,133 @@ export function createSQLiteSchema(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_assoc_source ON associations(source_kind, source_id);
     CREATE INDEX IF NOT EXISTS idx_assoc_target ON associations(target_kind, target_id);
     CREATE INDEX IF NOT EXISTS idx_assoc_scope ON associations(tenant_id, system_id, workspace_id, collaboration_id, scope_id);
+
+    CREATE TABLE IF NOT EXISTS memory_event_log (
+      event_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id          TEXT    NOT NULL,
+      system_id          TEXT    NOT NULL,
+      workspace_id       TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id   TEXT    NOT NULL DEFAULT 'default',
+      scope_id           TEXT    NOT NULL,
+      session_id         TEXT,
+      actor_id           TEXT,
+      actor_kind         TEXT,
+      actor_system_id    TEXT,
+      actor_display_name TEXT,
+      actor_metadata     TEXT,
+      entity_kind        TEXT    NOT NULL,
+      entity_id          TEXT    NOT NULL,
+      event_type         TEXT    NOT NULL,
+      payload            TEXT    NOT NULL DEFAULT '{}',
+      causation_id       TEXT,
+      correlation_id     TEXT,
+      created_at         INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_memory_event_scope_created
+      ON memory_event_log(tenant_id, system_id, workspace_id, collaboration_id, scope_id, created_at, event_id);
+    CREATE INDEX IF NOT EXISTS idx_memory_event_entity_created
+      ON memory_event_log(entity_kind, entity_id, created_at, event_id);
+    CREATE INDEX IF NOT EXISTS idx_memory_event_session_created
+      ON memory_event_log(session_id, created_at, event_id);
+    CREATE INDEX IF NOT EXISTS idx_memory_event_correlation
+      ON memory_event_log(correlation_id);
+
+    CREATE TABLE IF NOT EXISTS session_state_current (
+      tenant_id          TEXT    NOT NULL,
+      system_id          TEXT    NOT NULL,
+      workspace_id       TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id   TEXT    NOT NULL DEFAULT 'default',
+      scope_id           TEXT    NOT NULL,
+      session_id         TEXT    NOT NULL,
+      current_objective  TEXT,
+      blockers           TEXT    NOT NULL DEFAULT '[]',
+      assumptions        TEXT    NOT NULL DEFAULT '[]',
+      pending_decisions  TEXT    NOT NULL DEFAULT '[]',
+      active_tools       TEXT    NOT NULL DEFAULT '[]',
+      recent_outputs     TEXT    NOT NULL DEFAULT '[]',
+      updated_at         INTEGER NOT NULL,
+      source_event_id    INTEGER,
+      PRIMARY KEY (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS projection_watermarks (
+      projection_name    TEXT PRIMARY KEY,
+      last_event_id      INTEGER NOT NULL DEFAULT 0,
+      updated_at         INTEGER NOT NULL,
+      cutover_at         INTEGER,
+      metadata           TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS work_claims_current (
+      id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id          TEXT    NOT NULL,
+      system_id          TEXT    NOT NULL,
+      workspace_id       TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id   TEXT    NOT NULL DEFAULT 'default',
+      scope_id           TEXT    NOT NULL,
+      work_item_id       INTEGER NOT NULL UNIQUE REFERENCES work_items(id) ON DELETE CASCADE,
+      session_id         TEXT,
+      actor_kind         TEXT    NOT NULL,
+      actor_id           TEXT    NOT NULL,
+      actor_system_id    TEXT,
+      actor_display_name TEXT,
+      actor_metadata     TEXT,
+      claim_token        TEXT    NOT NULL,
+      status             TEXT    NOT NULL DEFAULT 'active',
+      claimed_at         INTEGER NOT NULL,
+      expires_at         INTEGER NOT NULL,
+      released_at        INTEGER,
+      release_reason     TEXT,
+      source_event_id    INTEGER,
+      visibility_class   TEXT    NOT NULL DEFAULT 'private',
+      version            INTEGER NOT NULL DEFAULT 1
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_work_claims_actor_status
+      ON work_claims_current(actor_kind, actor_id, status, expires_at);
+    CREATE INDEX IF NOT EXISTS idx_work_claims_scope_visibility
+      ON work_claims_current(tenant_id, system_id, workspace_id, collaboration_id, scope_id, visibility_class);
+
+    CREATE TABLE IF NOT EXISTS handoff_records (
+      id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id          TEXT    NOT NULL,
+      system_id          TEXT    NOT NULL,
+      workspace_id       TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id   TEXT    NOT NULL DEFAULT 'default',
+      scope_id           TEXT    NOT NULL,
+      work_item_id       INTEGER NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+      session_id         TEXT,
+      from_actor_kind    TEXT    NOT NULL,
+      from_actor_id      TEXT    NOT NULL,
+      from_actor_system_id TEXT,
+      from_actor_display_name TEXT,
+      from_actor_metadata TEXT,
+      to_actor_kind      TEXT    NOT NULL,
+      to_actor_id        TEXT    NOT NULL,
+      to_actor_system_id TEXT,
+      to_actor_display_name TEXT,
+      to_actor_metadata  TEXT,
+      summary            TEXT    NOT NULL,
+      context_bundle_ref TEXT,
+      status             TEXT    NOT NULL DEFAULT 'pending',
+      created_at         INTEGER NOT NULL,
+      accepted_at        INTEGER,
+      rejected_at        INTEGER,
+      canceled_at        INTEGER,
+      expires_at         INTEGER,
+      decision_reason    TEXT,
+      source_event_id    INTEGER,
+      visibility_class   TEXT    NOT NULL DEFAULT 'private',
+      version            INTEGER NOT NULL DEFAULT 1
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_handoffs_to_actor_status
+      ON handoff_records(to_actor_kind, to_actor_id, status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_handoffs_from_actor_status
+      ON handoff_records(from_actor_kind, from_actor_id, status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_handoffs_work_item_status
+      ON handoff_records(work_item_id, status);
   `);
 
   database
@@ -493,4 +642,62 @@ export function createSQLiteSchema(database: Database.Database): void {
          updated_at = excluded.updated_at`,
     )
     .run(CURRENT_SCHEMA_VERSION);
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS memory_event_log (
+      event_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id          TEXT    NOT NULL,
+      system_id          TEXT    NOT NULL,
+      workspace_id       TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id   TEXT    NOT NULL DEFAULT 'default',
+      scope_id           TEXT    NOT NULL,
+      session_id         TEXT,
+      actor_id           TEXT,
+      actor_kind         TEXT,
+      actor_system_id    TEXT,
+      actor_display_name TEXT,
+      actor_metadata     TEXT,
+      entity_kind        TEXT    NOT NULL,
+      entity_id          TEXT    NOT NULL,
+      event_type         TEXT    NOT NULL,
+      payload            TEXT    NOT NULL DEFAULT '{}',
+      causation_id       TEXT,
+      correlation_id     TEXT,
+      created_at         INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_memory_event_scope_created
+      ON memory_event_log(tenant_id, system_id, workspace_id, collaboration_id, scope_id, created_at, event_id);
+    CREATE INDEX IF NOT EXISTS idx_memory_event_entity_created
+      ON memory_event_log(entity_kind, entity_id, created_at, event_id);
+    CREATE INDEX IF NOT EXISTS idx_memory_event_session_created
+      ON memory_event_log(session_id, created_at, event_id);
+    CREATE INDEX IF NOT EXISTS idx_memory_event_correlation
+      ON memory_event_log(correlation_id);
+
+    CREATE TABLE IF NOT EXISTS session_state_current (
+      tenant_id          TEXT    NOT NULL,
+      system_id          TEXT    NOT NULL,
+      workspace_id       TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id   TEXT    NOT NULL DEFAULT 'default',
+      scope_id           TEXT    NOT NULL,
+      session_id         TEXT    NOT NULL,
+      current_objective  TEXT,
+      blockers           TEXT    NOT NULL DEFAULT '[]',
+      assumptions        TEXT    NOT NULL DEFAULT '[]',
+      pending_decisions  TEXT    NOT NULL DEFAULT '[]',
+      active_tools       TEXT    NOT NULL DEFAULT '[]',
+      recent_outputs     TEXT    NOT NULL DEFAULT '[]',
+      updated_at         INTEGER NOT NULL,
+      source_event_id    INTEGER,
+      PRIMARY KEY (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS projection_watermarks (
+      projection_name    TEXT PRIMARY KEY,
+      last_event_id      INTEGER NOT NULL DEFAULT 0,
+      updated_at         INTEGER NOT NULL,
+      cutover_at         INTEGER,
+      metadata           TEXT
+    );
+  `);
 }

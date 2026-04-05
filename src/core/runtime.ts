@@ -30,6 +30,7 @@ export interface SessionSnapshot {
   bootstrap: SessionBootstrap;
   context: MemoryContext;
   frozenAt: number;
+  watermarkEventId: number | null;
   profile?: Profile | null;
 }
 
@@ -138,15 +139,18 @@ export function createMemoryRuntime(
     relevanceQuery?: string,
     format?: FormatOptions,
   ): Promise<SessionSnapshot> {
+    const frozenAt = Math.floor(Date.now() / 1000);
     const [bootstrapPayload, context] = await Promise.all([
       getBootstrapPayload(relevanceQuery, format),
       manager.getContext(relevanceQuery),
     ]);
+    const latestEvents = await manager.listMemoryEvents({ limit: 1 });
     const snapshot: SessionSnapshot = {
       snapshotId: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
       bootstrap: bootstrapPayload.bootstrap,
       context,
-      frozenAt: Math.floor(Date.now() / 1000),
+      frozenAt,
+      watermarkEventId: latestEvents.events[0]?.event_id ?? null,
       profile: bootstrapPayload.bootstrap.profile ?? null,
     };
     // Deep-freeze so callers can't mutate the cached snapshot's bootstrap,

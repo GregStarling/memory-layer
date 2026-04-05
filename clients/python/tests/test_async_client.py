@@ -59,3 +59,28 @@ async def test_async_client_can_stream_events(httpx_mock) -> None:
 
     assert events[0].type == "knowledge_change"
     assert events[0].meta["action"] == "promote"
+
+
+@pytest.mark.asyncio
+async def test_async_client_supports_coordination_endpoints(httpx_mock) -> None:
+    scope = _scope()
+    httpx_mock.add_response(
+        method="GET",
+        url="http://test/v1/handoffs?tenant_id=acme&system_id=executor&scope_id=run-b&workspace_id=factory&collaboration_id=release-42",
+        json={"handoffs": []},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="http://test/v1/changes/stream?cursor=7&tenant_id=acme&system_id=executor&scope_id=run-b&workspace_id=factory&collaboration_id=release-42",
+        text='data: {"type":"connected","cursor":7}\n\ndata: {"event_id":8,"entity_kind":"handoff","entity_id":"2","event_type":"handoff.created","payload":{},"created_at":9}\n\n',
+        headers={"content-type": "text/event-stream"},
+    )
+
+    async with AsyncMemoryClient("http://test", default_scope=scope) as client:
+        handoffs = await client.list_pending_handoffs()
+        events = []
+        async for event in client.astream_changes(cursor=7):
+            events.append(event)
+
+    assert handoffs.handoffs == []
+    assert events[0].event_type == "handoff.created"

@@ -1,6 +1,6 @@
 import httpx
 
-from memory_layer_client import MemoryClient, MemoryScope
+from memory_layer_client import ActorRef, MemoryClient, MemoryScope
 
 
 def _scope() -> MemoryScope:
@@ -108,3 +108,71 @@ def test_sync_client_can_stream_events(httpx_mock) -> None:
 
     assert events[0].type == "knowledge_change"
     assert events[0].meta["action"] == "promote"
+
+
+def test_sync_client_supports_coordination_endpoints(httpx_mock) -> None:
+    scope = _scope()
+    actor = ActorRef(actor_kind="agent", actor_id="planner", system_id=None, display_name=None, metadata=None)
+    other = ActorRef(actor_kind="human", actor_id="operator", system_id=None, display_name="Op", metadata=None)
+
+    httpx_mock.add_response(
+        method="POST",
+        url="http://test/v1/work-items/12/claim",
+        json={
+            "claim": {
+                "id": 1,
+                "work_item_id": 12,
+                "actor": {"actor_kind": "agent", "actor_id": "planner"},
+                "session_id": None,
+                "claim_token": "claim-1",
+                "status": "active",
+                "claimed_at": 1,
+                "expires_at": 301,
+                "released_at": None,
+                "release_reason": None,
+                "source_event_id": 9,
+                "visibility_class": "workspace",
+                "version": 1,
+            }
+        },
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url="http://test/v1/work-items/12/handoffs",
+        json={
+            "handoff": {
+                "id": 2,
+                "work_item_id": 12,
+                "from_actor": {"actor_kind": "agent", "actor_id": "planner"},
+                "to_actor": {"actor_kind": "human", "actor_id": "operator", "display_name": "Op"},
+                "session_id": None,
+                "summary": "Take over deploy watch",
+                "context_bundle_ref": "watermark:9",
+                "status": "pending",
+                "created_at": 2,
+                "accepted_at": None,
+                "rejected_at": None,
+                "canceled_at": None,
+                "expires_at": None,
+                "decision_reason": None,
+                "source_event_id": 10,
+                "visibility_class": "workspace",
+                "version": 1,
+            }
+        },
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="http://test/v1/changes/stream?cursor=5&tenant_id=acme&system_id=planner&scope_id=run-a&workspace_id=factory&collaboration_id=release-42",
+        text='data: {"type":"connected","cursor":5}\n\ndata: {"event_id":6,"entity_kind":"work_claim","entity_id":"1","event_type":"work_claim.claimed","payload":{},"created_at":3}\n\n',
+        headers={"content-type": "text/event-stream"},
+    )
+
+    with MemoryClient("http://test", default_scope=scope) as client:
+        claim = client.claim_work_item(12, actor, lease_seconds=300)
+        handoff = client.handoff_work_item(12, actor, other, "Take over deploy watch", context_bundle_ref="watermark:9")
+        changes = list(client.stream_changes(cursor=5))
+
+    assert claim.actor.actor_id == "planner"
+    assert handoff.to_actor.actor_id == "operator"
+    assert changes[0].event_type == "work_claim.claimed"

@@ -1,12 +1,22 @@
+import { timingSafeEqual } from 'crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import {
   createMemoryWithAsyncAdapter,
   type CreateMemoryOptions,
 } from '../core/quick.js';
 import type { MemoryManager } from '../core/manager.js';
+import type { MemoryContext } from '../core/context.js';
+import type { TemporalStateSnapshot, TimelineResult } from '../contracts/temporal.js';
+import type {
+  ActorRef,
+  ContextViewPolicy,
+  HandoffRecord,
+  WorkClaim,
+} from '../contracts/coordination.js';
 import { normalizeScope, type MemoryScope, type ScopeLevel } from '../contracts/identity.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type { EmbeddingAdapter } from '../contracts/embedding.js';
+import { isMemoryDomainError } from '../contracts/errors.js';
 import {
   MEMORY_EVENT_TYPES,
   type MemoryEvent,
@@ -20,6 +30,7 @@ import type {
   AssociationType,
 } from '../contracts/types.js';
 import { EPISODE_DETAIL_LEVELS, PLAYBOOK_STATUSES, ASSOCIATION_TYPES, ASSOCIATION_TARGET_KINDS } from '../contracts/types.js';
+import { ACTOR_KINDS, CONTEXT_VIEW_POLICIES, MEMORY_VISIBILITY_CLASSES } from '../contracts/coordination.js';
 import type { CognitiveMemoryType } from '../contracts/cognitive.js';
 import type { ProfileSection, ProfileView } from '../contracts/profile.js';
 import { createSQLiteAdapterWithEmbeddings } from '../adapters/sqlite/index.js';
@@ -72,6 +83,20 @@ class HttpRequestError extends Error {
   }
 }
 
+const SESSION_SNAPSHOT_LIMIT = 1000;
+const PER_SCOPE_SESSION_SNAPSHOT_LIMIT = 10;
+const MANAGER_CACHE_LIMIT = 256;
+const SESSION_MANAGER_CACHE_LIMIT = 256;
+const MAX_LIST_LIMIT = 100;
+
+function safeSecretEquals(provided: string | string[] | undefined, expected: string): boolean {
+  if (typeof provided !== 'string') return false;
+  const providedBuffer = Buffer.from(provided);
+  const expectedBuffer = Buffer.from(expected);
+  if (providedBuffer.length !== expectedBuffer.length) return false;
+  return timingSafeEqual(providedBuffer, expectedBuffer);
+}
+
 function writeJson(res: ServerResponse, status: number, data: unknown): void {
   const body = JSON.stringify(data);
   res.writeHead(status, {
@@ -83,6 +108,164 @@ function writeJson(res: ServerResponse, status: number, data: unknown): void {
 
 function writeError(res: ServerResponse, status: number, message: string): void {
   writeJson(res, status, { error: message });
+}
+
+function serializeContextResponse(
+  context: MemoryContext,
+  options: {
+    includeDebug?: boolean;
+    includeAssociatedKnowledge?: boolean;
+  } = {},
+): Record<string, unknown> {
+  return {
+    currentObjective: context.currentObjective,
+    sessionState: context.sessionState,
+    activeTurnCount: context.activeTurns.length,
+    workingMemory: context.workingMemory
+      ? {
+          summary: context.workingMemory.summary,
+          key_entities: context.workingMemory.key_entities,
+          topic_tags: context.workingMemory.topic_tags,
+        }
+      : null,
+    relevantKnowledge: context.relevantKnowledge.map((knowledge) => ({
+      id: knowledge.id,
+      fact: knowledge.fact,
+      fact_type: knowledge.fact_type,
+      confidence: knowledge.confidence,
+    })),
+    activeObjectives: context.activeObjectives.map((objective) => ({
+      id: objective.id,
+      title: objective.title,
+      status: objective.status,
+      visibility_class: objective.visibility_class,
+    })),
+    associatedKnowledge: options.includeAssociatedKnowledge === false
+      ? undefined
+      : context.associatedKnowledge.map((knowledge) => ({
+          id: knowledge.id,
+          fact: knowledge.fact,
+          fact_type: knowledge.fact_type,
+          knowledge_class: knowledge.knowledge_class,
+          trust_score: knowledge.trust_score,
+        })),
+    unresolvedWork: context.unresolvedWork,
+    coordinationState: context.coordinationState
+      ? {
+          ownedClaims: context.coordinationState.ownedClaims.map(serializeWorkClaim),
+          pendingInboundHandoffs: context.coordinationState.pendingInboundHandoffs.map(
+            serializeHandoffRecord,
+          ),
+          pendingOutboundHandoffs: context.coordinationState.pendingOutboundHandoffs.map(
+            serializeHandoffRecord,
+          ),
+          sharedWorkItems: context.coordinationState.sharedWorkItems.map((item) => ({
+            id: item.id,
+            title: item.title,
+            status: item.status,
+            visibility_class: item.visibility_class,
+          })),
+        }
+      : null,
+    tokenEstimate: context.tokenEstimate,
+    ...(options.includeDebug
+      ? {
+          debugTrace: context.debugTrace,
+          knowledgeSelectionReasons: context.knowledgeSelectionReasons,
+        }
+      : {}),
+  };
+}
+
+function serializeActorRef(actor: ActorRef): Record<string, unknown> {
+  return {
+    actor_kind: actor.actor_kind,
+    actor_id: actor.actor_id,
+    system_id: actor.system_id,
+    display_name: actor.display_name,
+    metadata: actor.metadata,
+  };
+}
+
+function serializeWorkClaim(claim: WorkClaim): Record<string, unknown> {
+  return {
+    id: claim.id,
+    work_item_id: claim.work_item_id,
+    actor: serializeActorRef(claim.actor),
+    session_id: claim.session_id,
+    claim_token: claim.claim_token,
+    status: claim.status,
+    claimed_at: claim.claimed_at,
+    expires_at: claim.expires_at,
+    released_at: claim.released_at,
+    release_reason: claim.release_reason,
+    visibility_class: claim.visibility_class,
+    version: claim.version,
+  };
+}
+
+function serializeHandoffRecord(handoff: HandoffRecord): Record<string, unknown> {
+  return {
+    id: handoff.id,
+    work_item_id: handoff.work_item_id,
+    from_actor: serializeActorRef(handoff.from_actor),
+    to_actor: serializeActorRef(handoff.to_actor),
+    session_id: handoff.session_id,
+    summary: handoff.summary,
+    context_bundle_ref: handoff.context_bundle_ref,
+    status: handoff.status,
+    created_at: handoff.created_at,
+    accepted_at: handoff.accepted_at,
+    rejected_at: handoff.rejected_at,
+    canceled_at: handoff.canceled_at,
+    expires_at: handoff.expires_at,
+    decision_reason: handoff.decision_reason,
+    visibility_class: handoff.visibility_class,
+    version: handoff.version,
+  };
+}
+
+function serializeTimelineResult(result: TimelineResult): Record<string, unknown> {
+  return {
+    events: result.events,
+    nextCursor: result.nextCursor,
+  };
+}
+
+function serializeTemporalState(
+  state: TemporalStateSnapshot<MemoryContext>,
+  options: { includeDebug?: boolean } = {},
+): Record<string, unknown> {
+  return {
+    asOf: state.asOf,
+    exact: state.exact,
+    cutoverAt: state.cutoverAt,
+    watermarkEventId: state.watermarkEventId,
+    context: serializeContextResponse(state.context, {
+      includeDebug: options.includeDebug,
+    }),
+    sessionState: state.sessionState,
+    turns: state.turns,
+    workingMemory: state.workingMemory,
+    knowledge: state.knowledge,
+    workItems: state.workItems,
+    workClaims: state.workClaims.map(serializeWorkClaim),
+    handoffs: state.handoffs.map(serializeHandoffRecord),
+    coordinationState: state.coordinationState
+      ? {
+          ownedClaims: state.coordinationState.ownedClaims.map(serializeWorkClaim),
+          pendingInboundHandoffs: state.coordinationState.pendingInboundHandoffs.map(
+            serializeHandoffRecord,
+          ),
+          pendingOutboundHandoffs: state.coordinationState.pendingOutboundHandoffs.map(
+            serializeHandoffRecord,
+          ),
+          sharedWorkItems: state.coordinationState.sharedWorkItems,
+        }
+      : null,
+    associations: state.associations,
+    playbooks: state.playbooks,
+  };
 }
 
 async function readBody(
@@ -178,10 +361,35 @@ function requireEnum<T extends string>(value: unknown, allowed: readonly T[], na
   return value as T;
 }
 
+function parseContextViewPolicy(
+  value: string | undefined,
+  name = 'view',
+): ContextViewPolicy | undefined {
+  return value ? requireEnum(value, CONTEXT_VIEW_POLICIES, name) : undefined;
+}
+
+function parseActorRef(value: unknown, name = 'actor'): ActorRef | undefined {
+  if (value == null) return undefined;
+  if (!isRecord(value)) {
+    throw new HttpRequestError(400, `Invalid field: ${name}`);
+  }
+  return {
+    actor_kind: requireEnum(value.actor_kind, ACTOR_KINDS, `${name}.actor_kind`),
+    actor_id: requireString(value.actor_id, `${name}.actor_id`),
+    system_id: value.system_id == null ? null : requireString(value.system_id, `${name}.system_id`),
+    display_name:
+      value.display_name == null ? null : requireString(value.display_name, `${name}.display_name`),
+    metadata: isRecord(value.metadata) ? value.metadata : null,
+  };
+}
+
 function parseLimit(value: string | undefined): number | undefined {
   const parsed = parseOptionalInteger(value);
   if (value != null && parsed == null) {
     throw new HttpRequestError(400, 'Invalid limit parameter');
+  }
+  if (parsed != null && parsed > MAX_LIST_LIMIT) {
+    throw new HttpRequestError(400, `Limit parameter exceeds maximum of ${MAX_LIST_LIMIT}`);
   }
   return parsed;
 }
@@ -302,6 +510,9 @@ function matchesEventScope(event: MemoryEvent, scope: MemoryScope, level: ScopeL
   const right = normalizeScope(scope);
   if (left.tenant_id !== right.tenant_id) return false;
   if (level === 'tenant') return true;
+  // Collaboration scope is the explicit shared-memory boundary across systems,
+  // so workspace-level collaboration listeners intentionally fan out across
+  // system_id values when both sides are bound to the same collaboration.
   if (level === 'workspace' && left.collaboration_id && right.collaboration_id) {
     return left.collaboration_id === right.collaboration_id;
   }
@@ -345,20 +556,45 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
   // Managers keyed by (scope, sessionId) for snapshot endpoints that must
   // honor the URL-path session instead of the scope's bound default session.
   const sessionManagers = new Map<string, MemoryManager>();
-  const SESSION_SNAPSHOT_LIMIT = 1000;
   // Insertion-ordered LRU: Map preserves insertion order; we delete+re-set on
   // access to refresh recency and evict the oldest when the cap is exceeded.
   type SessionSnapshotCacheEntry = {
+    scopeKey: string;
     snapshotId: string;
     bootstrap: unknown;
     context: unknown;
     frozenAt: number;
+    watermarkEventId: number | null;
   };
   const sessionSnapshots = new Map<string, SessionSnapshotCacheEntry>();
+  function touchManagerCache(
+    cache: Map<string, MemoryManager>,
+    key: string,
+    manager: MemoryManager,
+    limit: number,
+  ): void {
+    cache.delete(key);
+    cache.set(key, manager);
+    while (cache.size > limit) {
+      const oldestKey = cache.keys().next().value;
+      if (!oldestKey) break;
+      const evicted = cache.get(oldestKey);
+      cache.delete(oldestKey);
+      void evicted?.close().catch(() => undefined);
+    }
+  }
   function touchSnapshot(key: string, snapshot: SessionSnapshotCacheEntry): void {
     const cachedSnapshot = cloneSnapshotValue(snapshot);
     sessionSnapshots.delete(key);
     sessionSnapshots.set(key, cachedSnapshot);
+    const scopeEntries = [...sessionSnapshots.entries()].filter(
+      ([, value]) => value.scopeKey === cachedSnapshot.scopeKey,
+    );
+    while (scopeEntries.length > PER_SCOPE_SESSION_SNAPSHOT_LIMIT) {
+      const [oldestKey] = scopeEntries.shift() ?? [];
+      if (!oldestKey) break;
+      sessionSnapshots.delete(oldestKey);
+    }
     while (sessionSnapshots.size > SESSION_SNAPSHOT_LIMIT) {
       const oldest = sessionSnapshots.keys().next().value;
       if (oldest === undefined) break;
@@ -419,11 +655,13 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
     eventTypes?: Set<MemoryEventType>;
   }>();
 
-  function createHostedManager(scopeInput: string | MemoryScope): MemoryManager {
-    const baseOptions: CreateMemoryOptions = {
-      adapter: 'sqlite',
-      path: config.dbPath ?? ':memory:',
+  function buildHostedManagerOptions(
+    scopeInput: string | MemoryScope,
+    sessionId?: string,
+  ): Omit<CreateMemoryOptions, 'adapter' | 'path'> {
+    return {
       scope: scopeInput,
+      ...(sessionId ? { sessionId } : {}),
       summarizer: config.summarizer ?? 'extractive',
       extractor: config.extractor ?? 'regex',
       preset: config.preset,
@@ -433,6 +671,12 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       crossScopeLevel: config.crossScopeLevel,
       autoDetectWorkspace: config.autoDetectWorkspace,
       structuredClient: config.structuredClient,
+    };
+  }
+
+  function createHostedManager(scopeInput: string | MemoryScope): MemoryManager {
+    const baseOptions: CreateMemoryOptions = {
+      ...buildHostedManagerOptions(scopeInput),
       onEvent: (event) => {
         if (sseClients.size === 0) return;
         const data = `data: ${JSON.stringify(event)}\n\n`;
@@ -460,11 +704,12 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         : JSON.stringify(normalizeScope(scopeInput));
     const existing = managers.get(key);
     if (existing) {
+      touchManagerCache(managers, key, existing, MANAGER_CACHE_LIMIT);
       return existing;
     }
 
     const manager = createHostedManager(scopeInput);
-    managers.set(key, manager);
+    touchManagerCache(managers, key, manager, MANAGER_CACHE_LIMIT);
     return manager;
   }
 
@@ -482,29 +727,18 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
   function getSessionManager(scopeInput: string | MemoryScope, sessionId: string): MemoryManager {
     const key = `${scopeKeyFor(scopeInput)}|session:${sessionId}`;
     const existing = sessionManagers.get(key);
-    if (existing) return existing;
+    if (existing) {
+      touchManagerCache(sessionManagers, key, existing, SESSION_MANAGER_CACHE_LIMIT);
+      return existing;
+    }
 
-    const baseOptions: CreateMemoryOptions = {
-      adapter: 'sqlite',
-      path: config.dbPath ?? ':memory:',
-      scope: scopeInput,
-      sessionId,
-      summarizer: config.summarizer ?? 'extractive',
-      extractor: config.extractor ?? 'regex',
-      preset: config.preset,
-      redactText: config.redactText,
-      qualityMode: config.qualityMode,
-      qualityTier: config.qualityTier,
-      crossScopeLevel: config.crossScopeLevel,
-      autoDetectWorkspace: config.autoDetectWorkspace,
-      structuredClient: config.structuredClient,
-    };
+    const baseOptions: CreateMemoryOptions = buildHostedManagerOptions(scopeInput, sessionId);
     const manager = createMemoryWithAsyncAdapter({
       ...baseOptions,
       asyncAdapter: adapterResources.asyncAdapter,
       embeddingAdapter: adapterResources.embeddingAdapter,
     });
-    sessionManagers.set(key, manager);
+    touchManagerCache(sessionManagers, key, manager, SESSION_MANAGER_CACHE_LIMIT);
     return manager;
   }
 
@@ -530,7 +764,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
     // Auth
     if (apiKey) {
       const auth = req.headers.authorization;
-      if (!auth || auth !== `Bearer ${apiKey}`) {
+      if (!safeSecretEquals(auth, `Bearer ${apiKey}`)) {
         writeError(res, 401, 'Unauthorized');
         return;
       }
@@ -573,37 +807,143 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // GET /v1/context
       if (path === '/v1/context' && req.method === 'GET') {
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const context = await requestManager.getContext(query.query || undefined);
-        writeJson(res, 200, {
-          currentObjective: context.currentObjective,
-          activeTurnCount: context.activeTurns.length,
-          workingMemory: context.workingMemory
-            ? {
-                summary: context.workingMemory.summary,
-                key_entities: context.workingMemory.key_entities,
-                topic_tags: context.workingMemory.topic_tags,
-              }
-            : null,
-          relevantKnowledge: context.relevantKnowledge.map((k) => ({
-            id: k.id,
-            fact: k.fact,
-            fact_type: k.fact_type,
-            confidence: k.confidence,
-          })),
-          activeObjectives: context.activeObjectives.map((o) => ({
-            title: o.title,
-            status: o.status,
-          })),
-          associatedKnowledge: (context.associatedKnowledge ?? []).map((k) => ({
-            id: k.id,
-            fact: k.fact,
-            fact_type: k.fact_type,
-            knowledge_class: k.knowledge_class,
-            trust_score: k.trust_score,
-          })),
-          unresolvedWork: context.unresolvedWork,
-          tokenEstimate: context.tokenEstimate,
+        const context = await requestManager.getContext(query.query || undefined, {
+          view: parseContextViewPolicy(query.view),
+          includeCoordinationState: query.include_coordination === 'true',
         });
+        writeJson(res, 200, serializeContextResponse(context, {
+          includeDebug: query.debug === 'true',
+        }));
+        return;
+      }
+
+      // GET /v1/state
+      if (path === '/v1/state' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const asOf = query.as_of != null ? Number(query.as_of) : undefined;
+        if (asOf == null || !Number.isFinite(asOf)) {
+          writeError(res, 400, 'Missing or invalid as_of parameter');
+          return;
+        }
+        const state = await requestManager.getStateAt(asOf, {
+          relevanceQuery: query.query || undefined,
+          view: parseContextViewPolicy(query.view),
+          includeCoordinationState: query.include_coordination === 'true',
+        });
+        writeJson(res, 200, serializeTemporalState(state, {
+          includeDebug: query.include_debug === 'true',
+        }));
+        return;
+      }
+
+      // GET /v1/timeline
+      if (path === '/v1/timeline' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const startAt = query.start_at != null ? Number(query.start_at) : undefined;
+        const endAt = query.end_at != null ? Number(query.end_at) : undefined;
+        const cursor = parseOptionalInteger(query.cursor);
+        const limit = parseLimit(query.limit);
+        if (
+          (query.start_at != null && !Number.isFinite(startAt)) ||
+          (query.end_at != null && !Number.isFinite(endAt)) ||
+          (query.cursor != null && cursor == null)
+        ) {
+          writeError(res, 400, 'Invalid timeline parameters');
+          return;
+        }
+        const timeline = await requestManager.getTimeline({
+          sessionId: query.session_id || undefined,
+          entityKind: query.entity_kind as never,
+          entityId: query.entity_id || undefined,
+          startAt,
+          endAt,
+          limit,
+          cursor,
+        });
+        writeJson(res, 200, serializeTimelineResult(timeline));
+        return;
+      }
+
+      // GET /v1/state/diff
+      if (path === '/v1/state/diff' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const from = query.from != null ? Number(query.from) : undefined;
+        const to = query.to != null ? Number(query.to) : undefined;
+        if (from == null || to == null || !Number.isFinite(from) || !Number.isFinite(to)) {
+          writeError(res, 400, 'Missing or invalid from/to parameters');
+          return;
+        }
+        const diff = await requestManager.diffState(from, to, {
+          sessionId: query.session_id || undefined,
+          entityKind: query.entity_kind as never,
+          entityId: query.entity_id || undefined,
+        });
+        writeJson(res, 200, diff);
+        return;
+      }
+
+      // GET /v1/events/log
+      if (path === '/v1/events/log' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const startAt = query.start_at != null ? Number(query.start_at) : undefined;
+        const endAt = query.end_at != null ? Number(query.end_at) : undefined;
+        const cursor = parseOptionalInteger(query.cursor);
+        const limit = parseLimit(query.limit);
+        if (
+          (query.start_at != null && !Number.isFinite(startAt)) ||
+          (query.end_at != null && !Number.isFinite(endAt)) ||
+          (query.cursor != null && cursor == null)
+        ) {
+          writeError(res, 400, 'Invalid event log parameters');
+          return;
+        }
+        const events = await requestManager.listMemoryEvents({
+          sessionId: query.session_id || undefined,
+          entityKind: query.entity_kind as never,
+          entityId: query.entity_id || undefined,
+          startAt,
+          endAt,
+          limit,
+          cursor,
+        });
+        writeJson(res, 200, serializeTimelineResult(events));
+        return;
+      }
+
+      // GET /v1/changes/stream
+      if (path === '/v1/changes/stream' && req.method === 'GET') {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        });
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        let closed = false;
+        req.on('close', () => {
+          closed = true;
+        });
+        const cursor = parseOptionalInteger(query.cursor);
+        const iterator = requestManager.streamChanges({
+          cursor,
+          sessionId: query.session_id || undefined,
+          entityKind: query.entity_kind as never,
+          entityId: query.entity_id || undefined,
+          pollIntervalMs: 250,
+        });
+        void (async () => {
+          res.write(`data: ${JSON.stringify({ type: 'connected', cursor: cursor ?? null })}\n\n`);
+          try {
+            for await (const event of iterator) {
+              if (closed) break;
+              res.write(`data: ${JSON.stringify(event)}\n\n`);
+            }
+          } catch (error) {
+            if (!closed) {
+              res.write(`data: ${JSON.stringify({ type: 'error', error: String(error) })}\n\n`);
+              res.end();
+            }
+          }
+        })();
         return;
       }
 
@@ -668,7 +1008,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // GET /v1/inspect/knowledge
       if (path === '/v1/inspect/knowledge' && req.method === 'GET') {
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const limit = parseOptionalInteger(query.limit);
+        const limit = parseLimit(query.limit);
         const cursor = parseOptionalInteger(query.cursor);
         if ((query.limit && limit == null) || (query.cursor && cursor == null)) {
           writeError(res, 400, 'Invalid pagination parameters');
@@ -698,7 +1038,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       if (path === '/v1/inspect/audits' && req.method === 'GET') {
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
         const knowledgeId = parseOptionalInteger(query.knowledge_id);
-        const limit = parseOptionalInteger(query.limit);
+        const limit = parseLimit(query.limit);
         if ((query.knowledge_id && knowledgeId == null) || (query.limit && limit == null)) {
           writeError(res, 400, 'Invalid audit inspection parameters');
           return;
@@ -714,21 +1054,73 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // GET /v1/inspect/monitor
       if (path === '/v1/inspect/monitor' && req.method === 'GET') {
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const monitor = await requestManager.getContextMonitor();
-        writeJson(res, 200, { monitor });
+        const [monitor, diagnostics] = await Promise.all([
+          requestManager.getContextMonitor(),
+          requestManager.getRuntimeDiagnostics(),
+        ]);
+        writeJson(res, 200, { monitor, diagnostics });
         return;
       }
 
       // GET /v1/inspect/compactions
       if (path === '/v1/inspect/compactions' && req.method === 'GET') {
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const limit = parseOptionalInteger(query.limit);
+        const limit = parseLimit(query.limit);
         if (query.limit && limit == null) {
           writeError(res, 400, 'Invalid compaction inspection parameters');
           return;
         }
         const logs = await requestManager.getRecentCompactionLogs(limit);
         writeJson(res, 200, { logs });
+        return;
+      }
+
+      // GET /v1/inspect/context
+      if (path === '/v1/inspect/context' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const asOf = query.as_of != null ? Number(query.as_of) : undefined;
+        if (query.as_of != null && !Number.isFinite(asOf)) {
+          writeError(res, 400, 'Invalid as_of parameter');
+          return;
+        }
+        const context = asOf != null
+          ? await requestManager.getContextAt(asOf, query.query || undefined)
+          : await requestManager.getContext(query.query || undefined);
+        writeJson(res, 200, serializeContextResponse(context, { includeDebug: true }));
+        return;
+      }
+
+      // GET /v1/inspect/session-state
+      if (path === '/v1/inspect/session-state' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const asOf = query.as_of != null ? Number(query.as_of) : undefined;
+        if (query.as_of != null && !Number.isFinite(asOf)) {
+          writeError(res, 400, 'Invalid as_of parameter');
+          return;
+        }
+        const context = asOf != null
+          ? await requestManager.getContextAt(asOf, query.query || undefined)
+          : await requestManager.getContext(query.query || undefined);
+        writeJson(res, 200, { sessionState: context.sessionState });
+        return;
+      }
+
+      // GET /v1/inspect/retrieval
+      if (path === '/v1/inspect/retrieval' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const asOf = query.as_of != null ? Number(query.as_of) : undefined;
+        if (query.as_of != null && !Number.isFinite(asOf)) {
+          writeError(res, 400, 'Invalid as_of parameter');
+          return;
+        }
+        const context = asOf != null
+          ? await requestManager.getContextAt(asOf, query.query || undefined)
+          : await requestManager.getContext(query.query || undefined);
+        writeJson(res, 200, {
+          sessionState: context.sessionState,
+          knowledgeSelectionReasons: context.knowledgeSelectionReasons,
+          debugTrace: context.debugTrace,
+        });
         return;
       }
 
@@ -776,14 +1168,169 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
             | 'blocked'
             | 'done',
           optionalString(body.detail, 'detail'),
+          {
+            visibilityClass:
+              body.visibility_class == null
+                ? undefined
+                : requireEnum(
+                    body.visibility_class,
+                    MEMORY_VISIBILITY_CLASSES,
+                    'visibility_class',
+                  ),
+          },
         );
         writeJson(res, 201, { workItemId: item.id });
         return;
       }
 
+      const workItemMatch = path.match(/^\/v1\/work-items\/(\d+)$/);
+      if (workItemMatch && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const item = await requestManager.updateWorkItem(
+          Number(workItemMatch[1]),
+          {
+            title: body.title != null ? requireString(body.title, 'title') : undefined,
+            detail: body.detail != null ? optionalString(body.detail, 'detail') ?? null : undefined,
+            status:
+              body.status != null
+                ? (requireEnum(body.status, ['open', 'in_progress', 'blocked', 'done'], 'status') as
+                    | 'open'
+                    | 'in_progress'
+                    | 'blocked'
+                    | 'done')
+                : undefined,
+            visibility_class:
+              body.visibility_class != null
+                ? requireEnum(body.visibility_class, MEMORY_VISIBILITY_CLASSES, 'visibility_class')
+                : undefined,
+          },
+          {
+            expectedVersion:
+              body.expectedVersion != null ? Number(body.expectedVersion) : undefined,
+          },
+        );
+        writeJson(res, 200, { workItem: item });
+        return;
+      }
+
+      const claimMatch = path.match(/^\/v1\/work-items\/(\d+)\/claim$/);
+      if (claimMatch && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const actor = parseActorRef(body.actor, 'actor');
+        if (!actor) {
+          writeError(res, 400, 'Missing required field: actor');
+          return;
+        }
+        const claim = await requestManager.claimWorkItem({
+          workItemId: Number(claimMatch[1]),
+          actor,
+          leaseSeconds: body.leaseSeconds != null ? Number(body.leaseSeconds) : undefined,
+        });
+        writeJson(res, 200, { claim: serializeWorkClaim(claim) });
+        return;
+      }
+
+      const renewMatch = path.match(/^\/v1\/work-claims\/(\d+)\/renew$/);
+      if (renewMatch && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const actor = parseActorRef(body.actor, 'actor');
+        if (!actor) {
+          writeError(res, 400, 'Missing required field: actor');
+          return;
+        }
+        const claim = await requestManager.renewWorkClaim(
+          Number(renewMatch[1]),
+          actor,
+          body.leaseSeconds != null ? Number(body.leaseSeconds) : undefined,
+        );
+        writeJson(res, 200, { claim: claim ? serializeWorkClaim(claim) : null });
+        return;
+      }
+
+      const releaseMatch = path.match(/^\/v1\/work-claims\/(\d+)\/release$/);
+      if (releaseMatch && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const actor = parseActorRef(body.actor, 'actor');
+        if (!actor) {
+          writeError(res, 400, 'Missing required field: actor');
+          return;
+        }
+        const claim = await requestManager.releaseWorkClaim(
+          Number(releaseMatch[1]),
+          actor,
+          optionalString(body.reason, 'reason'),
+        );
+        writeJson(res, 200, { claim: claim ? serializeWorkClaim(claim) : null });
+        return;
+      }
+
+      if (path === '/v1/work-claims' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const claims = await requestManager.listWorkClaims();
+        writeJson(res, 200, { claims: claims.map(serializeWorkClaim) });
+        return;
+      }
+
+      const handoffCreateMatch = path.match(/^\/v1\/work-items\/(\d+)\/handoffs$/);
+      if (handoffCreateMatch && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const fromActor = parseActorRef(body.from_actor, 'from_actor');
+        const toActor = parseActorRef(body.to_actor, 'to_actor');
+        if (!fromActor || !toActor) {
+          writeError(res, 400, 'Missing required field: from_actor/to_actor');
+          return;
+        }
+        const handoff = await requestManager.handoffWorkItem({
+          workItemId: Number(handoffCreateMatch[1]),
+          fromActor,
+          toActor,
+          summary: requireString(body.summary, 'summary'),
+          contextBundleRef: optionalString(body.context_bundle_ref, 'context_bundle_ref') ?? null,
+          expiresAt: body.expires_at != null ? Number(body.expires_at) : null,
+        });
+        writeJson(res, 201, { handoff: serializeHandoffRecord(handoff) });
+        return;
+      }
+
+      const handoffActionMatch = path.match(/^\/v1\/handoffs\/(\d+)\/(accept|reject|cancel)$/);
+      if (handoffActionMatch && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const actor = parseActorRef(body.actor, 'actor');
+        if (!actor) {
+          writeError(res, 400, 'Missing required field: actor');
+          return;
+        }
+        const id = Number(handoffActionMatch[1]);
+        const action = handoffActionMatch[2];
+        const reason = optionalString(body.reason, 'reason');
+        const handoff =
+          action === 'accept'
+            ? await requestManager.acceptHandoff(id, actor, reason)
+            : action === 'reject'
+              ? await requestManager.rejectHandoff(id, actor, reason)
+              : await requestManager.cancelHandoff(id, actor, reason);
+        writeJson(res, 200, { handoff: handoff ? serializeHandoffRecord(handoff) : null });
+        return;
+      }
+
+      if (path === '/v1/handoffs' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const handoffs = await requestManager.listPendingHandoffs({
+          direction: (query.direction as 'inbound' | 'outbound' | 'all' | undefined) ?? 'all',
+        });
+        writeJson(res, 200, { handoffs: handoffs.map(serializeHandoffRecord) });
+        return;
+      }
+
       // POST /v1/compact
       if (path === '/v1/compact' && req.method === 'POST') {
-        if (adminApiKey && req.headers['x-admin-key'] !== adminApiKey) {
+        if (adminApiKey && !safeSecretEquals(req.headers['x-admin-key'], adminApiKey)) {
           writeError(res, 403, 'Admin key required');
           return;
         }
@@ -800,13 +1347,18 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // GET /v1/health
       if (path === '/v1/health' && req.method === 'GET') {
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const context = await requestManager.getContext();
+        const [context, diagnostics] = await Promise.all([
+          requestManager.getContext(),
+          requestManager.getRuntimeDiagnostics(),
+        ]);
         writeJson(res, 200, {
           activeTurnCount: context.activeTurns.length,
           tokenEstimate: context.tokenEstimate,
           knowledgeCount: context.relevantKnowledge.length,
           objectiveCount: context.activeObjectives.length,
           unresolvedWorkCount: context.unresolvedWork.length,
+          sessionStateUpdatedAt: context.sessionState.updatedAt,
+          circuitBreakers: diagnostics.circuitBreakers,
         });
         return;
       }
@@ -818,7 +1370,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // POST /v1/maintenance
       if (path === '/v1/maintenance' && req.method === 'POST') {
-        if (adminApiKey && req.headers['x-admin-key'] !== adminApiKey) {
+        if (adminApiKey && !safeSecretEquals(req.headers['x-admin-key'], adminApiKey)) {
           writeError(res, 403, 'Admin key required');
           return;
         }
@@ -835,7 +1387,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       const reverificationMatch = path.match(/^\/v1\/reverification\/(\d+)$/);
       if (reverificationMatch && req.method === 'POST') {
-        if (adminApiKey && req.headers['x-admin-key'] !== adminApiKey) {
+        if (adminApiKey && !safeSecretEquals(req.headers['x-admin-key'], adminApiKey)) {
           writeError(res, 403, 'Admin key required');
           return;
         }
@@ -847,7 +1399,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // POST /v1/reverification/run
       if (path === '/v1/reverification/run' && req.method === 'POST') {
-        if (adminApiKey && req.headers['x-admin-key'] !== adminApiKey) {
+        if (adminApiKey && !safeSecretEquals(req.headers['x-admin-key'], adminApiKey)) {
           writeError(res, 403, 'Admin key required');
           return;
         }
@@ -1233,14 +1785,18 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           requestManager.getSessionBootstrap(relevanceQuery),
           requestManager.getContext(relevanceQuery),
         ]);
+        const events = await requestManager.listMemoryEvents({ limit: 1 });
         const snapshot = {
+          scopeKey,
           snapshotId: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
           bootstrap,
           context,
           frozenAt: Math.floor(Date.now() / 1000),
+          watermarkEventId: events.events[0]?.event_id ?? null,
         };
         touchSnapshot(`${scopeKey}:${sessionId}`, snapshot);
-        writeJson(res, 201, { snapshot: { ...snapshot, sessionId } });
+        const { scopeKey: _scopeKey, ...publicSnapshot } = snapshot;
+        writeJson(res, 201, { snapshot: { ...publicSnapshot, sessionId } });
         return;
       }
 
@@ -1254,7 +1810,8 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           writeError(res, 404, 'Snapshot not found');
           return;
         }
-        writeJson(res, 200, { snapshot: { ...snapshot, sessionId } });
+        const { scopeKey: _scopeKey, ...publicSnapshot } = snapshot;
+        writeJson(res, 200, { snapshot: { ...publicSnapshot, sessionId } });
         return;
       }
 
@@ -1271,14 +1828,18 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           requestManager.getSessionBootstrap(relevanceQuery),
           requestManager.getContext(relevanceQuery),
         ]);
+        const events = await requestManager.listMemoryEvents({ limit: 1 });
         const snapshot = {
+          scopeKey,
           snapshotId: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
           bootstrap,
           context,
           frozenAt: Math.floor(Date.now() / 1000),
+          watermarkEventId: events.events[0]?.event_id ?? null,
         };
         touchSnapshot(`${scopeKey}:${sessionId}`, snapshot);
-        writeJson(res, 200, { snapshot: { ...snapshot, sessionId } });
+        const { scopeKey: _scopeKey, ...publicSnapshot } = snapshot;
+        writeJson(res, 200, { snapshot: { ...publicSnapshot, sessionId } });
         return;
       }
 
@@ -1288,15 +1849,11 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         writeError(res, error.status, error.message);
         return;
       }
-      // Map resource not-found / scope-mismatch errors from the manager to 404
-      const message = error instanceof Error ? error.message : String(error);
-      if (
-        /\b(not found|does not belong)\b/i.test(message) ||
-        /^(Playbook|Association)\s+\d+\s+(not found|does not belong)/i.test(message)
-      ) {
-        writeError(res, 404, message);
+      if (isMemoryDomainError(error)) {
+        writeError(res, error.status, error.message);
         return;
       }
+      const message = error instanceof Error ? error.message : String(error);
       writeError(res, 500, message);
     }
   });

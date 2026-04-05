@@ -164,6 +164,7 @@ describe('OpenAPI contract validation — Phase 1-3 endpoints', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.unresolvedWork).toContain('Document the rollback checklist');
+    expect(body.sessionState).toBeTruthy();
     assertMatchesOpenApi('/v1/context', 'get', '200', body);
   });
 });

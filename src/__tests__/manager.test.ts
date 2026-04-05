@@ -321,6 +321,7 @@ describe('memory manager', () => {
 
     const bootstrap = await manager.getSessionBootstrap('sqlite');
     expect(bootstrap.workingMemory).toBeNull();
+    expect(bootstrap.sessionState).toBeDefined();
     expect(bootstrap.relevantKnowledge.length).toBeGreaterThan(0);
     await manager.close();
   });

@@ -96,7 +96,24 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
       Promise.resolve(adapter.getWorkItemsByTimeRange(scope, range)),
     updateWorkItemStatus: (id, status) =>
       Promise.resolve(adapter.updateWorkItemStatus(id, status)),
+    updateWorkItem: (id, patch, options) =>
+      Promise.resolve(adapter.updateWorkItem(id, patch, options)),
     deleteWorkItem: (id) => Promise.resolve(adapter.deleteWorkItem(id)),
+    claimWorkItem: (input) => Promise.resolve(adapter.claimWorkItem(input)),
+    renewWorkClaim: (claimId, actor, leaseSeconds) =>
+      Promise.resolve(adapter.renewWorkClaim(claimId, actor, leaseSeconds)),
+    releaseWorkClaim: (claimId, actor, reason) =>
+      Promise.resolve(adapter.releaseWorkClaim(claimId, actor, reason)),
+    getActiveWorkClaim: (workItemId) => Promise.resolve(adapter.getActiveWorkClaim(workItemId)),
+    listWorkClaims: (scope, options) => Promise.resolve(adapter.listWorkClaims(scope, options)),
+    createHandoff: (input) => Promise.resolve(adapter.createHandoff(input)),
+    acceptHandoff: (handoffId, actor, reason) =>
+      Promise.resolve(adapter.acceptHandoff(handoffId, actor, reason)),
+    rejectHandoff: (handoffId, actor, reason) =>
+      Promise.resolve(adapter.rejectHandoff(handoffId, actor, reason)),
+    cancelHandoff: (handoffId, actor, reason) =>
+      Promise.resolve(adapter.cancelHandoff(handoffId, actor, reason)),
+    listHandoffs: (scope, options) => Promise.resolve(adapter.listHandoffs(scope, options)),
 
     upsertContextMonitor: (input) => Promise.resolve(adapter.upsertContextMonitor(input)),
     getContextMonitor: (scope) => Promise.resolve(adapter.getContextMonitor(scope)),
@@ -121,6 +138,18 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
     getAssociationsFrom: (kind, id, scope) => Promise.resolve(adapter.getAssociationsFrom(kind, id, scope)),
     getAssociationsTo: (kind, id, scope) => Promise.resolve(adapter.getAssociationsTo(kind, id, scope)),
     deleteAssociation: (id) => Promise.resolve(adapter.deleteAssociation(id)),
+    insertMemoryEvent: (input) => Promise.resolve(adapter.insertMemoryEvent(input)),
+    listMemoryEvents: (scope, query) => Promise.resolve(adapter.listMemoryEvents(scope, query)),
+    getMemoryEventsByEntity: (scope, entityKind, entityId, query) =>
+      Promise.resolve(adapter.getMemoryEventsByEntity(scope, entityKind, entityId, query)),
+    getMemoryEventsBySession: (scope, sessionId, query) =>
+      Promise.resolve(adapter.getMemoryEventsBySession(scope, sessionId, query)),
+    getSessionState: (scope, sessionId) => Promise.resolve(adapter.getSessionState(scope, sessionId)),
+    upsertSessionState: (input) => Promise.resolve(adapter.upsertSessionState(input)),
+    getTemporalWatermark: (projectionName) =>
+      Promise.resolve(adapter.getTemporalWatermark(projectionName)),
+    upsertTemporalWatermark: (input) =>
+      Promise.resolve(adapter.upsertTemporalWatermark(input)),
 
     async transaction<T>(fn: () => Promise<T>): Promise<T> {
       // Since all underlying operations are synchronous and JavaScript is

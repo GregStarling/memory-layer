@@ -10,7 +10,7 @@ describe('MCP server handler', () => {
 
   it('lists all expected tools', () => {
     handler = createMcpServerHandler();
-    expect(handler.tools.length).toBe(24);
+    expect(handler.tools.length).toBe(39);
     const names = handler.tools.map((t) => t.name);
     expect(names).toContain('memory_store_turn');
     expect(names).toContain('memory_store_exchange');
@@ -19,6 +19,17 @@ describe('MCP server handler', () => {
     expect(names).toContain('memory_search_cross_scope');
     expect(names).toContain('memory_learn_fact');
     expect(names).toContain('memory_track_work');
+    expect(names).toContain('memory_update_work_item');
+    expect(names).toContain('memory_claim_work_item');
+    expect(names).toContain('memory_renew_work_claim');
+    expect(names).toContain('memory_release_work_claim');
+    expect(names).toContain('memory_list_work_claims');
+    expect(names).toContain('memory_handoff_work_item');
+    expect(names).toContain('memory_accept_handoff');
+    expect(names).toContain('memory_reject_handoff');
+    expect(names).toContain('memory_cancel_handoff');
+    expect(names).toContain('memory_list_pending_handoffs');
+    expect(names).toContain('memory_stream_changes');
     expect(names).toContain('memory_force_compact');
     expect(names).toContain('memory_get_health');
     expect(names).toContain('memory_run_maintenance');
@@ -52,10 +63,13 @@ describe('MCP server handler', () => {
 
     const contextResult = await handler.callTool('memory_get_context', {
       relevanceQuery: 'TypeScript',
+      includeDebug: true,
     });
     expect(contextResult.isError).toBeUndefined();
     const context = JSON.parse(contextResult.content[0].text);
     expect(context.activeTurnCount).toBeGreaterThan(0);
+    expect(context.sessionState).toBeTruthy();
+    expect(context.debugTrace).toBeTruthy();
   });
 
   it('learns facts and searches for them', async () => {
@@ -97,6 +111,15 @@ describe('MCP server handler', () => {
     expect(report.expiredWorkingMemory).toBe(0);
     expect(report.retiredKnowledge).toBe(0);
     expect(report.deletedWorkItems).toBe(0);
+  });
+
+  it('reports circuit breaker diagnostics in health output', async () => {
+    handler = createMcpServerHandler();
+
+    const result = await handler.callTool('memory_get_health', {});
+    expect(result.isError).toBeUndefined();
+    const report = JSON.parse(result.content[0].text);
+    expect(report.circuitBreakers.embeddings.state).toBeDefined();
   });
 
   it('supports scope overrides per tool call', async () => {

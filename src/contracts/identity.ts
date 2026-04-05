@@ -1,3 +1,5 @@
+import { ValidationError } from './errors.js';
+
 export const DEFAULT_WORKSPACE_ID = 'default';
 export type ScopeLevel = 'scope' | 'workspace' | 'system' | 'tenant';
 
@@ -29,7 +31,7 @@ export interface ScopeQuery {
 
 function assertScopeValue(value: string | undefined, name: keyof MemoryScope): string {
   if (!value || value.trim().length === 0) {
-    throw new Error(`Memory validation: '${name}' must not be empty`);
+    throw new ValidationError(`Memory validation: '${name}' must not be empty`);
   }
   return value.trim();
 }

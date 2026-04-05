@@ -10,10 +10,13 @@ from urllib.parse import quote, urlencode
 import httpx
 
 from .models import (
+    ActorRef,
     Association,
     AssociationGraph,
     AuditListResponse,
     ChangeListResponse,
+    HandoffListResponse,
+    HandoffRecord,
     CompactionLogListResponse,
     CompactResponse,
     ContextResponse,
@@ -24,6 +27,7 @@ from .models import (
     KnowledgeListResponse,
     MaintenanceResponse,
     MemoryEvent,
+    MemoryEventRecord,
     MemoryScope,
     MonitorResponse,
     ReadyResponse,
@@ -31,6 +35,9 @@ from .models import (
     SearchResponse,
     StoredExchange,
     StoredTurn,
+    TemporalDiffResponse,
+    TemporalEventLogResponse,
+    TemporalStateResponse,
     CognitiveSearchResult,
     EpisodeSearchResponse,
     EpisodeSummary,
@@ -41,6 +48,8 @@ from .models import (
     RevisePlaybookResult,
     SessionSnapshot,
     TrustAssessmentResponse,
+    WorkClaim,
+    WorkClaimListResponse,
 )
 
 
@@ -119,6 +128,34 @@ def _parse_sse_payload(line: str) -> Optional[MemoryEvent]:
     if not isinstance(parsed, dict):
         raise MemoryLayerError("memory-layer event stream returned a non-object payload")
     return MemoryEvent.from_dict(parsed)
+
+
+def _parse_change_sse_payload(line: str) -> Optional[MemoryEventRecord]:
+    if not line.startswith("data:"):
+        return None
+    payload = line[5:].strip()
+    if not payload:
+        return None
+    parsed = json.loads(payload)
+    if not isinstance(parsed, dict):
+        raise MemoryLayerError("memory-layer change stream returned a non-object payload")
+    if parsed.get("type") in {"connected", "error"}:
+        return None
+    return MemoryEventRecord.from_dict(parsed)
+
+
+def _actor_to_dict(actor: ActorRef) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "actor_kind": actor.actor_kind,
+        "actor_id": actor.actor_id,
+    }
+    if actor.system_id is not None:
+        payload["system_id"] = actor.system_id
+    if actor.display_name is not None:
+        payload["display_name"] = actor.display_name
+    if actor.metadata is not None:
+        payload["metadata"] = actor.metadata
+    return payload
 
 
 class MemoryClient:
@@ -226,8 +263,14 @@ class MemoryClient:
         query: Optional[str] = None,
         *,
         scope: Optional[MemoryScope] = None,
+        view: Optional[str] = None,
+        include_coordination: Optional[bool] = None,
     ) -> ContextResponse:
-        params = {"query": query}
+        params = {
+            "query": query,
+            "view": view,
+            "include_coordination": str(include_coordination).lower() if include_coordination is not None else None,
+        }
         if scope or self.default_scope:
             params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
         payload = self._request(
@@ -236,6 +279,116 @@ class MemoryClient:
             headers=_scope_headers(scope, self.default_scope),
         )
         return ContextResponse.from_dict(payload)
+
+    def get_state_at(
+        self,
+        as_of: int,
+        query: Optional[str] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+        view: Optional[str] = None,
+        include_coordination: Optional[bool] = None,
+    ) -> TemporalStateResponse:
+        params: dict[str, Any] = {
+            "as_of": as_of,
+            "query": query,
+            "view": view,
+            "include_coordination": str(include_coordination).lower() if include_coordination is not None else None,
+        }
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = self._request(
+            "GET",
+            _append_query_params("/v1/state", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return TemporalStateResponse.from_dict(payload)
+
+    def get_timeline(
+        self,
+        *,
+        session_id: Optional[str] = None,
+        entity_kind: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        start_at: Optional[int] = None,
+        end_at: Optional[int] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[int] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> TemporalEventLogResponse:
+        params: dict[str, Any] = {
+            "session_id": session_id,
+            "entity_kind": entity_kind,
+            "entity_id": entity_id,
+            "start_at": start_at,
+            "end_at": end_at,
+            "limit": limit,
+            "cursor": cursor,
+        }
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = self._request(
+            "GET",
+            _append_query_params("/v1/timeline", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return TemporalEventLogResponse.from_dict(payload)
+
+    def diff_state(
+        self,
+        from_timestamp: int,
+        to_timestamp: int,
+        *,
+        session_id: Optional[str] = None,
+        entity_kind: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> TemporalDiffResponse:
+        params: dict[str, Any] = {
+            "from": from_timestamp,
+            "to": to_timestamp,
+            "session_id": session_id,
+            "entity_kind": entity_kind,
+            "entity_id": entity_id,
+        }
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = self._request(
+            "GET",
+            _append_query_params("/v1/state/diff", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return TemporalDiffResponse.from_dict(payload)
+
+    def list_memory_events(
+        self,
+        *,
+        session_id: Optional[str] = None,
+        entity_kind: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        start_at: Optional[int] = None,
+        end_at: Optional[int] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[int] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> TemporalEventLogResponse:
+        params: dict[str, Any] = {
+            "session_id": session_id,
+            "entity_kind": entity_kind,
+            "entity_id": entity_id,
+            "start_at": start_at,
+            "end_at": end_at,
+            "limit": limit,
+            "cursor": cursor,
+        }
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = self._request(
+            "GET",
+            _append_query_params("/v1/events/log", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return TemporalEventLogResponse.from_dict(payload)
 
     def search(
         self,
@@ -304,10 +457,13 @@ class MemoryClient:
         detail: Optional[str] = None,
         *,
         scope: Optional[MemoryScope] = None,
+        visibility_class: Optional[str] = None,
     ) -> CreatedResource:
         body: dict[str, Any] = {"title": title, "kind": kind, "status": status}
         if detail:
             body["detail"] = detail
+        if visibility_class is not None:
+            body["visibility_class"] = visibility_class
         payload = self._request(
             "POST",
             "/v1/work",
@@ -315,6 +471,172 @@ class MemoryClient:
             headers=_scope_headers(scope, self.default_scope),
         )
         return CreatedResource.from_key(payload, "workItemId")
+
+    def update_work_item(
+        self,
+        work_item_id: int,
+        *,
+        title: Optional[str] = None,
+        detail: Optional[str] = None,
+        status: Optional[str] = None,
+        visibility_class: Optional[str] = None,
+        expected_version: Optional[int] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {}
+        if title is not None:
+            body["title"] = title
+        if detail is not None:
+            body["detail"] = detail
+        if status is not None:
+            body["status"] = status
+        if visibility_class is not None:
+            body["visibility_class"] = visibility_class
+        if expected_version is not None:
+            body["expectedVersion"] = expected_version
+        payload = self._request(
+            "POST",
+            f"/v1/work-items/{work_item_id}",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return dict(payload["workItem"])
+
+    def claim_work_item(
+        self,
+        work_item_id: int,
+        actor: ActorRef,
+        *,
+        lease_seconds: Optional[int] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> WorkClaim:
+        body: dict[str, Any] = {"actor": _actor_to_dict(actor)}
+        if lease_seconds is not None:
+            body["lease_seconds"] = lease_seconds
+        payload = self._request(
+            "POST",
+            f"/v1/work-items/{work_item_id}/claim",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return WorkClaim.from_dict(payload["claim"])
+
+    def renew_work_claim(
+        self,
+        claim_id: int,
+        actor: ActorRef,
+        *,
+        lease_seconds: Optional[int] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> Optional[WorkClaim]:
+        body: dict[str, Any] = {"actor": _actor_to_dict(actor)}
+        if lease_seconds is not None:
+            body["lease_seconds"] = lease_seconds
+        payload = self._request(
+            "POST",
+            f"/v1/work-claims/{claim_id}/renew",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        claim = payload.get("claim")
+        return WorkClaim.from_dict(claim) if isinstance(claim, dict) else None
+
+    def release_work_claim(
+        self,
+        claim_id: int,
+        actor: ActorRef,
+        *,
+        reason: Optional[str] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> Optional[WorkClaim]:
+        body: dict[str, Any] = {"actor": _actor_to_dict(actor)}
+        if reason is not None:
+            body["reason"] = reason
+        payload = self._request(
+            "POST",
+            f"/v1/work-claims/{claim_id}/release",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        claim = payload.get("claim")
+        return WorkClaim.from_dict(claim) if isinstance(claim, dict) else None
+
+    def list_work_claims(self, *, scope: Optional[MemoryScope] = None) -> WorkClaimListResponse:
+        params: dict[str, Any] = {}
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = self._request(
+            "GET",
+            _append_query_params("/v1/work-claims", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return WorkClaimListResponse.from_dict(payload)
+
+    def handoff_work_item(
+        self,
+        work_item_id: int,
+        from_actor: ActorRef,
+        to_actor: ActorRef,
+        summary: str,
+        *,
+        context_bundle_ref: Optional[str] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> HandoffRecord:
+        body: dict[str, Any] = {
+            "from_actor": _actor_to_dict(from_actor),
+            "to_actor": _actor_to_dict(to_actor),
+            "summary": summary,
+        }
+        if context_bundle_ref is not None:
+            body["context_bundle_ref"] = context_bundle_ref
+        payload = self._request(
+            "POST",
+            f"/v1/work-items/{work_item_id}/handoffs",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return HandoffRecord.from_dict(payload["handoff"])
+
+    def _handoff_action(
+        self,
+        handoff_id: int,
+        action: str,
+        actor: ActorRef,
+        *,
+        reason: Optional[str] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> Optional[HandoffRecord]:
+        body: dict[str, Any] = {"actor": _actor_to_dict(actor)}
+        if reason is not None:
+            body["reason"] = reason
+        payload = self._request(
+            "POST",
+            f"/v1/handoffs/{handoff_id}/{action}",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        handoff = payload.get("handoff")
+        return HandoffRecord.from_dict(handoff) if isinstance(handoff, dict) else None
+
+    def accept_handoff(self, handoff_id: int, actor: ActorRef, *, reason: Optional[str] = None, scope: Optional[MemoryScope] = None) -> Optional[HandoffRecord]:
+        return self._handoff_action(handoff_id, "accept", actor, reason=reason, scope=scope)
+
+    def reject_handoff(self, handoff_id: int, actor: ActorRef, *, reason: Optional[str] = None, scope: Optional[MemoryScope] = None) -> Optional[HandoffRecord]:
+        return self._handoff_action(handoff_id, "reject", actor, reason=reason, scope=scope)
+
+    def cancel_handoff(self, handoff_id: int, actor: ActorRef, *, reason: Optional[str] = None, scope: Optional[MemoryScope] = None) -> Optional[HandoffRecord]:
+        return self._handoff_action(handoff_id, "cancel", actor, reason=reason, scope=scope)
+
+    def list_pending_handoffs(self, *, scope: Optional[MemoryScope] = None) -> HandoffListResponse:
+        params: dict[str, Any] = {}
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = self._request(
+            "GET",
+            _append_query_params("/v1/handoffs", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return HandoffListResponse.from_dict(payload)
 
     def compact(
         self,
@@ -803,6 +1125,36 @@ class MemoryClient:
                 if event is not None:
                     yield event
 
+    def stream_changes(
+        self,
+        *,
+        cursor: Optional[int] = None,
+        session_id: Optional[str] = None,
+        entity_kind: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> Iterator[MemoryEventRecord]:
+        params: dict[str, Any] = {
+            "cursor": cursor,
+            "session_id": session_id,
+            "entity_kind": entity_kind,
+            "entity_id": entity_id,
+        }
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        path = _append_query_params("/v1/changes/stream", params)
+        headers = _scope_headers(scope, self.default_scope) or None
+        with self._client.stream("GET", path, headers=headers) as response:
+            if response.is_error:
+                raise MemoryLayerError(
+                    f"memory-layer API error {response.status_code}: {response.text}",
+                    status_code=response.status_code,
+                )
+            for line in response.iter_lines():
+                event = _parse_change_sse_payload(line)
+                if event is not None:
+                    yield event
+
     def poll_changes(
         self,
         since: str,
@@ -1057,8 +1409,14 @@ class AsyncMemoryClient:
         query: Optional[str] = None,
         *,
         scope: Optional[MemoryScope] = None,
+        view: Optional[str] = None,
+        include_coordination: Optional[bool] = None,
     ) -> ContextResponse:
-        params = {"query": query}
+        params = {
+            "query": query,
+            "view": view,
+            "include_coordination": str(include_coordination).lower() if include_coordination is not None else None,
+        }
         if scope or self.default_scope:
             params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
         payload = await self._request(
@@ -1067,6 +1425,116 @@ class AsyncMemoryClient:
             headers=_scope_headers(scope, self.default_scope),
         )
         return ContextResponse.from_dict(payload)
+
+    async def get_state_at(
+        self,
+        as_of: int,
+        query: Optional[str] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+        view: Optional[str] = None,
+        include_coordination: Optional[bool] = None,
+    ) -> TemporalStateResponse:
+        params: dict[str, Any] = {
+            "as_of": as_of,
+            "query": query,
+            "view": view,
+            "include_coordination": str(include_coordination).lower() if include_coordination is not None else None,
+        }
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = await self._request(
+            "GET",
+            _append_query_params("/v1/state", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return TemporalStateResponse.from_dict(payload)
+
+    async def get_timeline(
+        self,
+        *,
+        session_id: Optional[str] = None,
+        entity_kind: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        start_at: Optional[int] = None,
+        end_at: Optional[int] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[int] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> TemporalEventLogResponse:
+        params: dict[str, Any] = {
+            "session_id": session_id,
+            "entity_kind": entity_kind,
+            "entity_id": entity_id,
+            "start_at": start_at,
+            "end_at": end_at,
+            "limit": limit,
+            "cursor": cursor,
+        }
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = await self._request(
+            "GET",
+            _append_query_params("/v1/timeline", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return TemporalEventLogResponse.from_dict(payload)
+
+    async def diff_state(
+        self,
+        from_timestamp: int,
+        to_timestamp: int,
+        *,
+        session_id: Optional[str] = None,
+        entity_kind: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> TemporalDiffResponse:
+        params: dict[str, Any] = {
+            "from": from_timestamp,
+            "to": to_timestamp,
+            "session_id": session_id,
+            "entity_kind": entity_kind,
+            "entity_id": entity_id,
+        }
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = await self._request(
+            "GET",
+            _append_query_params("/v1/state/diff", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return TemporalDiffResponse.from_dict(payload)
+
+    async def list_memory_events(
+        self,
+        *,
+        session_id: Optional[str] = None,
+        entity_kind: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        start_at: Optional[int] = None,
+        end_at: Optional[int] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[int] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> TemporalEventLogResponse:
+        params: dict[str, Any] = {
+            "session_id": session_id,
+            "entity_kind": entity_kind,
+            "entity_id": entity_id,
+            "start_at": start_at,
+            "end_at": end_at,
+            "limit": limit,
+            "cursor": cursor,
+        }
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = await self._request(
+            "GET",
+            _append_query_params("/v1/events/log", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return TemporalEventLogResponse.from_dict(payload)
 
     async def search(
         self,
@@ -1135,10 +1603,13 @@ class AsyncMemoryClient:
         detail: Optional[str] = None,
         *,
         scope: Optional[MemoryScope] = None,
+        visibility_class: Optional[str] = None,
     ) -> CreatedResource:
         body: dict[str, Any] = {"title": title, "kind": kind, "status": status}
         if detail:
             body["detail"] = detail
+        if visibility_class is not None:
+            body["visibility_class"] = visibility_class
         payload = await self._request(
             "POST",
             "/v1/work",
@@ -1146,6 +1617,178 @@ class AsyncMemoryClient:
             headers=_scope_headers(scope, self.default_scope),
         )
         return CreatedResource.from_key(payload, "workItemId")
+
+    async def update_work_item(
+        self,
+        work_item_id: int,
+        *,
+        title: Optional[str] = None,
+        detail: Optional[str] = None,
+        status: Optional[str] = None,
+        visibility_class: Optional[str] = None,
+        expected_version: Optional[int] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {}
+        if title is not None:
+            body["title"] = title
+        if detail is not None:
+            body["detail"] = detail
+        if status is not None:
+            body["status"] = status
+        if visibility_class is not None:
+            body["visibility_class"] = visibility_class
+        if expected_version is not None:
+            body["expectedVersion"] = expected_version
+        payload = await self._request(
+            "POST",
+            f"/v1/work-items/{work_item_id}",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return dict(payload["workItem"])
+
+    async def claim_work_item(
+        self,
+        work_item_id: int,
+        actor: ActorRef,
+        *,
+        lease_seconds: Optional[int] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> WorkClaim:
+        body: dict[str, Any] = {"actor": _actor_to_dict(actor)}
+        if lease_seconds is not None:
+            body["lease_seconds"] = lease_seconds
+        payload = await self._request(
+            "POST",
+            f"/v1/work-items/{work_item_id}/claim",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return WorkClaim.from_dict(payload["claim"])
+
+    async def renew_work_claim(
+        self,
+        claim_id: int,
+        actor: ActorRef,
+        *,
+        lease_seconds: Optional[int] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> Optional[WorkClaim]:
+        body: dict[str, Any] = {"actor": _actor_to_dict(actor)}
+        if lease_seconds is not None:
+            body["lease_seconds"] = lease_seconds
+        payload = await self._request(
+            "POST",
+            f"/v1/work-claims/{claim_id}/renew",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        claim = payload.get("claim")
+        return WorkClaim.from_dict(claim) if isinstance(claim, dict) else None
+
+    async def release_work_claim(
+        self,
+        claim_id: int,
+        actor: ActorRef,
+        *,
+        reason: Optional[str] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> Optional[WorkClaim]:
+        body: dict[str, Any] = {"actor": _actor_to_dict(actor)}
+        if reason is not None:
+            body["reason"] = reason
+        payload = await self._request(
+            "POST",
+            f"/v1/work-claims/{claim_id}/release",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        claim = payload.get("claim")
+        return WorkClaim.from_dict(claim) if isinstance(claim, dict) else None
+
+    async def list_work_claims(self, *, scope: Optional[MemoryScope] = None) -> WorkClaimListResponse:
+        params: dict[str, Any] = {}
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = await self._request(
+            "GET",
+            _append_query_params("/v1/work-claims", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return WorkClaimListResponse.from_dict(payload)
+
+    async def handoff_work_item(
+        self,
+        work_item_id: int,
+        from_actor: ActorRef,
+        to_actor: ActorRef,
+        summary: str,
+        *,
+        context_bundle_ref: Optional[str] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> HandoffRecord:
+        body: dict[str, Any] = {
+            "from_actor": _actor_to_dict(from_actor),
+            "to_actor": _actor_to_dict(to_actor),
+            "summary": summary,
+        }
+        if context_bundle_ref is not None:
+            body["context_bundle_ref"] = context_bundle_ref
+        payload = await self._request(
+            "POST",
+            f"/v1/work-items/{work_item_id}/handoffs",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return HandoffRecord.from_dict(payload["handoff"])
+
+    async def _handoff_action(
+        self,
+        handoff_id: int,
+        action: str,
+        actor: ActorRef,
+        *,
+        reason: Optional[str] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> Optional[HandoffRecord]:
+        body: dict[str, Any] = {"actor": _actor_to_dict(actor)}
+        if reason is not None:
+            body["reason"] = reason
+        payload = await self._request(
+            "POST",
+            f"/v1/handoffs/{handoff_id}/{action}",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        handoff = payload.get("handoff")
+        return HandoffRecord.from_dict(handoff) if isinstance(handoff, dict) else None
+
+    async def accept_handoff(
+        self, handoff_id: int, actor: ActorRef, *, reason: Optional[str] = None, scope: Optional[MemoryScope] = None
+    ) -> Optional[HandoffRecord]:
+        return await self._handoff_action(handoff_id, "accept", actor, reason=reason, scope=scope)
+
+    async def reject_handoff(
+        self, handoff_id: int, actor: ActorRef, *, reason: Optional[str] = None, scope: Optional[MemoryScope] = None
+    ) -> Optional[HandoffRecord]:
+        return await self._handoff_action(handoff_id, "reject", actor, reason=reason, scope=scope)
+
+    async def cancel_handoff(
+        self, handoff_id: int, actor: ActorRef, *, reason: Optional[str] = None, scope: Optional[MemoryScope] = None
+    ) -> Optional[HandoffRecord]:
+        return await self._handoff_action(handoff_id, "cancel", actor, reason=reason, scope=scope)
+
+    async def list_pending_handoffs(self, *, scope: Optional[MemoryScope] = None) -> HandoffListResponse:
+        params: dict[str, Any] = {}
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        payload = await self._request(
+            "GET",
+            _append_query_params("/v1/handoffs", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return HandoffListResponse.from_dict(payload)
 
     async def compact(
         self,
@@ -1631,6 +2274,36 @@ class AsyncMemoryClient:
                 )
             async for line in response.aiter_lines():
                 event = _parse_sse_payload(line)
+                if event is not None:
+                    yield event
+
+    async def astream_changes(
+        self,
+        *,
+        cursor: Optional[int] = None,
+        session_id: Optional[str] = None,
+        entity_kind: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        scope: Optional[MemoryScope] = None,
+    ) -> AsyncIterator[MemoryEventRecord]:
+        params: dict[str, Any] = {
+            "cursor": cursor,
+            "session_id": session_id,
+            "entity_kind": entity_kind,
+            "entity_id": entity_id,
+        }
+        if scope or self.default_scope:
+            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        path = _append_query_params("/v1/changes/stream", params)
+        headers = _scope_headers(scope, self.default_scope) or None
+        async with self._client.stream("GET", path, headers=headers) as response:
+            if response.is_error:
+                raise MemoryLayerError(
+                    f"memory-layer API error {response.status_code}: {response.text}",
+                    status_code=response.status_code,
+                )
+            async for line in response.aiter_lines():
+                event = _parse_change_sse_payload(line)
                 if event is not None:
                     yield event
 

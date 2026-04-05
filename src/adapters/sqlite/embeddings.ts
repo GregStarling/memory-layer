@@ -7,6 +7,8 @@ import { nowSeconds } from '../../core/validation.js';
 
 const SCOPE_WHERE =
   'km.tenant_id = ? AND km.system_id = ? AND km.workspace_id = ? AND km.collaboration_id = ? AND km.scope_id = ?';
+const KNOWLEDGE_SCOPE_WHERE =
+  'tenant_id = ? AND system_id = ? AND workspace_id = ? AND collaboration_id = ? AND scope_id = ?';
 
 function scopeWhereForLevel(scope: MemoryScope, level: ScopeLevel): string {
   const normalized = normalizeScope(scope);
@@ -24,7 +26,11 @@ function scopeParamsForLevel(scope: MemoryScope, level: ScopeLevel): string[] {
   const normalized = normalizeScope(scope);
   if (level === 'tenant') return [normalized.tenant_id];
   if (level === 'system') return [normalized.tenant_id, normalized.system_id];
-  if (level === 'workspace') return [normalized.tenant_id, normalized.system_id, normalized.workspace_id];
+  if (level === 'workspace') {
+    return normalized.collaboration_id.length > 0
+      ? [normalized.tenant_id, normalized.collaboration_id]
+      : [normalized.tenant_id, normalized.system_id, normalized.workspace_id];
+  }
   return [...scopeValues(normalized)];
 }
 
@@ -53,8 +59,19 @@ function bufferToVector(buffer: Buffer): EmbeddingVector {
   return new Float32Array(arrayBuffer);
 }
 
-function cosineSimilarity(a: EmbeddingVector, b: EmbeddingVector): number {
-  if (a.length !== b.length || a.length === 0) return 0;
+function cosineSimilarity(
+  a: EmbeddingVector,
+  b: EmbeddingVector,
+  onMismatch?: (details: { queryDimensions: number; storedDimensions: number }) => void,
+): number {
+  if (a.length !== b.length) {
+    onMismatch?.({
+      queryDimensions: a.length,
+      storedDimensions: b.length,
+    });
+    return 0;
+  }
+  if (a.length === 0) return 0;
 
   let dot = 0;
   let normA = 0;
@@ -112,11 +129,21 @@ export function createSQLiteEmbeddingAdapter(
 
       const minSimilarity = options?.minSimilarity ?? 0;
       const limit = options?.limit ?? 10;
+      const warnedDimensions = new Set<string>();
 
       return rows
         .map((row) => ({
           knowledgeMemoryId: row.knowledge_memory_id,
-          similarity: cosineSimilarity(queryVector, bufferToVector(row.vector)),
+          similarity: cosineSimilarity(queryVector, bufferToVector(row.vector), (details) => {
+            const key = `${details.queryDimensions}:${details.storedDimensions}`;
+            if (warnedDimensions.has(key)) return;
+            warnedDimensions.add(key);
+            logger?.warn('memory.embeddings.dimension_mismatch', {
+              knowledgeMemoryId: row.knowledge_memory_id,
+              queryDimensions: details.queryDimensions,
+              storedDimensions: details.storedDimensions,
+            });
+          }),
         }))
         .filter((row) => row.similarity >= minSimilarity)
         .sort((a, b) => b.similarity - a.similarity)
@@ -143,21 +170,42 @@ export function createSQLiteEmbeddingAdapter(
 
       const minSimilarity = options?.minSimilarity ?? 0;
       const limit = options?.limit ?? 10;
+      const warnedDimensions = new Set<string>();
 
       return rows
         .map((row) => ({
           knowledgeMemoryId: row.knowledge_memory_id,
-          similarity: cosineSimilarity(queryVector, bufferToVector(row.vector)),
+          similarity: cosineSimilarity(queryVector, bufferToVector(row.vector), (details) => {
+            const key = `${details.queryDimensions}:${details.storedDimensions}`;
+            if (warnedDimensions.has(key)) return;
+            warnedDimensions.add(key);
+            logger?.warn('memory.embeddings.dimension_mismatch', {
+              knowledgeMemoryId: row.knowledge_memory_id,
+              queryDimensions: details.queryDimensions,
+              storedDimensions: details.storedDimensions,
+              scopeLevel: level,
+            });
+          }),
         }))
         .filter((row) => row.similarity >= minSimilarity)
         .sort((a, b) => b.similarity - a.similarity)
         .slice(0, limit);
     },
 
-    deleteEmbedding(knowledgeMemoryId): void {
-      db.prepare('DELETE FROM knowledge_embeddings WHERE knowledge_memory_id = ?').run(
-        knowledgeMemoryId,
-      );
+    deleteEmbedding(knowledgeMemoryId, scope): void {
+      if (scope) {
+        db.prepare(
+          `DELETE FROM knowledge_embeddings
+           WHERE knowledge_memory_id = ?
+             AND knowledge_memory_id IN (
+               SELECT id
+               FROM knowledge_memory
+               WHERE id = ? AND ${KNOWLEDGE_SCOPE_WHERE}
+             )`,
+        ).run(knowledgeMemoryId, knowledgeMemoryId, ...scopeValues(scope));
+        return;
+      }
+      db.prepare('DELETE FROM knowledge_embeddings WHERE knowledge_memory_id = ?').run(knowledgeMemoryId);
     },
   };
 }

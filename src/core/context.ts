@@ -1,8 +1,15 @@
 import type { EmbeddingAdapter, EmbeddingVector } from '../contracts/embedding.js';
 import { normalizeScope, type MemoryScope, type ScopeLevel } from '../contracts/identity.js';
+import type {
+  ActorRef,
+  ContextViewPolicy,
+  CoordinationState,
+  MemoryVisibilityClass,
+} from '../contracts/coordination.js';
 import type { EventHook, Logger } from '../contracts/observability.js';
 import type { ContextMode, ContextPolicy } from '../contracts/policy.js';
 import { DEFAULT_CONTEXT_POLICY } from '../contracts/policy.js';
+import type { SessionState } from '../contracts/session-state.js';
 import type {
   Association,
   KnowledgeMemory,
@@ -23,6 +30,8 @@ export interface ContextAssemblyOptions {
   mode?: ContextMode;
   maxKnowledgeItems?: number;
   maxRecentSummaries?: number;
+  maxAssociationSeedItems?: number;
+  maxAssociatedKnowledgeItems?: number;
   relevanceQuery?: string;
   tokenBudget?: number;
   queryVector?: EmbeddingVector;
@@ -33,6 +42,9 @@ export interface ContextAssemblyOptions {
   tokenEstimator?: TokenEstimator;
   asOf?: number;
   associationMinConfidence?: number;
+  view?: ContextViewPolicy;
+  viewer?: ActorRef;
+  includeCoordinationState?: boolean;
 }
 
 export interface KnowledgeSelectionReason {
@@ -49,6 +61,46 @@ export interface KnowledgeSelectionReason {
   explanation: string;
 }
 
+export interface ExcludedKnowledgeReason {
+  knowledgeMemoryId: number;
+  reason: 'not_selected' | 'token_budget';
+  detail: string;
+}
+
+export interface AssociationExpansionTrace {
+  seedKnowledgeIds: number[];
+  candidateKnowledgeIds: number[];
+  includedKnowledgeIds: number[];
+  truncatedKnowledgeIds: number[];
+  maxSeedKnowledgeItems: number;
+  maxAssociatedKnowledgeItems: number;
+}
+
+export interface TokenTrimTrace {
+  initialTokenEstimate: number;
+  finalTokenEstimate: number;
+  droppedTurnIds: number[];
+  droppedSummaryIds: number[];
+  droppedPlaybookIds: number[];
+  droppedAssociatedKnowledgeIds: number[];
+  droppedKnowledgeIds: number[];
+}
+
+export interface ContextScopeTrace {
+  normalizedScope: MemoryScope;
+  scopeSource: 'local' | 'cross_scope';
+  scopeLevel: ScopeLevel;
+  asOf: number | null;
+}
+
+export interface ContextDebugTrace {
+  scope: ContextScopeTrace;
+  selectedKnowledge: KnowledgeSelectionReason[];
+  excludedKnowledge: ExcludedKnowledgeReason[];
+  associationExpansion: AssociationExpansionTrace;
+  tokenTrimming: TokenTrimTrace;
+}
+
 export interface MemoryContext {
   mode: ContextMode;
   activeTurns: Turn[];
@@ -61,12 +113,15 @@ export interface MemoryContext {
   durableKnowledge: KnowledgeMemory[];
   recentSummaries: WorkingMemory[];
   currentObjective: string | null;
+  sessionState: SessionState;
   activeObjectives: WorkItem[];
   activeState: string[];
   unresolvedWork: string[];
+  coordinationState: CoordinationState | null;
   relevantPlaybooks?: Playbook[];
   associatedKnowledge: KnowledgeMemory[];
   knowledgeSelectionReasons: KnowledgeSelectionReason[];
+  debugTrace: ContextDebugTrace;
   tokenEstimate: number;
 }
 
@@ -79,6 +134,122 @@ interface CandidateKnowledge {
   trustScore: number;
   classImportanceScore: number;
   baseScore: number;
+}
+
+const DEFAULT_MAX_ASSOCIATION_SEED_ITEMS = 8;
+const DEFAULT_MAX_ASSOCIATED_KNOWLEDGE_ITEMS = 12;
+const DEFAULT_RECENT_OUTPUT_LIMIT = 3;
+const BLOCKER_PATTERN = /\b(blocked|blocker|waiting on|pending|stuck|cannot proceed|can't proceed)\b/i;
+const ASSUMPTION_PATTERN = /\b(assume|assuming|assumption|likely|probably)\b/i;
+const DECISION_PATTERN = /\b(decide|decision|choose|choice|whether|should we|need to determine)\b/i;
+const TOOL_PATTERN = /\b(?:tool|command|script|query|search|fetch|deploy|build|test|lint|run)\b/i;
+
+function matchesVisibility(
+  visibilityClass: MemoryVisibilityClass,
+  item: MemoryScope,
+  scope: MemoryScope,
+): boolean {
+  const left = normalizeScope(item);
+  const right = normalizeScope(scope);
+  if (left.tenant_id !== right.tenant_id) return false;
+  switch (visibilityClass) {
+    case 'tenant':
+      return true;
+    case 'workspace':
+      return left.workspace_id === right.workspace_id;
+    case 'shared_collaboration':
+      return (
+        left.workspace_id === right.workspace_id &&
+        left.collaboration_id.length > 0 &&
+        left.collaboration_id === right.collaboration_id
+      );
+    case 'private':
+    default:
+      return (
+        left.system_id === right.system_id &&
+        left.workspace_id === right.workspace_id &&
+        left.collaboration_id === right.collaboration_id &&
+        left.scope_id === right.scope_id
+      );
+  }
+}
+
+function resolveVisibleKnowledge(
+  items: KnowledgeMemory[],
+  scope: MemoryScope,
+  view: ContextViewPolicy,
+): KnowledgeMemory[] {
+  return items.filter((item) => {
+    if (item.visibility_class === 'tenant') return false;
+    if (view === 'local_only') {
+      return item.visibility_class === 'private' && matchesVisibility('private', item, scope);
+    }
+    if (view === 'local_plus_shared_collaboration' || view === 'operator_supervisor') {
+      return (
+        (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
+        (item.visibility_class === 'shared_collaboration' &&
+          matchesVisibility('shared_collaboration', item, scope))
+      );
+    }
+    return (
+      (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
+      (item.visibility_class === 'shared_collaboration' &&
+        matchesVisibility('shared_collaboration', item, scope)) ||
+      (item.visibility_class === 'workspace' && matchesVisibility('workspace', item, scope))
+    );
+  });
+}
+
+function resolveVisibleWorkItems(
+  items: WorkItem[],
+  scope: MemoryScope,
+  view: ContextViewPolicy,
+): WorkItem[] {
+  return items.filter((item) => {
+    if (item.visibility_class === 'tenant') return false;
+    if (view === 'local_only') {
+      return item.visibility_class === 'private' && matchesVisibility('private', item, scope);
+    }
+    if (view === 'local_plus_shared_collaboration' || view === 'operator_supervisor') {
+      return (
+        (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
+        (item.visibility_class === 'shared_collaboration' &&
+          matchesVisibility('shared_collaboration', item, scope))
+      );
+    }
+    return (
+      (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
+      (item.visibility_class === 'shared_collaboration' &&
+        matchesVisibility('shared_collaboration', item, scope)) ||
+      (item.visibility_class === 'workspace' && matchesVisibility('workspace', item, scope))
+    );
+  });
+}
+
+function resolveVisiblePlaybooks(
+  items: Playbook[],
+  scope: MemoryScope,
+  view: ContextViewPolicy,
+): Playbook[] {
+  return items.filter((item) => {
+    if (item.visibility_class === 'tenant') return false;
+    if (view === 'local_only') {
+      return item.visibility_class === 'private' && matchesVisibility('private', item, scope);
+    }
+    if (view === 'local_plus_shared_collaboration' || view === 'operator_supervisor') {
+      return (
+        (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
+        (item.visibility_class === 'shared_collaboration' &&
+          matchesVisibility('shared_collaboration', item, scope))
+      );
+    }
+    return (
+      (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
+      (item.visibility_class === 'shared_collaboration' &&
+        matchesVisibility('shared_collaboration', item, scope)) ||
+      (item.visibility_class === 'workspace' && matchesVisibility('workspace', item, scope))
+    );
+  });
 }
 
 function resolveContextPolicy(options?: ContextAssemblyOptions): Required<ContextPolicy> {
@@ -174,6 +345,90 @@ function deriveUnresolvedWork(
     }
   }
   return [...unresolved];
+}
+
+function compactSnippet(text: string, maxLength = 160): string {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength - 3).trimEnd()}...`;
+}
+
+function collectSignalSnippets(
+  values: string[],
+  pattern: RegExp,
+  limit = 4,
+): string[] {
+  const matches = new Set<string>();
+  for (const value of values) {
+    if (matches.size >= limit) break;
+    if (pattern.test(value)) {
+      matches.add(compactSnippet(value));
+    }
+  }
+  return [...matches];
+}
+
+function deriveSessionState(
+  workingMemory: WorkingMemory | null,
+  activeTurns: Turn[],
+  relevantKnowledge: KnowledgeMemory[],
+  activeObjectives: WorkItem[],
+  contextWorkItems: WorkItem[],
+  recentSummaries: WorkingMemory[],
+  currentObjective: string | null,
+): SessionState {
+  const recentTexts = [
+    ...activeTurns.slice(-6).map((turn) => turn.content),
+    workingMemory?.summary ?? '',
+    ...recentSummaries.slice(0, 2).map((summary) => summary.summary),
+  ].filter((value) => value.trim().length > 0);
+  const blockers = [
+    ...contextWorkItems
+      .filter((item) => item.status === 'blocked')
+      .map((item) => compactSnippet(item.title)),
+    ...collectSignalSnippets(recentTexts, BLOCKER_PATTERN),
+  ];
+  const assumptions = collectSignalSnippets(recentTexts, ASSUMPTION_PATTERN);
+  const pendingDecisions = [
+    ...collectSignalSnippets(recentTexts, DECISION_PATTERN),
+    ...relevantKnowledge
+      .filter((knowledge) => knowledge.fact_type === 'decision')
+      .map((knowledge) => compactSnippet(knowledge.fact)),
+    ...activeObjectives
+      .filter((item) => DECISION_PATTERN.test(item.title))
+      .map((item) => compactSnippet(item.title)),
+  ];
+  const activeTools = [
+    ...new Set([
+      ...activeTurns
+        .map((turn) => turn.actor)
+        .filter((actor) => actor.length > 0 && !['user', 'assistant', 'system'].includes(actor)),
+      ...activeTurns
+        .filter((turn) => TOOL_PATTERN.test(turn.content))
+        .map((turn) => compactSnippet(turn.content, 80)),
+    ]),
+  ].slice(0, 6);
+  const recentOutputs = activeTurns
+    .filter((turn) => turn.role !== 'user')
+    .slice(-DEFAULT_RECENT_OUTPUT_LIMIT)
+    .map((turn) => compactSnippet(turn.content));
+  const updatedAt = Math.max(
+    0,
+    ...activeTurns.map((turn) => turn.created_at),
+    ...contextWorkItems.map((item) => item.updated_at),
+    ...(workingMemory ? [workingMemory.created_at] : []),
+    ...recentSummaries.map((summary) => summary.created_at),
+  );
+
+  return {
+    currentObjective,
+    blockers: [...new Set(blockers)].slice(0, 6),
+    assumptions: [...new Set(assumptions)].slice(0, 6),
+    pendingDecisions: [...new Set(pendingDecisions)].slice(0, 6),
+    activeTools,
+    recentOutputs,
+    updatedAt,
+  };
 }
 
 function isWorkItemActiveAt(item: WorkItem, asOf: number): boolean {
@@ -381,12 +636,19 @@ export async function buildMemoryContext(
   const policy = resolveContextPolicy(options);
   const tokenEstimator = options?.tokenEstimator ?? estimateTokens;
   const asOf = options?.asOf;
+  const view = options?.view;
 
   let activeTurns = await adapter.getActiveTurns(normalizedScope, options?.sessionId);
   if (asOf != null) {
     activeTurns = activeTurns.filter((turn) => turn.created_at <= asOf);
   }
-  const contextWorkItems = await getContextWorkItems(adapter, normalizedScope, asOf);
+  const contextWorkItems = view
+    ? resolveVisibleWorkItems(
+        await getContextWorkItems(adapter, normalizedScope, asOf),
+        normalizedScope,
+        view,
+      )
+    : await getContextWorkItems(adapter, normalizedScope, asOf);
   const activeObjectives = contextWorkItems.filter((item) => item.kind === 'objective');
   const workingMemoryCandidates = await adapter.getActiveWorkingMemory(
     normalizedScope,
@@ -403,7 +665,13 @@ export async function buildMemoryContext(
   const activeKnowledge = options?.crossScopeLevel
     ? await adapter.getActiveKnowledgeCrossScope(normalizedScope, options.crossScopeLevel)
     : await adapter.getActiveKnowledgeMemory(normalizedScope);
-  const temporalKnowledge = activeKnowledge.filter((item) => asOf == null || item.created_at <= asOf);
+  const temporalKnowledge = view
+    ? resolveVisibleKnowledge(
+        activeKnowledge.filter((item) => asOf == null || item.created_at <= asOf),
+        normalizedScope,
+        view,
+      )
+    : activeKnowledge.filter((item) => asOf == null || item.created_at <= asOf);
   const lexicalRanks = options?.relevanceQuery
     ? normalizeLexicalRanks(
         options.crossScopeLevel
@@ -472,7 +740,7 @@ export async function buildMemoryContext(
     options?.crossScopeLevel != null && options.crossScopeLevel !== 'scope',
   );
   const trustedCoreClasses = new Set(['identity', 'constraint', 'preference']);
-  let trustedCoreMemory = selectKnowledge(
+  const trustedCoreSelection = selectKnowledge(
     candidates.filter(
       (candidate) =>
         candidate.item.knowledge_state === 'trusted' &&
@@ -481,9 +749,10 @@ export async function buildMemoryContext(
     policy,
     'trusted_core',
     Math.min(policy.trustedCoreLimit, Math.max(3, Math.floor(policy.maxKnowledgeItems / 2))),
-  ).relevantKnowledge;
+  );
+  let trustedCoreMemory = trustedCoreSelection.relevantKnowledge;
   const trustedCoreIds = new Set(trustedCoreMemory.map((item) => item.id));
-  let taskRelevantKnowledge = selectKnowledge(
+  const taskRelevantSelection = selectKnowledge(
     candidates.filter(
       (candidate) =>
         candidate.item.knowledge_state === 'trusted' && !trustedCoreIds.has(candidate.item.id),
@@ -491,68 +760,67 @@ export async function buildMemoryContext(
     policy,
     'task_relevant',
     Math.min(policy.taskRelevantLimit, Math.max(0, policy.maxKnowledgeItems - trustedCoreMemory.length)),
-  ).relevantKnowledge;
-  const provisionalKnowledge = selectKnowledge(
+  );
+  let taskRelevantKnowledge = taskRelevantSelection.relevantKnowledge;
+  const provisionalSelection = selectKnowledge(
     candidates.filter((candidate) => candidate.item.knowledge_state === 'provisional'),
     policy,
     'provisional',
     4,
-  ).relevantKnowledge;
-  const disputedKnowledge = selectKnowledge(
+  );
+  const provisionalKnowledge = provisionalSelection.relevantKnowledge;
+  const disputedSelection = selectKnowledge(
     candidates.filter((candidate) => candidate.item.knowledge_state === 'disputed'),
     policy,
     'disputed',
     4,
-  ).relevantKnowledge;
+  );
+  const disputedKnowledge = disputedSelection.relevantKnowledge;
   let relevantKnowledge = [...trustedCoreMemory, ...taskRelevantKnowledge];
   let knowledgeSelectionReasons = [
-    ...selectKnowledge(
-      candidates.filter(
-        (candidate) =>
-          candidate.item.knowledge_state === 'trusted' &&
-          trustedCoreClasses.has(candidate.item.knowledge_class),
-      ),
-      policy,
-      'trusted_core',
-      trustedCoreMemory.length,
-    ).knowledgeSelectionReasons,
-    ...selectKnowledge(
-      candidates.filter(
-        (candidate) =>
-          candidate.item.knowledge_state === 'trusted' && !trustedCoreIds.has(candidate.item.id),
-      ),
-      policy,
-      'task_relevant',
-      taskRelevantKnowledge.length,
-    ).knowledgeSelectionReasons,
-    ...selectKnowledge(
-      candidates.filter((candidate) => candidate.item.knowledge_state === 'provisional'),
-      policy,
-      'provisional',
-      provisionalKnowledge.length,
-    ).knowledgeSelectionReasons,
-    ...selectKnowledge(
-      candidates.filter((candidate) => candidate.item.knowledge_state === 'disputed'),
-      policy,
-      'disputed',
-      disputedKnowledge.length,
-    ).knowledgeSelectionReasons,
+    ...trustedCoreSelection.knowledgeSelectionReasons,
+    ...taskRelevantSelection.knowledgeSelectionReasons,
+    ...provisionalSelection.knowledgeSelectionReasons,
+    ...disputedSelection.knowledgeSelectionReasons,
   ];
+  const initiallySelectedIds = new Set(relevantKnowledge.map((item) => item.id));
+  const excludedKnowledge: ExcludedKnowledgeReason[] = candidates
+    .filter((candidate) => !initiallySelectedIds.has(candidate.item.id))
+    .map((candidate) => ({
+      knowledgeMemoryId: candidate.item.id,
+      reason: 'not_selected',
+      detail: `excluded:${candidate.item.knowledge_state}:${candidate.item.knowledge_class}`,
+    }));
 
   let relevantPlaybooks: Playbook[] = options?.relevanceQuery
     ? (await adapter.searchPlaybooks(normalizedScope, options.relevanceQuery, { limit: 3, activeOnly: true }))
         .map((hit) => hit.item)
     : [];
+  relevantPlaybooks = view
+    ? resolveVisiblePlaybooks(relevantPlaybooks, normalizedScope, view)
+    : relevantPlaybooks;
 
   // Single-hop association expansion via supports + related_to edges
   const associationMinConfidence = options?.associationMinConfidence ?? 0.3;
+  const maxAssociationSeedItems = options?.maxAssociationSeedItems ?? DEFAULT_MAX_ASSOCIATION_SEED_ITEMS;
+  const maxAssociatedKnowledgeItems =
+    options?.maxAssociatedKnowledgeItems ?? DEFAULT_MAX_ASSOCIATED_KNOWLEDGE_ITEMS;
   const selectedIds = new Set(relevantKnowledge.map((k) => k.id));
   const associatedKnowledge: KnowledgeMemory[] = [];
+  const associationTrace: AssociationExpansionTrace = {
+    seedKnowledgeIds: relevantKnowledge.slice(0, maxAssociationSeedItems).map((knowledge) => knowledge.id),
+    candidateKnowledgeIds: [],
+    includedKnowledgeIds: [],
+    truncatedKnowledgeIds: [],
+    maxSeedKnowledgeItems: maxAssociationSeedItems,
+    maxAssociatedKnowledgeItems,
+  };
   if (relevantKnowledge.length > 0) {
-    const fromPromises = relevantKnowledge.map((k) =>
+    const associationSeeds = relevantKnowledge.slice(0, maxAssociationSeedItems);
+    const fromPromises = associationSeeds.map((k) =>
       adapter.getAssociationsFrom('knowledge', k.id, normalizedScope),
     );
-    const toPromises = relevantKnowledge.map((k) =>
+    const toPromises = associationSeeds.map((k) =>
       adapter.getAssociationsTo('knowledge', k.id, normalizedScope),
     );
     const [allFromAssocs, allToAssocs] = await Promise.all([
@@ -588,7 +856,14 @@ export async function buildMemoryContext(
         }
       }
     }
-    for (const targetId of expandIds) {
+    const candidateAssociationIds = [...expandIds];
+    associationTrace.candidateKnowledgeIds = candidateAssociationIds;
+    if (candidateAssociationIds.length > maxAssociatedKnowledgeItems) {
+      associationTrace.truncatedKnowledgeIds = candidateAssociationIds.slice(
+        maxAssociatedKnowledgeItems,
+      );
+    }
+    for (const targetId of candidateAssociationIds.slice(0, maxAssociatedKnowledgeItems)) {
       const km = await adapter.getKnowledgeMemoryById(targetId);
       if (
         km &&
@@ -603,10 +878,20 @@ export async function buildMemoryContext(
         associatedKnowledge.push(km);
       }
     }
+    associationTrace.includedKnowledgeIds = associatedKnowledge.map((knowledge) => knowledge.id);
   }
 
   let trimmedSummaries = [...recentSummaries];
   let trimmedAssociated = [...associatedKnowledge];
+  const tokenTrimTrace: TokenTrimTrace = {
+    initialTokenEstimate: 0,
+    finalTokenEstimate: 0,
+    droppedTurnIds: [],
+    droppedSummaryIds: [],
+    droppedPlaybookIds: [],
+    droppedAssociatedKnowledgeIds: [],
+    droppedKnowledgeIds: [],
+  };
 
   function recomputeTokens() {
     return computeContextTokenEstimate(
@@ -616,13 +901,23 @@ export async function buildMemoryContext(
   }
 
   let tokenEstimate = recomputeTokens();
+  tokenTrimTrace.initialTokenEstimate = tokenEstimate;
 
   while (tokenEstimate > policy.tokenBudget && activeTurns.length > 0) {
+    const beforeIds = new Set(activeTurns.map((turn) => turn.id));
     activeTurns = dropLowestPriorityTurn(activeTurns);
+    const afterIds = new Set(activeTurns.map((turn) => turn.id));
+    for (const id of beforeIds) {
+      if (!afterIds.has(id)) {
+        tokenTrimTrace.droppedTurnIds.push(id);
+      }
+    }
     tokenEstimate = recomputeTokens();
   }
 
   while (tokenEstimate > policy.tokenBudget && trimmedSummaries.length > 0) {
+    const removed = trimmedSummaries[trimmedSummaries.length - 1];
+    if (removed) tokenTrimTrace.droppedSummaryIds.push(removed.id);
     trimmedSummaries = trimmedSummaries.slice(0, -1);
     tokenEstimate = recomputeTokens();
   }
@@ -641,17 +936,30 @@ export async function buildMemoryContext(
     for (let i = 1; i < sizes.length; i++) {
       if (sizes[i] > sizes[worstIdx]) worstIdx = i;
     }
+    const removed = relevantPlaybooks[worstIdx];
+    if (removed) tokenTrimTrace.droppedPlaybookIds.push(removed.id);
     relevantPlaybooks = relevantPlaybooks.filter((_, i) => i !== worstIdx);
     tokenEstimate = recomputeTokens();
   }
 
   // Trim associated knowledge before core relevant knowledge
   while (tokenEstimate > policy.tokenBudget && trimmedAssociated.length > 0) {
+    const removed = trimmedAssociated[trimmedAssociated.length - 1];
+    if (removed) tokenTrimTrace.droppedAssociatedKnowledgeIds.push(removed.id);
     trimmedAssociated = trimmedAssociated.slice(0, -1);
     tokenEstimate = recomputeTokens();
   }
 
   while (tokenEstimate > policy.tokenBudget && relevantKnowledge.length > 0) {
+    const removed = relevantKnowledge[relevantKnowledge.length - 1];
+    if (removed) {
+      tokenTrimTrace.droppedKnowledgeIds.push(removed.id);
+      excludedKnowledge.push({
+        knowledgeMemoryId: removed.id,
+        reason: 'token_budget',
+        detail: 'trimmed:token_budget',
+      });
+    }
     relevantKnowledge = relevantKnowledge.slice(0, -1);
     trustedCoreMemory = trustedCoreMemory.filter((item) => relevantKnowledge.some((entry) => entry.id === item.id));
     taskRelevantKnowledge = taskRelevantKnowledge.filter((item) =>
@@ -663,12 +971,64 @@ export async function buildMemoryContext(
     );
     tokenEstimate = recomputeTokens();
   }
+  tokenTrimTrace.finalTokenEstimate = tokenEstimate;
 
   if (policy.touchSelectedKnowledge) {
     for (const knowledge of relevantKnowledge) {
       await adapter.touchKnowledgeMemory(knowledge.id);
     }
   }
+
+  const workClaims = options?.includeCoordinationState || view
+    ? await adapter.listWorkClaims(normalizedScope, {
+        actor: options?.viewer
+          ? {
+              actor_kind: options.viewer.actor_kind,
+              actor_id: options.viewer.actor_id,
+            }
+          : undefined,
+      })
+    : [];
+  const handoffs = options?.includeCoordinationState || view
+    ? await adapter.listHandoffs(normalizedScope, {
+        actor: options?.viewer
+          ? {
+              actor_kind: options.viewer.actor_kind,
+              actor_id: options.viewer.actor_id,
+            }
+          : undefined,
+      })
+    : [];
+  const coordinationState: CoordinationState | null =
+    options?.includeCoordinationState || view
+      ? {
+          ownedClaims: options?.viewer
+            ? workClaims.filter(
+                (claim) =>
+                  claim.actor.actor_kind === options.viewer!.actor_kind &&
+                  claim.actor.actor_id === options.viewer!.actor_id &&
+                  claim.status === 'active',
+              )
+            : [],
+          pendingInboundHandoffs: options?.viewer
+            ? handoffs.filter(
+                (handoff) =>
+                  handoff.status === 'pending' &&
+                  handoff.to_actor.actor_kind === options.viewer!.actor_kind &&
+                  handoff.to_actor.actor_id === options.viewer!.actor_id,
+              )
+            : [],
+          pendingOutboundHandoffs: options?.viewer
+            ? handoffs.filter(
+                (handoff) =>
+                  handoff.status === 'pending' &&
+                  handoff.from_actor.actor_kind === options.viewer!.actor_kind &&
+                  handoff.from_actor.actor_id === options.viewer!.actor_id,
+              )
+            : [],
+          sharedWorkItems: contextWorkItems.filter((item) => item.visibility_class !== 'private'),
+        }
+      : null;
 
   const currentObjective = deriveCurrentObjective(workingMemory, activeTurns);
   const activeState = deriveActiveState(workingMemory, activeTurns);
@@ -678,6 +1038,60 @@ export async function buildMemoryContext(
     relevantKnowledge,
     contextWorkItems,
   );
+  const derivedSessionState = deriveSessionState(
+    workingMemory,
+    activeTurns,
+    relevantKnowledge,
+    activeObjectives,
+    contextWorkItems,
+    trimmedSummaries,
+    currentObjective,
+  );
+  const projectedSessionState =
+    asOf == null && options?.sessionId
+      ? await adapter.getSessionState(normalizedScope, options.sessionId)
+      : null;
+  const sessionState = projectedSessionState
+    ? {
+        currentObjective: projectedSessionState.currentObjective,
+        blockers: projectedSessionState.blockers,
+        assumptions: projectedSessionState.assumptions,
+        pendingDecisions: projectedSessionState.pendingDecisions,
+        activeTools: projectedSessionState.activeTools,
+        recentOutputs: projectedSessionState.recentOutputs,
+        updatedAt: projectedSessionState.updatedAt,
+      }
+    : derivedSessionState;
+  if (asOf == null && options?.sessionId) {
+    const watermark = await adapter.getTemporalWatermark('temporal');
+    if (
+      !projectedSessionState ||
+      projectedSessionState.updatedAt !== derivedSessionState.updatedAt ||
+      projectedSessionState.currentObjective !== derivedSessionState.currentObjective
+    ) {
+      await adapter.upsertSessionState({
+        ...normalizedScope,
+        session_id: options.sessionId,
+        ...derivedSessionState,
+        source_event_id: watermark?.last_event_id ?? null,
+      });
+    }
+  }
+  const debugTrace: ContextDebugTrace = {
+    scope: {
+      normalizedScope,
+      scopeSource:
+        options?.crossScopeLevel != null && options.crossScopeLevel !== 'scope'
+          ? 'cross_scope'
+          : 'local',
+      scopeLevel: options?.crossScopeLevel ?? 'scope',
+      asOf: asOf ?? null,
+    },
+    selectedKnowledge: knowledgeSelectionReasons,
+    excludedKnowledge,
+    associationExpansion: associationTrace,
+    tokenTrimming: tokenTrimTrace,
+  };
 
   emitMemoryEvent('context_assembly', normalizedScope, options, Date.now() - startedAt, {
     mode: policy.mode,
@@ -690,7 +1104,11 @@ export async function buildMemoryContext(
     crossScopeLevel: options?.crossScopeLevel ?? 'scope',
     currentObjective,
     unresolvedWorkCount: unresolvedWork.length,
+    sessionState,
     selectionReasons: knowledgeSelectionReasons,
+    excludedKnowledgeCount: excludedKnowledge.length,
+    associationExpansion: associationTrace,
+    tokenTrimming: tokenTrimTrace,
   });
 
   return {
@@ -705,12 +1123,15 @@ export async function buildMemoryContext(
     durableKnowledge: trustedCoreMemory,
     recentSummaries: trimmedSummaries,
     currentObjective,
+    sessionState,
     activeObjectives,
     activeState,
+    coordinationState,
     relevantPlaybooks,
     associatedKnowledge: trimmedAssociated,
     unresolvedWork,
     knowledgeSelectionReasons,
+    debugTrace,
     tokenEstimate,
   };
 }

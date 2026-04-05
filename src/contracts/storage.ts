@@ -1,4 +1,25 @@
 import type { MemoryScope, ScopeLevel } from './identity.js';
+import type {
+  ActorRef,
+  HandoffQuery,
+  HandoffRecord,
+  NewHandoffInput,
+  NewWorkClaimInput,
+  WorkClaim,
+  WorkClaimQuery,
+  WorkItemPatch,
+} from './coordination.js';
+import type {
+  MemoryEventEntityKind,
+  MemoryEventQuery,
+  MemoryEventRecord,
+  NewMemoryEventRecord,
+  NewSessionStateProjection,
+  NewTemporalProjectionWatermark,
+  SessionStateProjection,
+  TemporalProjectionWatermark,
+  TimelineResult,
+} from './temporal.js';
 
 /**
  * Thrown by storage adapters when an insert violates a unique constraint.
@@ -141,7 +162,22 @@ export interface StorageAdapter {
   getActiveWorkItems(scope: MemoryScope): WorkItem[];
   getWorkItemsByTimeRange(scope: MemoryScope, range: TimeRange): WorkItem[];
   updateWorkItemStatus(id: number, status: WorkItem['status']): void;
+  updateWorkItem(
+    id: number,
+    patch: WorkItemPatch,
+    options?: { expectedVersion?: number },
+  ): WorkItem | null;
   deleteWorkItem(id: number): void;
+  claimWorkItem(input: NewWorkClaimInput): WorkClaim;
+  renewWorkClaim(claimId: number, actor: ActorRef, leaseSeconds?: number): WorkClaim | null;
+  releaseWorkClaim(claimId: number, actor: ActorRef, reason?: string): WorkClaim | null;
+  getActiveWorkClaim(workItemId: number): WorkClaim | null;
+  listWorkClaims(scope: MemoryScope, options?: WorkClaimQuery): WorkClaim[];
+  createHandoff(input: NewHandoffInput): HandoffRecord;
+  acceptHandoff(handoffId: number, actor: ActorRef, reason?: string): HandoffRecord | null;
+  rejectHandoff(handoffId: number, actor: ActorRef, reason?: string): HandoffRecord | null;
+  cancelHandoff(handoffId: number, actor: ActorRef, reason?: string): HandoffRecord | null;
+  listHandoffs(scope: MemoryScope, options?: HandoffQuery): HandoffRecord[];
 
   upsertContextMonitor(input: ContextMonitorUpsert): ContextMonitor;
   getContextMonitor(scope: MemoryScope): ContextMonitor | null;
@@ -177,6 +213,24 @@ export interface StorageAdapter {
   getAssociationsFrom(kind: AssociationTargetKind, id: number, scope: MemoryScope): Association[];
   getAssociationsTo(kind: AssociationTargetKind, id: number, scope: MemoryScope): Association[];
   deleteAssociation(id: number): void;
+
+  insertMemoryEvent(input: NewMemoryEventRecord): MemoryEventRecord;
+  listMemoryEvents(scope: MemoryScope, query?: MemoryEventQuery): TimelineResult;
+  getMemoryEventsByEntity(
+    scope: MemoryScope,
+    entityKind: MemoryEventEntityKind,
+    entityId: string,
+    query?: Omit<MemoryEventQuery, 'entityKind' | 'entityId'>,
+  ): TimelineResult;
+  getMemoryEventsBySession(
+    scope: MemoryScope,
+    sessionId: string,
+    query?: Omit<MemoryEventQuery, 'sessionId'>,
+  ): TimelineResult;
+  getSessionState(scope: MemoryScope, sessionId: string): SessionStateProjection | null;
+  upsertSessionState(input: NewSessionStateProjection): SessionStateProjection;
+  getTemporalWatermark(projectionName?: string): TemporalProjectionWatermark | null;
+  upsertTemporalWatermark(input: NewTemporalProjectionWatermark): TemporalProjectionWatermark;
 
   transaction<T>(fn: () => T): T;
   close(): void;

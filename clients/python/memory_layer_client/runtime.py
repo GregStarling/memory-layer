@@ -18,6 +18,29 @@ def format_prompt(prepared: PreparedMemoryTurn) -> str:
     if context.current_objective:
         sections.append(f"Current objective:\n{context.current_objective}")
 
+    if context.session_state:
+        session_lines: list[str] = []
+        blockers = context.session_state.get("blockers")
+        if isinstance(blockers, list) and blockers:
+            session_lines.append("Blockers: " + "; ".join(str(item) for item in blockers if item))
+        assumptions = context.session_state.get("assumptions")
+        if isinstance(assumptions, list) and assumptions:
+            session_lines.append("Assumptions: " + "; ".join(str(item) for item in assumptions if item))
+        pending_decisions = context.session_state.get("pendingDecisions")
+        if isinstance(pending_decisions, list) and pending_decisions:
+            session_lines.append(
+                "Pending decisions: "
+                + "; ".join(str(item) for item in pending_decisions if item)
+            )
+        active_tools = context.session_state.get("activeTools")
+        if isinstance(active_tools, list) and active_tools:
+            session_lines.append("Active tools: " + ", ".join(str(item) for item in active_tools if item))
+        recent_outputs = context.session_state.get("recentOutputs")
+        if isinstance(recent_outputs, list) and recent_outputs:
+            session_lines.append("Recent outputs: " + " | ".join(str(item) for item in recent_outputs if item))
+        if session_lines:
+            sections.append("Session state:\n" + "\n".join(session_lines))
+
     if context.working_memory and context.working_memory.get("summary"):
         sections.append(f"Working memory:\n{context.working_memory['summary']}")
 

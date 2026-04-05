@@ -1,4 +1,7 @@
 import { normalizeScope, type MemoryScope, type NormalizedMemoryScope } from '../contracts/identity.js';
+import type { ActorRef, MemoryVisibilityClass } from '../contracts/coordination.js';
+import { ACTOR_KINDS, MEMORY_VISIBILITY_CLASSES } from '../contracts/coordination.js';
+import { ValidationError } from '../contracts/errors.js';
 import type {
   CompactionLog,
   CompactionState,
@@ -48,13 +51,13 @@ export function nowSeconds(): number {
 
 export function assertNonEmpty(value: string, name: string): void {
   if (!value || value.trim().length === 0) {
-    throw new Error(`Memory validation: '${name}' must not be empty`);
+    throw new ValidationError(`Memory validation: '${name}' must not be empty`);
   }
 }
 
 export function assertEnum<T>(value: T, allowed: readonly T[], name: string): void {
   if (!allowed.includes(value)) {
-    throw new Error(
+    throw new ValidationError(
       `Memory validation: '${name}' must be one of [${allowed.join(', ')}], got '${value}'`,
     );
   }
@@ -62,13 +65,13 @@ export function assertEnum<T>(value: T, allowed: readonly T[], name: string): vo
 
 export function assertStringArray(value: string[], name: string): void {
   if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
-    throw new Error(`Memory validation: '${name}' must be an array of strings`);
+    throw new ValidationError(`Memory validation: '${name}' must be an array of strings`);
   }
 }
 
 export function assertMaxEntries(value: string[], name: string, max: number): void {
   if (value.length > max) {
-    throw new Error(
+    throw new ValidationError(
       `Memory validation: '${name}' must have at most ${max} entries, got ${value.length}`,
     );
   }
@@ -76,7 +79,7 @@ export function assertMaxEntries(value: string[], name: string, max: number): vo
 
 export function assertNumberRange(value: number, name: string, min: number, max: number): void {
   if (!Number.isFinite(value) || value < min || value > max) {
-    throw new Error(
+    throw new ValidationError(
       `Memory validation: '${name}' must be between ${min} and ${max}, got '${value}'`,
     );
   }
@@ -84,7 +87,7 @@ export function assertNumberRange(value: number, name: string, min: number, max:
 
 export function assertTurnRange(startId: number, endId: number): void {
   if (endId < startId) {
-    throw new Error(
+    throw new ValidationError(
       `Memory validation: 'turn_id_end' (${endId}) must be >= 'turn_id_start' (${startId})`,
     );
   }
@@ -150,6 +153,15 @@ export function assertWorkItemStatus(status: WorkItemStatus): void {
   assertEnum(status, WORK_ITEM_STATUSES, 'status');
 }
 
+export function assertMemoryVisibilityClass(value: MemoryVisibilityClass): void {
+  assertEnum(value, MEMORY_VISIBILITY_CLASSES, 'visibility_class');
+}
+
+export function assertActorRef(actor: ActorRef, name = 'actor'): void {
+  assertEnum(actor.actor_kind, ACTOR_KINDS, `${name}.actor_kind`);
+  assertNonEmpty(actor.actor_id, `${name}.actor_id`);
+}
+
 export function validateNewTurn(input: NewTurn): NormalizedMemoryScope {
   const scope = assertScope(input);
   assertNonEmpty(input.session_id, 'session_id');
@@ -180,6 +192,9 @@ export function validateNewKnowledgeMemory(input: NewKnowledgeMemory): Normalize
   assertFactType(input.fact_type);
   assertFactSource(input.source);
   assertFactConfidence(input.confidence);
+  if (input.visibility_class !== undefined) {
+    assertMemoryVisibilityClass(input.visibility_class);
+  }
   if (input.knowledge_state !== undefined) {
     assertKnowledgeState(input.knowledge_state);
   }
@@ -245,7 +260,7 @@ export function validateTimeRange(range: TimeRange): void {
     range.end_at !== undefined &&
     range.end_at < range.start_at
   ) {
-    throw new Error("Memory validation: 'end_at' must be >= 'start_at'");
+    throw new ValidationError("Memory validation: 'end_at' must be >= 'start_at'");
   }
 }
 
@@ -254,20 +269,23 @@ export function validateNewWorkItem(input: NewWorkItem): NormalizedMemoryScope {
   assertNonEmpty(input.title, 'title');
   assertWorkItemKind(input.kind);
   assertWorkItemStatus(input.status ?? 'open');
+  if (input.visibility_class !== undefined) {
+    assertMemoryVisibilityClass(input.visibility_class);
+  }
   return scope;
 }
 
 export function assertArchiveInput(id: number, archivedAt: number, compactionLogId: number): void {
   if (!Number.isInteger(id) || id <= 0) {
-    throw new Error(`Memory validation: 'id' must be a positive integer, got '${id}'`);
+    throw new ValidationError(`Memory validation: 'id' must be a positive integer, got '${id}'`);
   }
   if (!Number.isInteger(archivedAt) || archivedAt <= 0) {
-    throw new Error(
+    throw new ValidationError(
       `Memory validation: 'archivedAt' must be a positive integer, got '${archivedAt}'`,
     );
   }
   if (!Number.isInteger(compactionLogId) || compactionLogId <= 0) {
-    throw new Error(
+    throw new ValidationError(
       `Memory validation: 'compactionLogId' must be a positive integer, got '${compactionLogId}'`,
     );
   }

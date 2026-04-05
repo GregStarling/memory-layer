@@ -10,7 +10,7 @@ export interface StreamCollector {
   write(chunk: string): void;
   /** Get the current accumulated text. */
   getText(): string;
-  /** Finalize the stream and commit the full content as a turn. */
+  /** Finalize the stream and commit the full content as a turn. Single-caller only. */
   finalize(): Promise<Turn>;
 }
 

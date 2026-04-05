@@ -71,6 +71,58 @@ export { widenScope } from './contracts/identity.js';
 export type { MemoryScope, NormalizedMemoryScope, ScopeLevel, ScopeQuery } from './contracts/identity.js';
 export type { StorageAdapter } from './contracts/storage.js';
 export type { AsyncStorageAdapter } from './contracts/async-storage.js';
+export type { SessionState } from './contracts/session-state.js';
+export type {
+  ActorKind,
+  ActorRef,
+  MemoryVisibilityClass,
+  ContextViewPolicy,
+  WorkClaimStatus,
+  HandoffStatus,
+  WorkClaim,
+  NewWorkClaimInput,
+  WorkClaimQuery,
+  HandoffRecord,
+  NewHandoffInput,
+  HandoffQuery,
+  WorkItemPatch,
+  CoordinationState,
+} from './contracts/coordination.js';
+export {
+  ACTOR_KINDS,
+  MEMORY_VISIBILITY_CLASSES,
+  CONTEXT_VIEW_POLICIES,
+  WORK_CLAIM_STATUSES,
+  HANDOFF_STATUSES,
+} from './contracts/coordination.js';
+export type {
+  MemoryEventEntityKind,
+  MemoryEventType as TemporalMemoryEventType,
+  MemoryEventRecord,
+  NewMemoryEventRecord,
+  MemoryEventQuery,
+  ChangeStreamEvent,
+  SessionStateProjection,
+  NewSessionStateProjection,
+  TemporalProjectionWatermark,
+  NewTemporalProjectionWatermark,
+  TemporalStateSnapshot,
+  TemporalStateDiff,
+  TimelineResult,
+} from './contracts/temporal.js';
+export type {
+  MemoryErrorCode,
+  MemoryErrorOptions,
+} from './contracts/errors.js';
+export {
+  MemoryDomainError,
+  ValidationError,
+  ResourceNotFoundError,
+  ScopeMismatchError,
+  ConflictError,
+  ProviderUnavailableError,
+  isMemoryDomainError,
+} from './contracts/errors.js';
 export type { Logger, MemoryEvent, MemoryEventType, EventHook } from './contracts/observability.js';
 export { noopLogger } from './contracts/observability.js';
 export type {
@@ -161,10 +213,24 @@ export type {
   MonitorInput,
   ContextHealthReport,
 } from './core/monitor.js';
-export type { MemoryContext, ContextAssemblyOptions, KnowledgeSelectionReason } from './core/context.js';
+export type {
+  MemoryContext,
+  ContextAssemblyOptions,
+  KnowledgeSelectionReason,
+  ContextDebugTrace,
+  AssociationExpansionTrace,
+  TokenTrimTrace,
+  ExcludedKnowledgeReason,
+  ContextScopeTrace,
+} from './core/context.js';
 export type { FormatOptions, SessionBootstrap } from './core/formatter.js';
 export type { MemoryEventEmitter } from './core/events.js';
-export type { CircuitBreaker, CircuitBreakerOptions, CircuitState } from './core/circuit-breaker.js';
+export type {
+  CircuitBreaker,
+  CircuitBreakerOptions,
+  CircuitState,
+  CircuitBreakerSnapshot,
+} from './core/circuit-breaker.js';
 export type { MaintenanceReport } from './core/maintenance.js';
 export type {
   MemoryRuntime,

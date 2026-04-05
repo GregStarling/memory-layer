@@ -1,5 +1,18 @@
 import type { EmbeddingAdapter, EmbeddingGenerator } from '../contracts/embedding.js';
+import type {
+  ActorRef,
+  ContextViewPolicy,
+  HandoffRecord,
+  WorkClaim,
+  WorkItemPatch,
+} from '../contracts/coordination.js';
 import type { MemoryScope, ScopeLevel } from '../contracts/identity.js';
+import {
+  ProviderUnavailableError,
+  ResourceNotFoundError,
+  ScopeMismatchError,
+  ValidationError,
+} from '../contracts/errors.js';
 import type { EventHook, Logger } from '../contracts/observability.js';
 import type {
   ContextPolicy,
@@ -59,7 +72,11 @@ import { runMaintenance, type MaintenanceReport } from './maintenance.js';
 import { emitMemoryEvent } from './telemetry.js';
 import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 import { estimateTokens, type TokenEstimator } from './tokens.js';
-import { createCircuitBreaker, type CircuitBreakerOptions } from './circuit-breaker.js';
+import {
+  createCircuitBreaker,
+  type CircuitBreakerOptions,
+  type CircuitBreakerSnapshot,
+} from './circuit-breaker.js';
 import { DEFAULT_EXTRACTION_POLICY } from '../contracts/policy.js';
 import { assessKnowledgeReverification } from './trust.js';
 import { matchesKnowledgeSearchOptions, rankKnowledge } from './retrieval.js';
@@ -72,6 +89,13 @@ import type {
   CognitiveSearchOptions,
   CognitiveSearchResult,
 } from '../contracts/cognitive.js';
+import type {
+  MemoryEventEntityKind,
+  MemoryEventRecord,
+  TemporalStateDiff,
+  TemporalStateSnapshot,
+  TimelineResult,
+} from '../contracts/temporal.js';
 import type { StructuredGenerationClient } from '../summarizers/client.js';
 import { searchEpisodes, summarizeEpisode, reflect } from './episodic.js';
 import { searchCognitive } from './cognitive.js';
@@ -85,6 +109,11 @@ import {
   type CreatePlaybookFromTaskInput,
 } from './playbook.js';
 import { normalizeScope } from '../contracts/identity.js';
+import {
+  createTemporalReplayAdapter,
+  foldTemporalState,
+  listAllMemoryEvents,
+} from './temporal.js';
 
 export interface MemoryManagerConfig {
   /** Synchronous storage adapter (SQLite, in-memory). Mutually exclusive with asyncAdapter. */
@@ -128,9 +157,70 @@ export interface MemoryManager {
     assistantContent: string,
     actors?: { user?: string; assistant?: string },
   ): Promise<{ userTurn: Turn; assistantTurn: Turn; compactionResult: CompactionResult | null }>;
-  getContext(relevanceQuery?: string): Promise<MemoryContext>;
-  getContextAt(asOf: number, relevanceQuery?: string): Promise<MemoryContext>;
-  getSessionBootstrap(relevanceQuery?: string): Promise<SessionBootstrap>;
+  getContext(
+    relevanceQuery?: string,
+    options?: {
+      view?: ContextViewPolicy;
+      viewer?: ActorRef;
+      includeCoordinationState?: boolean;
+    },
+  ): Promise<MemoryContext>;
+  getContextAt(
+    asOf: number,
+    relevanceQuery?: string,
+    options?: {
+      view?: ContextViewPolicy;
+      viewer?: ActorRef;
+      includeCoordinationState?: boolean;
+    },
+  ): Promise<MemoryContext>;
+  getStateAt(
+    asOf: number,
+    options?: {
+      relevanceQuery?: string;
+      view?: ContextViewPolicy;
+      viewer?: ActorRef;
+      includeCoordinationState?: boolean;
+    },
+  ): Promise<TemporalStateSnapshot<MemoryContext>>;
+  getTimeline(options?: {
+    sessionId?: string;
+    entityKind?: MemoryEventEntityKind;
+    entityId?: string;
+    startAt?: number;
+    endAt?: number;
+    limit?: number;
+    cursor?: number;
+  }): Promise<TimelineResult>;
+  diffState(
+    from: number,
+    to: number,
+    options?: { sessionId?: string; entityKind?: MemoryEventEntityKind; entityId?: string },
+  ): Promise<TemporalStateDiff>;
+  listMemoryEvents(options?: {
+    sessionId?: string;
+    entityKind?: MemoryEventEntityKind;
+    entityId?: string;
+    startAt?: number;
+    endAt?: number;
+    limit?: number;
+    cursor?: number;
+  }): Promise<TimelineResult>;
+  getSessionBootstrap(
+    relevanceQuery?: string,
+    options?: {
+      view?: ContextViewPolicy;
+      viewer?: ActorRef;
+      includeCoordinationState?: boolean;
+    },
+  ): Promise<SessionBootstrap>;
+  getRuntimeDiagnostics(): Promise<{
+    circuitBreakers: {
+      summarizer: CircuitBreakerSnapshot;
+      extractor: CircuitBreakerSnapshot;
+      embeddings: CircuitBreakerSnapshot;
+    };
+  }>;
   recall(timeRange: TimeRange): Promise<{
     turns: Turn[];
     workingMemory: WorkingMemory[];
@@ -154,7 +244,54 @@ export interface MemoryManager {
     kind?: WorkItem['kind'],
     status?: WorkItem['status'],
     detail?: string,
+    options?: { visibilityClass?: WorkItem['visibility_class'] },
   ): Promise<WorkItem>;
+  updateWorkItem(
+    id: number,
+    patch: WorkItemPatch,
+    options?: { expectedVersion?: number },
+  ): Promise<WorkItem | null>;
+  claimWorkItem(input: {
+    workItemId: number;
+    actor: ActorRef;
+    leaseSeconds?: number;
+  }): Promise<WorkClaim>;
+  renewWorkClaim(
+    claimId: number,
+    actor: ActorRef,
+    leaseSeconds?: number,
+  ): Promise<WorkClaim | null>;
+  releaseWorkClaim(
+    claimId: number,
+    actor: ActorRef,
+    reason?: string,
+  ): Promise<WorkClaim | null>;
+  listWorkClaims(options?: {
+    actor?: Pick<ActorRef, 'actor_kind' | 'actor_id'>;
+    sessionId?: string;
+  }): Promise<WorkClaim[]>;
+  handoffWorkItem(input: {
+    workItemId: number;
+    fromActor: ActorRef;
+    toActor: ActorRef;
+    summary: string;
+    contextBundleRef?: string | null;
+    expiresAt?: number | null;
+  }): Promise<HandoffRecord>;
+  acceptHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null>;
+  rejectHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null>;
+  cancelHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null>;
+  listPendingHandoffs(options?: {
+    actor?: Pick<ActorRef, 'actor_kind' | 'actor_id'>;
+    direction?: 'inbound' | 'outbound' | 'all';
+  }): Promise<HandoffRecord[]>;
+  streamChanges(options?: {
+    cursor?: number;
+    sessionId?: string;
+    entityKind?: MemoryEventEntityKind;
+    entityId?: string;
+    pollIntervalMs?: number;
+  }): AsyncIterable<MemoryEventRecord>;
   inspectKnowledge(id: number): Promise<{
     knowledge: KnowledgeMemory | null;
     evidence: KnowledgeEvidence[];
@@ -216,7 +353,7 @@ function resolveAdapter(config: MemoryManagerConfig): AsyncStorageAdapter {
   if (config.adapter) {
     return wrapSyncAdapter(config.adapter);
   }
-  throw new Error("MemoryManagerConfig requires either 'adapter' or 'asyncAdapter'");
+  throw new ValidationError("MemoryManagerConfig requires either 'adapter' or 'asyncAdapter'");
 }
 
 function manualKnowledgeClassForFactType(factType: FactType): KnowledgeMemory['knowledge_class'] {
@@ -264,30 +401,38 @@ async function assertAssociationEndpointInScope(
   if (kind === 'knowledge') {
     const km = await adapter.getKnowledgeMemoryById(id);
     if (!km) {
-      throw new Error(`addAssociation: ${role} knowledge ${id} does not exist`);
+      throw new ResourceNotFoundError(`addAssociation: ${role} knowledge ${id} does not exist`);
     }
     if (!scopedMatch(km)) {
-      throw new Error(`addAssociation: ${role} knowledge ${id} is not in the current scope`);
+      throw new ScopeMismatchError(
+        `addAssociation: ${role} knowledge ${id} is not in the current scope`,
+      );
     }
     return;
   }
   if (kind === 'playbook') {
     const pb = await adapter.getPlaybookById(id);
     if (!pb) {
-      throw new Error(`addAssociation: ${role} playbook ${id} does not exist`);
+      throw new ResourceNotFoundError(`addAssociation: ${role} playbook ${id} does not exist`);
     }
     if (!scopedMatch(pb)) {
-      throw new Error(`addAssociation: ${role} playbook ${id} is not in the current scope`);
+      throw new ScopeMismatchError(
+        `addAssociation: ${role} playbook ${id} is not in the current scope`,
+      );
     }
     return;
   }
   if (kind === 'working_memory') {
     const wm = await adapter.getWorkingMemoryById(id);
     if (!wm) {
-      throw new Error(`addAssociation: ${role} working_memory ${id} does not exist`);
+      throw new ResourceNotFoundError(
+        `addAssociation: ${role} working_memory ${id} does not exist`,
+      );
     }
     if (!scopedMatch(wm)) {
-      throw new Error(`addAssociation: ${role} working_memory ${id} is not in the current scope`);
+      throw new ScopeMismatchError(
+        `addAssociation: ${role} working_memory ${id} is not in the current scope`,
+      );
     }
     return;
   }
@@ -295,12 +440,14 @@ async function assertAssociationEndpointInScope(
     const items = await adapter.getActiveWorkItems(norm);
     const match = items.find((item) => item.id === id);
     if (!match) {
-      throw new Error(`addAssociation: ${role} work_item ${id} does not exist in the current scope`);
+      throw new ResourceNotFoundError(
+        `addAssociation: ${role} work_item ${id} does not exist in the current scope`,
+      );
     }
     return;
   }
   // Exhaustiveness: AssociationTargetKind has no other members.
-  throw new Error(`addAssociation: unknown ${role} kind '${kind as string}'`);
+  throw new ValidationError(`addAssociation: unknown ${role} kind '${kind as string}'`);
 }
 
 /**
@@ -324,6 +471,10 @@ function knowledgeMatchesScope(knowledge: KnowledgeMemory, scope: MemoryScope): 
     knowledge.collaboration_id === normalized.collaboration_id &&
     knowledge.scope_id === normalized.scope_id
   );
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export function createMemoryManager(config: MemoryManagerConfig): MemoryManager {
@@ -376,6 +527,22 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     emitMemoryEvent('manager', config.scope, { logger: config.logger, onEvent }, 0, {
       action: 'degraded_mode',
       subsystem: kind,
+      ...detail,
+    });
+  }
+
+  function emitRetrievalFallback(
+    reason:
+      | 'embedding_adapter_unavailable'
+      | 'embedding_generator_unavailable'
+      | 'query_vector_unavailable'
+      | 'semantic_search_failed',
+    detail: Record<string, unknown> = {},
+  ): void {
+    emitMemoryEvent('manager', config.scope, { logger: config.logger, onEvent }, 0, {
+      action: 'retrieval_fallback',
+      reason,
+      strategy: 'lexical_only',
       ...detail,
     });
   }
@@ -446,7 +613,13 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
   }
 
   async function buildQueryVector(input: string): Promise<Float32Array | undefined> {
-    if (!config.embeddingGenerator || input.trim().length === 0) {
+    if (input.trim().length === 0) {
+      return undefined;
+    }
+    if (!config.embeddingGenerator) {
+      emitRetrievalFallback('embedding_generator_unavailable', {
+        stage: 'query_vector',
+      });
       return undefined;
     }
     try {
@@ -459,6 +632,10 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         error: String(error),
       });
       emitDegradation('embeddings', {
+        stage: 'query_vector',
+        error: String(error),
+      });
+      emitRetrievalFallback('query_vector_unavailable', {
         stage: 'query_vector',
         error: String(error),
       });
@@ -520,11 +697,19 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         : await asyncAdapter.searchKnowledgeCrossScope(config.scope, level, query, options);
     const filteredLexical = lexical.filter((result) => matchesKnowledgeSearchOptions(result.item, options));
     if (!config.embeddingAdapter) {
+      emitRetrievalFallback('embedding_adapter_unavailable', {
+        stage: 'semantic_search',
+        scopeLevel: level,
+      });
       return filteredLexical;
     }
 
     const queryVector = await buildQueryVector(query);
     if (!queryVector) {
+      emitRetrievalFallback('query_vector_unavailable', {
+        stage: 'semantic_search',
+        scopeLevel: level,
+      });
       return filteredLexical;
     }
 
@@ -546,6 +731,11 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         scopeLevel: level,
       });
       emitDegradation('embeddings', {
+        stage: 'semantic_search',
+        error: String(error),
+        scopeLevel: level,
+      });
+      emitRetrievalFallback('semantic_search_failed', {
         stage: 'semantic_search',
         error: String(error),
         scopeLevel: level,
@@ -601,7 +791,15 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     return results;
   }
 
-  async function getContextInternal(relevanceQuery?: string, asOf?: number): Promise<MemoryContext> {
+  async function getContextInternal(
+    relevanceQuery?: string,
+    asOf?: number,
+    options?: {
+      view?: ContextViewPolicy;
+      viewer?: ActorRef;
+      includeCoordinationState?: boolean;
+    },
+  ): Promise<MemoryContext> {
     const activeTurns = await asyncAdapter.getActiveTurns(config.scope, config.sessionId);
     const relevantTurns = asOf == null
       ? activeTurns
@@ -623,9 +821,79 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       policy: config.contextPolicy,
       tokenEstimator,
       asOf,
+      view: options?.view,
+      viewer: options?.viewer,
+      includeCoordinationState: options?.includeCoordinationState,
       logger: config.logger,
       onEvent,
     });
+  }
+
+  async function getTemporalCutoverAt(): Promise<number | null> {
+    const watermark = await asyncAdapter.getTemporalWatermark('temporal');
+    return watermark?.cutover_at ?? null;
+  }
+
+  async function buildReplayedContext(
+    asOf: number,
+    relevanceQuery?: string,
+    options?: {
+      view?: ContextViewPolicy;
+      viewer?: ActorRef;
+      includeCoordinationState?: boolean;
+    },
+  ): Promise<{
+    context: MemoryContext;
+    events: MemoryEventRecord[];
+    watermarkEventId: number | null;
+    exact: boolean;
+    cutoverAt: number | null;
+  }> {
+    const cutoverAt = await getTemporalCutoverAt();
+    if (cutoverAt == null || asOf < cutoverAt) {
+      return {
+        context: await getContextInternal(relevanceQuery, asOf, options),
+        events: [],
+        watermarkEventId: null,
+        exact: false,
+        cutoverAt,
+      };
+    }
+
+    const events = await listAllMemoryEvents(asyncAdapter, config.scope, {
+      endAt: asOf,
+      limit: 500,
+    });
+    const replayed = foldTemporalState(events, { sessionId: config.sessionId });
+    const replayAdapter = createTemporalReplayAdapter(replayed, asOf);
+    const inferredQuery =
+      relevanceQuery ??
+      replayed.turns
+        .slice(-4)
+        .map((turn) => turn.content)
+        .join('\n');
+    const queryVector = await buildQueryVector(inferredQuery);
+    const context = await buildMemoryContext(replayAdapter, config.scope, {
+      sessionId: config.sessionId,
+      relevanceQuery,
+      queryVector,
+      embeddingAdapter: config.embeddingAdapter,
+      crossScopeLevel: config.crossScopeLevel,
+      policy: config.contextPolicy,
+      tokenEstimator,
+      view: options?.view,
+      viewer: options?.viewer,
+      includeCoordinationState: options?.includeCoordinationState,
+      logger: config.logger,
+      onEvent,
+    });
+    return {
+      context,
+      events,
+      watermarkEventId: replayed.watermarkEventId,
+      exact: true,
+      cutoverAt,
+    };
   }
 
   async function executeCompaction(
@@ -796,25 +1064,128 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       };
     },
 
-    async getContext(relevanceQuery) {
-      return getContextInternal(relevanceQuery);
+    async getContext(relevanceQuery, options) {
+      return getContextInternal(relevanceQuery, undefined, options);
     },
 
-    async getContextAt(asOf, relevanceQuery) {
-      return getContextInternal(relevanceQuery, asOf);
+    async getContextAt(asOf, relevanceQuery, options) {
+      return (await buildReplayedContext(asOf, relevanceQuery, options)).context;
     },
 
-    async getSessionBootstrap(relevanceQuery) {
-      const context = await getContextInternal(relevanceQuery);
+    async getStateAt(asOf, options) {
+      const replay = await buildReplayedContext(asOf, options?.relevanceQuery, options);
+      const sourceEvents = replay.exact
+        ? replay.events
+        : await listAllMemoryEvents(asyncAdapter, config.scope, {
+            endAt: asOf,
+            limit: 500,
+          });
+      const replayed = foldTemporalState(sourceEvents, { sessionId: config.sessionId });
+      return {
+        asOf,
+        exact: replay.exact,
+        cutoverAt: replay.cutoverAt,
+        watermarkEventId: replay.watermarkEventId,
+        context: replay.context,
+        sessionState: replay.context.sessionState,
+        turns: replayed.turns,
+        workingMemory: replayed.workingMemory,
+        knowledge: replayed.knowledge,
+        workItems: replayed.workItems,
+        workClaims: replayed.workClaims,
+        handoffs: replayed.handoffs,
+        coordinationState: replay.context.coordinationState,
+        associations: replayed.associations,
+        playbooks: replayed.playbooks,
+      };
+    },
+
+    async getTimeline(options) {
+      return asyncAdapter.listMemoryEvents(config.scope, {
+        sessionId: options?.sessionId,
+        entityKind: options?.entityKind,
+        entityId: options?.entityId,
+        startAt: options?.startAt,
+        endAt: options?.endAt,
+        limit: options?.limit,
+        cursor: options?.cursor,
+      });
+    },
+
+    async diffState(from, to, options) {
+      const cutoverAt = await getTemporalCutoverAt();
+      const timeline = await asyncAdapter.listMemoryEvents(config.scope, {
+        sessionId: options?.sessionId,
+        entityKind: options?.entityKind,
+        entityId: options?.entityId,
+        startAt: from + 1,
+        endAt: to,
+        limit: 500,
+      });
+      const events = timeline.events;
+      const byEntityKind: Partial<Record<MemoryEventEntityKind, number>> = {};
+      const byEventType: Partial<Record<MemoryEventRecord['event_type'], number>> = {};
+      for (const event of events) {
+        byEntityKind[event.entity_kind] = (byEntityKind[event.entity_kind] ?? 0) + 1;
+        byEventType[event.event_type] = (byEventType[event.event_type] ?? 0) + 1;
+      }
+      return {
+        from,
+        to,
+        exact: cutoverAt != null && from >= cutoverAt && to >= cutoverAt,
+        cutoverAt,
+        watermarkRange: {
+          fromEventId: events[0]?.event_id ?? null,
+          toEventId: events[events.length - 1]?.event_id ?? null,
+        },
+        events,
+        summary: {
+          totalEvents: events.length,
+          byEntityKind,
+          byEventType,
+        },
+      };
+    },
+
+    async listMemoryEvents(options) {
+      const timeline = await asyncAdapter.listMemoryEvents(config.scope, {
+        sessionId: options?.sessionId,
+        entityKind: options?.entityKind,
+        entityId: options?.entityId,
+        startAt: options?.startAt,
+        endAt: options?.endAt,
+        limit: options?.limit,
+        cursor: options?.cursor,
+      });
+      return {
+        events: [...timeline.events].reverse(),
+        nextCursor: timeline.nextCursor,
+      };
+    },
+
+    async getSessionBootstrap(relevanceQuery, options) {
+      const context = await getContextInternal(relevanceQuery, undefined, options);
       const profile = await getProfile(asyncAdapter, config.scope);
       return {
         currentObjective: context.currentObjective,
+        sessionState: context.sessionState,
         workingMemory: context.workingMemory,
         relevantKnowledge: context.relevantKnowledge,
         recentSummaries: context.recentSummaries,
         activeObjectives: context.activeObjectives,
         unresolvedWork: context.unresolvedWork,
+        coordinationState: context.coordinationState,
         profile,
+      };
+    },
+
+    async getRuntimeDiagnostics() {
+      return {
+        circuitBreakers: {
+          summarizer: circuitBreakers.summarizer.getSnapshot(),
+          extractor: circuitBreakers.extractor.getSnapshot(),
+          embeddings: circuitBreakers.embeddings.getSnapshot(),
+        },
       };
     },
 
@@ -903,10 +1274,11 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       return knowledge;
     },
 
-    async trackWorkItem(title, kind = 'objective', status = 'open', detail) {
+    async trackWorkItem(title, kind = 'objective', status = 'open', detail, options) {
       return asyncAdapter.insertWorkItem({
         ...config.scope,
         session_id: config.sessionId,
+        visibility_class: options?.visibilityClass ?? 'private',
         title: config.redactText ? config.redactText({ kind: 'work_item', text: title }) : title,
         kind,
         status,
@@ -915,6 +1287,97 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
             ? config.redactText({ kind: 'work_item', text: detail })
             : detail,
       });
+    },
+
+    async updateWorkItem(id, patch, options) {
+      return asyncAdapter.updateWorkItem(id, patch, options);
+    },
+
+    async claimWorkItem(input) {
+      const workItem = (await asyncAdapter.getActiveWorkItems(config.scope)).find(
+        (item) => item.id === input.workItemId,
+      );
+      return asyncAdapter.claimWorkItem({
+        ...normalizeScope(config.scope),
+        work_item_id: input.workItemId,
+        actor: input.actor,
+        session_id: config.sessionId,
+        lease_seconds: input.leaseSeconds,
+        visibility_class: workItem?.visibility_class ?? 'private',
+      });
+    },
+
+    async renewWorkClaim(claimId, actor, leaseSeconds) {
+      return asyncAdapter.renewWorkClaim(claimId, actor, leaseSeconds);
+    },
+
+    async releaseWorkClaim(claimId, actor, reason) {
+      return asyncAdapter.releaseWorkClaim(claimId, actor, reason);
+    },
+
+    async listWorkClaims(options) {
+      return asyncAdapter.listWorkClaims(config.scope, {
+        actor: options?.actor,
+        sessionId: options?.sessionId,
+      });
+    },
+
+    async handoffWorkItem(input) {
+      const workItem = (await asyncAdapter.getActiveWorkItems(config.scope)).find(
+        (item) => item.id === input.workItemId,
+      );
+      return asyncAdapter.createHandoff({
+        ...normalizeScope(config.scope),
+        work_item_id: input.workItemId,
+        from_actor: input.fromActor,
+        to_actor: input.toActor,
+        session_id: config.sessionId,
+        summary: input.summary,
+        context_bundle_ref: input.contextBundleRef ?? null,
+        expires_at: input.expiresAt ?? null,
+        visibility_class: workItem?.visibility_class ?? 'private',
+      });
+    },
+
+    async acceptHandoff(handoffId, actor, reason) {
+      return asyncAdapter.acceptHandoff(handoffId, actor, reason);
+    },
+
+    async rejectHandoff(handoffId, actor, reason) {
+      return asyncAdapter.rejectHandoff(handoffId, actor, reason);
+    },
+
+    async cancelHandoff(handoffId, actor, reason) {
+      return asyncAdapter.cancelHandoff(handoffId, actor, reason);
+    },
+
+    async listPendingHandoffs(options) {
+      return asyncAdapter.listHandoffs(config.scope, {
+        actor: options?.actor,
+        direction: options?.direction,
+        statuses: ['pending'],
+      });
+    },
+
+    async *streamChanges(options) {
+      let cursor =
+        options?.cursor ??
+        (await asyncAdapter.getTemporalWatermark('temporal'))?.last_event_id ??
+        0;
+      for (;;) {
+        const page = await asyncAdapter.listMemoryEvents(config.scope, {
+          cursor,
+          sessionId: options?.sessionId,
+          entityKind: options?.entityKind,
+          entityId: options?.entityId,
+          limit: 100,
+        });
+        for (const event of page.events) {
+          cursor = event.event_id;
+          yield event;
+        }
+        await delay(options?.pollIntervalMs ?? 250);
+      }
     },
 
     async inspectKnowledge(id) {
@@ -967,10 +1430,12 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     async reverifyKnowledge(id) {
       const knowledge = await asyncAdapter.getKnowledgeMemoryById(id);
       if (!knowledge) {
-        throw new Error(`Memory validation: knowledge memory ${id} was not found`);
+        throw new ResourceNotFoundError(`Memory validation: knowledge memory ${id} was not found`);
       }
       if (!knowledgeMatchesScope(knowledge, config.scope)) {
-        throw new Error(`Memory validation: knowledge memory ${id} does not belong to the requested scope`);
+        throw new ScopeMismatchError(
+          `Memory validation: knowledge memory ${id} does not belong to the requested scope`,
+        );
       }
       const evidence = await asyncAdapter.listKnowledgeEvidenceForKnowledge(id);
       const policy = {
@@ -1112,7 +1577,9 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
     async searchEpisodes(options) {
       if (!config.structuredClient) {
-        throw new Error('searchEpisodes requires a structuredClient in MemoryManagerConfig');
+        throw new ProviderUnavailableError(
+          'searchEpisodes requires a structuredClient in MemoryManagerConfig',
+        );
       }
       return searchEpisodes(
         {
@@ -1127,7 +1594,9 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
     async summarizeEpisode(sessionId, options) {
       if (!config.structuredClient) {
-        throw new Error('summarizeEpisode requires a structuredClient in MemoryManagerConfig');
+        throw new ProviderUnavailableError(
+          'summarizeEpisode requires a structuredClient in MemoryManagerConfig',
+        );
       }
       const detailLevel = options?.detailLevel ?? 'overview';
       // Fetch both active and all session working memories. Partially
@@ -1157,7 +1626,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
     async reflect(options) {
       if (!config.structuredClient) {
-        throw new Error('reflect requires a structuredClient in MemoryManagerConfig');
+        throw new ProviderUnavailableError('reflect requires a structuredClient in MemoryManagerConfig');
       }
       return reflect(
         {
@@ -1184,7 +1653,9 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
     async createPlaybookFromTask(input) {
       if (!config.structuredClient) {
-        throw new Error('createPlaybookFromTask requires a structuredClient in MemoryManagerConfig');
+        throw new ProviderUnavailableError(
+          'createPlaybookFromTask requires a structuredClient in MemoryManagerConfig',
+        );
       }
       return createPlaybookFromTask(
         { adapter: asyncAdapter, scope: config.scope, client: config.structuredClient },
@@ -1239,7 +1710,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     async recordPlaybookUse(id) {
       const playbook = await asyncAdapter.getPlaybookById(id);
       if (!playbook) {
-        throw new Error(`Playbook ${id} not found`);
+        throw new ResourceNotFoundError(`Playbook ${id} not found`);
       }
       const norm = normalizeScope(config.scope);
       if (
@@ -1249,7 +1720,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         playbook.collaboration_id !== norm.collaboration_id ||
         playbook.scope_id !== norm.scope_id
       ) {
-        throw new Error(`Playbook ${id} does not belong to the requested scope`);
+        throw new ScopeMismatchError(`Playbook ${id} does not belong to the requested scope`);
       }
       return asyncAdapter.recordPlaybookUse(id);
     },
@@ -1258,13 +1729,17 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       // Validate source/target IDs are positive integers. Callers (HTTP/MCP)
       // only check typeof number, so this is the authoritative guard.
       if (!Number.isInteger(input.source_id) || input.source_id <= 0) {
-        throw new Error(`addAssociation: source_id must be a positive integer, got ${input.source_id}`);
+        throw new ValidationError(
+          `addAssociation: source_id must be a positive integer, got ${input.source_id}`,
+        );
       }
       if (!Number.isInteger(input.target_id) || input.target_id <= 0) {
-        throw new Error(`addAssociation: target_id must be a positive integer, got ${input.target_id}`);
+        throw new ValidationError(
+          `addAssociation: target_id must be a positive integer, got ${input.target_id}`,
+        );
       }
       if (input.source_kind === input.target_kind && input.source_id === input.target_id) {
-        throw new Error('addAssociation: self-referential associations are not allowed');
+        throw new ValidationError('addAssociation: self-referential associations are not allowed');
       }
       // Validate confidence is in [0, 1] when provided.
       if (input.confidence !== undefined) {
@@ -1274,7 +1749,9 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
           input.confidence < 0 ||
           input.confidence > 1
         ) {
-          throw new Error(`addAssociation: confidence must be a number in [0, 1], got ${input.confidence}`);
+          throw new ValidationError(
+            `addAssociation: confidence must be a number in [0, 1], got ${input.confidence}`,
+          );
         }
       }
       // Resolve source and target: both must exist and belong to the caller's
@@ -1312,11 +1789,11 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       // associations attached to archived/expired/orphaned nodes, leaving
       // stale edges permanently in the graph.
       if (!Number.isInteger(id) || id <= 0) {
-        throw new Error(`removeAssociation: id must be a positive integer, got ${id}`);
+        throw new ValidationError(`removeAssociation: id must be a positive integer, got ${id}`);
       }
       const association = await asyncAdapter.getAssociationById(id);
       if (!association) {
-        throw new Error(`Association ${id} not found`);
+        throw new ResourceNotFoundError(`Association ${id} not found`);
       }
       const norm = normalizeScope(config.scope);
       if (
@@ -1326,7 +1803,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         association.collaboration_id !== norm.collaboration_id ||
         association.scope_id !== norm.scope_id
       ) {
-        throw new Error(`Association ${id} not found in the current scope`);
+        throw new ScopeMismatchError(`Association ${id} not found in the current scope`);
       }
       await asyncAdapter.deleteAssociation(id);
     },

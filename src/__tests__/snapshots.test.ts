@@ -17,10 +17,53 @@ function makeSnapshotContext(): MemoryContext {
     durableKnowledge: [],
     recentSummaries: [],
     currentObjective: 'Ship snapshots',
+    sessionState: {
+      currentObjective: 'Ship snapshots',
+      blockers: ['Keep output stable'],
+      assumptions: [],
+      pendingDecisions: [],
+      activeTools: [],
+      recentOutputs: [],
+      updatedAt: 42,
+    },
     activeObjectives: [],
     activeState: ['topic:snapshots'],
+    associatedKnowledge: [],
     unresolvedWork: ['Keep output stable'],
     knowledgeSelectionReasons: [],
+    debugTrace: {
+      scope: {
+        normalizedScope: {
+          tenant_id: 'default',
+          system_id: 'default',
+          workspace_id: '',
+          collaboration_id: '',
+          scope_id: 'thread-1',
+        },
+        scopeSource: 'local',
+        scopeLevel: 'scope',
+        asOf: null,
+      },
+      selectedKnowledge: [],
+      excludedKnowledge: [],
+      associationExpansion: {
+        seedKnowledgeIds: [],
+        candidateKnowledgeIds: [],
+        includedKnowledgeIds: [],
+        truncatedKnowledgeIds: [],
+        maxSeedKnowledgeItems: 8,
+        maxAssociatedKnowledgeItems: 12,
+      },
+      tokenTrimming: {
+        initialTokenEstimate: 42,
+        finalTokenEstimate: 42,
+        droppedTurnIds: [],
+        droppedSummaryIds: [],
+        droppedPlaybookIds: [],
+        droppedAssociatedKnowledgeIds: [],
+        droppedKnowledgeIds: [],
+      },
+    },
     tokenEstimate: 42,
   };
 }
@@ -33,6 +76,14 @@ describe('stable snapshots', () => {
 
       Current Objective:
       Ship snapshots
+
+      Session State:
+      Objective: Ship snapshots
+      Blockers: Keep output stable
+      Assumptions: None
+      Pending Decisions: None
+      Active Tools: None
+      Recent Outputs: None
 
       Active State:
       - topic:snapshots
@@ -64,10 +115,25 @@ describe('stable snapshots', () => {
         "memory_store_turn",
         "memory_store_exchange",
         "memory_get_context",
+        "memory_get_state_at",
+        "memory_get_timeline",
+        "memory_diff_state",
+        "memory_list_events",
         "memory_search",
         "memory_search_cross_scope",
         "memory_learn_fact",
         "memory_track_work",
+        "memory_update_work_item",
+        "memory_claim_work_item",
+        "memory_renew_work_claim",
+        "memory_release_work_claim",
+        "memory_list_work_claims",
+        "memory_handoff_work_item",
+        "memory_accept_handoff",
+        "memory_reject_handoff",
+        "memory_cancel_handoff",
+        "memory_list_pending_handoffs",
+        "memory_stream_changes",
         "memory_force_compact",
         "memory_get_health",
         "memory_run_maintenance",

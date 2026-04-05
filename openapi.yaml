@@ -144,6 +144,129 @@ components:
           type: string
         scope_id:
           type: string
+    ActorRef:
+      type: object
+      required: [actor_kind, actor_id]
+      properties:
+        actor_kind:
+          type: string
+          enum: [agent, human, system, service]
+        actor_id:
+          type: string
+        system_id:
+          type: string
+          nullable: true
+        display_name:
+          type: string
+          nullable: true
+        metadata:
+          type: object
+          nullable: true
+          additionalProperties: true
+    WorkClaim:
+      type: object
+      required: [id, work_item_id, actor, claim_token, status, claimed_at, expires_at, visibility_class, version]
+      properties:
+        id:
+          type: integer
+        work_item_id:
+          type: integer
+        actor:
+          $ref: '#/components/schemas/ActorRef'
+        session_id:
+          type: string
+          nullable: true
+        claim_token:
+          type: string
+        status:
+          type: string
+          enum: [active, released, expired]
+        claimed_at:
+          type: integer
+        expires_at:
+          type: integer
+        released_at:
+          type: integer
+          nullable: true
+        release_reason:
+          type: string
+          nullable: true
+        source_event_id:
+          type: integer
+          nullable: true
+        visibility_class:
+          type: string
+          enum: [private, shared_collaboration, workspace, tenant]
+        version:
+          type: integer
+    HandoffRecord:
+      type: object
+      required: [id, work_item_id, from_actor, to_actor, summary, status, created_at, visibility_class, version]
+      properties:
+        id:
+          type: integer
+        work_item_id:
+          type: integer
+        from_actor:
+          $ref: '#/components/schemas/ActorRef'
+        to_actor:
+          $ref: '#/components/schemas/ActorRef'
+        session_id:
+          type: string
+          nullable: true
+        summary:
+          type: string
+        context_bundle_ref:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [pending, accepted, rejected, canceled, expired]
+        created_at:
+          type: integer
+        accepted_at:
+          type: integer
+          nullable: true
+        rejected_at:
+          type: integer
+          nullable: true
+        canceled_at:
+          type: integer
+          nullable: true
+        expires_at:
+          type: integer
+          nullable: true
+        decision_reason:
+          type: string
+          nullable: true
+        source_event_id:
+          type: integer
+          nullable: true
+        visibility_class:
+          type: string
+          enum: [private, shared_collaboration, workspace, tenant]
+        version:
+          type: integer
+    CoordinationState:
+      type: object
+      required: [ownedClaims, pendingInboundHandoffs, pendingOutboundHandoffs, sharedWorkItems]
+      properties:
+        ownedClaims:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkClaim'
+        pendingInboundHandoffs:
+          type: array
+          items:
+            $ref: '#/components/schemas/HandoffRecord'
+        pendingOutboundHandoffs:
+          type: array
+          items:
+            $ref: '#/components/schemas/HandoffRecord'
+        sharedWorkItems:
+          type: array
+          items:
+            type: object
     TurnRequest:
       type: object
       required: [role, content]
@@ -198,6 +321,9 @@ components:
           default: open
         detail:
           type: string
+        visibility_class:
+          type: string
+          enum: [private, shared_collaboration, workspace, tenant]
         scope:
           $ref: '#/components/schemas/Scope'
     CompactRequest:
@@ -211,6 +337,35 @@ components:
         currentObjective:
           type: string
           nullable: true
+        sessionState:
+          type: object
+          nullable: true
+          properties:
+            currentObjective:
+              type: string
+              nullable: true
+            blockers:
+              type: array
+              items:
+                type: string
+            assumptions:
+              type: array
+              items:
+                type: string
+            pendingDecisions:
+              type: array
+              items:
+                type: string
+            activeTools:
+              type: array
+              items:
+                type: string
+            recentOutputs:
+              type: array
+              items:
+                type: string
+            updatedAt:
+              type: integer
         activeTurnCount:
           type: integer
         workingMemory:
@@ -253,6 +408,12 @@ components:
           type: array
           items:
             type: string
+        debugTrace:
+          type: object
+          nullable: true
+        coordinationState:
+          type: object
+          nullable: true
         tokenEstimate:
           type: integer
     SearchResponse:
@@ -297,6 +458,148 @@ components:
           type: integer
         unresolvedWorkCount:
           type: integer
+        sessionStateUpdatedAt:
+          type: integer
+        circuitBreakers:
+          type: object
+    TemporalEventLogResponse:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/TemporalEventRecord'
+        nextCursor:
+          type: integer
+          nullable: true
+    TemporalEventRecord:
+      type: object
+      required: [event_id, entity_kind, entity_id, event_type, payload, created_at]
+      properties:
+        event_id:
+          type: integer
+        tenant_id:
+          type: string
+        system_id:
+          type: string
+        workspace_id:
+          type: string
+        collaboration_id:
+          type: string
+        scope_id:
+          type: string
+        session_id:
+          type: string
+          nullable: true
+        actor_id:
+          type: string
+          nullable: true
+        actor_kind:
+          type: string
+          nullable: true
+        actor_system_id:
+          type: string
+          nullable: true
+        actor_display_name:
+          type: string
+          nullable: true
+        actor_metadata:
+          type: object
+          nullable: true
+          additionalProperties: true
+        entity_kind:
+          type: string
+        entity_id:
+          type: string
+        event_type:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+        causation_id:
+          type: string
+          nullable: true
+        correlation_id:
+          type: string
+          nullable: true
+        created_at:
+          type: integer
+    TemporalStateResponse:
+      type: object
+      required: [asOf, exact, cutoverAt, watermarkEventId, context, turns, workingMemory, knowledge, workItems, associations, playbooks, workClaims, handoffs]
+      properties:
+        asOf:
+          type: integer
+        exact:
+          type: boolean
+        cutoverAt:
+          type: integer
+          nullable: true
+        watermarkEventId:
+          type: integer
+          nullable: true
+        context:
+          $ref: '#/components/schemas/ContextResponse'
+        sessionState:
+          type: object
+          nullable: true
+        turns:
+          type: array
+          items:
+            type: object
+        workingMemory:
+          type: array
+          items:
+            type: object
+        knowledge:
+          type: array
+          items:
+            type: object
+        workItems:
+          type: array
+          items:
+            type: object
+        associations:
+          type: array
+          items:
+            type: object
+        playbooks:
+          type: array
+          items:
+            type: object
+        workClaims:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkClaim'
+        handoffs:
+          type: array
+          items:
+            $ref: '#/components/schemas/HandoffRecord'
+        coordinationState:
+          type: object
+          nullable: true
+    TemporalStateDiffResponse:
+      type: object
+      required: [from, to, exact, cutoverAt, watermarkRange, events, summary]
+      properties:
+        from:
+          type: integer
+        to:
+          type: integer
+        exact:
+          type: boolean
+        cutoverAt:
+          type: integer
+          nullable: true
+        watermarkRange:
+          type: object
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/TemporalEventRecord'
+        summary:
+          type: object
     ReadyResponse:
       type: object
       properties:
@@ -501,7 +804,7 @@ components:
           type: integer
     Playbook:
       type: object
-      required: [id, tenant_id, system_id, workspace_id, collaboration_id, scope_id, title, description, instructions, references, templates, scripts, assets, tags, status, revision_count, use_count, created_at, updated_at, schema_version]
+      required: [id, tenant_id, system_id, workspace_id, collaboration_id, scope_id, title, description, instructions, references, templates, scripts, assets, tags, status, revision_count, use_count, created_at, updated_at, schema_version, visibility_class]
       properties:
         id:
           type: integer
@@ -515,6 +818,9 @@ components:
           type: string
         scope_id:
           type: string
+        visibility_class:
+          type: string
+          enum: [private, shared_collaboration, workspace, tenant]
         title:
           type: string
         description:
@@ -698,6 +1004,15 @@ paths:
       summary: Assemble prompt-ready context
       parameters:
         - $ref: '#/components/parameters/Query'
+        - name: view
+          in: query
+          schema:
+            type: string
+            enum: [local_only, local_plus_shared_collaboration, operator_supervisor, workspace_shared]
+        - name: include_coordination
+          in: query
+          schema:
+            type: boolean
         - $ref: '#/components/parameters/ScopeTenant'
         - $ref: '#/components/parameters/ScopeSystem'
         - $ref: '#/components/parameters/ScopeWorkspace'
@@ -710,6 +1025,148 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ContextResponse'
+  /v1/state:
+    get:
+      tags: [retrieval]
+      summary: Get temporal state at a unix timestamp
+      parameters:
+        - name: as_of
+          in: query
+          required: true
+          schema:
+            type: integer
+        - $ref: '#/components/parameters/Query'
+        - name: view
+          in: query
+          schema:
+            type: string
+            enum: [local_only, local_plus_shared_collaboration, operator_supervisor, workspace_shared]
+        - name: include_coordination
+          in: query
+          schema:
+            type: boolean
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Temporal state snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemporalStateResponse'
+  /v1/timeline:
+    get:
+      tags: [retrieval]
+      summary: List memory events in chronological order
+      parameters:
+        - name: session_id
+          in: query
+          schema: { type: string }
+        - name: entity_kind
+          in: query
+          schema: { type: string }
+        - name: entity_id
+          in: query
+          schema: { type: string }
+        - name: start_at
+          in: query
+          schema: { type: integer }
+        - name: end_at
+          in: query
+          schema: { type: integer }
+        - name: limit
+          in: query
+          schema: { type: integer }
+        - name: cursor
+          in: query
+          schema: { type: integer }
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Timeline page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemporalEventLogResponse'
+  /v1/state/diff:
+    get:
+      tags: [retrieval]
+      summary: Diff memory state between two timestamps
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: integer }
+        - name: to
+          in: query
+          required: true
+          schema: { type: integer }
+        - name: session_id
+          in: query
+          schema: { type: string }
+        - name: entity_kind
+          in: query
+          schema: { type: string }
+        - name: entity_id
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Temporal diff
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemporalStateDiffResponse'
+  /v1/events/log:
+    get:
+      tags: [retrieval]
+      summary: List memory events in reverse chronological order
+      parameters:
+        - name: session_id
+          in: query
+          schema: { type: string }
+        - name: entity_kind
+          in: query
+          schema: { type: string }
+        - name: entity_id
+          in: query
+          schema: { type: string }
+        - name: start_at
+          in: query
+          schema: { type: integer }
+        - name: end_at
+          in: query
+          schema: { type: integer }
+        - name: limit
+          in: query
+          schema: { type: integer }
+        - name: cursor
+          in: query
+          schema: { type: integer }
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Event log page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemporalEventLogResponse'
   /v1/search:
     get:
       tags: [retrieval]
@@ -1443,6 +1900,334 @@ paths:
                 properties:
                   workItemId:
                     type: integer
+  /v1/work-items/{id}:
+    post:
+      tags: [ingestion]
+      summary: Update a work item
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string }
+                detail: { type: string, nullable: true }
+                status:
+                  type: string
+                  enum: [open, in_progress, blocked, done]
+                visibility_class:
+                  type: string
+                  enum: [private, shared_collaboration, workspace, tenant]
+                expectedVersion:
+                  type: integer
+      responses:
+        '200':
+          description: Updated work item
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workItem:
+                    type: object
+  /v1/work-items/{id}/claim:
+    post:
+      tags: [ingestion]
+      summary: Claim a work item for an actor
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actor]
+              properties:
+                actor:
+                  $ref: '#/components/schemas/ActorRef'
+                lease_seconds:
+                  type: integer
+      responses:
+        '200':
+          description: Claim result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  claim:
+                    $ref: '#/components/schemas/WorkClaim'
+  /v1/work-claims:
+    get:
+      tags: [retrieval]
+      summary: List current work claims
+      parameters:
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Work claims
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  claims:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/WorkClaim'
+  /v1/work-claims/{id}/renew:
+    post:
+      tags: [ingestion]
+      summary: Renew a work claim
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actor]
+              properties:
+                actor:
+                  $ref: '#/components/schemas/ActorRef'
+                lease_seconds:
+                  type: integer
+      responses:
+        '200':
+          description: Renewed claim
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  claim:
+                    $ref: '#/components/schemas/WorkClaim'
+  /v1/work-claims/{id}/release:
+    post:
+      tags: [ingestion]
+      summary: Release a work claim
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actor]
+              properties:
+                actor:
+                  $ref: '#/components/schemas/ActorRef'
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: Released claim
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  claim:
+                    $ref: '#/components/schemas/WorkClaim'
+  /v1/work-items/{id}/handoffs:
+    post:
+      tags: [ingestion]
+      summary: Create a work-item handoff
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from_actor, to_actor, summary]
+              properties:
+                from_actor:
+                  $ref: '#/components/schemas/ActorRef'
+                to_actor:
+                  $ref: '#/components/schemas/ActorRef'
+                summary:
+                  type: string
+                context_bundle_ref:
+                  type: string
+      responses:
+        '201':
+          description: Created handoff
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  handoff:
+                    $ref: '#/components/schemas/HandoffRecord'
+  /v1/handoffs:
+    get:
+      tags: [retrieval]
+      summary: List pending handoffs
+      parameters:
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Pending handoffs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  handoffs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/HandoffRecord'
+  /v1/handoffs/{id}/accept:
+    post:
+      tags: [ingestion]
+      summary: Accept a handoff
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actor]
+              properties:
+                actor:
+                  $ref: '#/components/schemas/ActorRef'
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: Accepted handoff
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  handoff:
+                    $ref: '#/components/schemas/HandoffRecord'
+  /v1/handoffs/{id}/reject:
+    post:
+      tags: [ingestion]
+      summary: Reject a handoff
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actor]
+              properties:
+                actor:
+                  $ref: '#/components/schemas/ActorRef'
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: Rejected handoff
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  handoff:
+                    $ref: '#/components/schemas/HandoffRecord'
+  /v1/handoffs/{id}/cancel:
+    post:
+      tags: [ingestion]
+      summary: Cancel a handoff
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actor]
+              properties:
+                actor:
+                  $ref: '#/components/schemas/ActorRef'
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: Canceled handoff
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  handoff:
+                    $ref: '#/components/schemas/HandoffRecord'
+  /v1/changes/stream:
+    get:
+      tags: [retrieval]
+      summary: Stream durable memory changes as SSE
+      parameters:
+        - name: cursor
+          in: query
+          schema: { type: integer }
+        - name: session_id
+          in: query
+          schema: { type: string }
+        - name: entity_kind
+          in: query
+          schema: { type: string }
+        - name: entity_id
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: SSE stream of change events
   /v1/compact:
     post:
       tags: [maintenance]

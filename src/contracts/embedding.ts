@@ -23,5 +23,5 @@ export interface EmbeddingAdapter {
     queryVector: EmbeddingVector,
     options?: { limit?: number; minSimilarity?: number },
   ): MaybePromise<SimilarEmbeddingResult[]>;
-  deleteEmbedding(knowledgeMemoryId: number): MaybePromise<void>;
+  deleteEmbedding(knowledgeMemoryId: number, scope?: MemoryScope): MaybePromise<void>;
 }

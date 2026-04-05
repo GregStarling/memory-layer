@@ -1,4 +1,5 @@
 import type { MemoryScope, NormalizedMemoryScope } from './identity.js';
+import type { MemoryVisibilityClass } from './coordination.js';
 
 export type TurnRole = 'user' | 'assistant' | 'system';
 export type CompactionTrigger = 'soft' | 'hard' | 'session_gap' | 'manual';
@@ -250,6 +251,7 @@ export interface NewWorkingMemory extends MemoryScope {
 
 export interface KnowledgeMemory extends NormalizedMemoryScope {
   id: number;
+  visibility_class: MemoryVisibilityClass;
   fact: string;
   fact_type: FactType;
   knowledge_state: KnowledgeState;
@@ -292,6 +294,7 @@ export interface KnowledgeMemory extends NormalizedMemoryScope {
 }
 
 export interface NewKnowledgeMemory extends MemoryScope {
+  visibility_class?: MemoryVisibilityClass;
   fact: string;
   fact_type: FactType;
   knowledge_state?: KnowledgeState;
@@ -548,17 +551,20 @@ export interface TimeRange {
 export interface WorkItem extends NormalizedMemoryScope {
   id: number;
   session_id: string | null;
+  visibility_class: MemoryVisibilityClass;
   kind: WorkItemKind;
   title: string;
   detail: string | null;
   status: WorkItemStatus;
   source_working_memory_id: number | null;
+  version: number;
   created_at: number;
   updated_at: number;
 }
 
 export interface NewWorkItem extends MemoryScope {
   session_id?: string | null;
+  visibility_class?: MemoryVisibilityClass;
   kind: WorkItemKind;
   title: string;
   detail?: string | null;
@@ -617,6 +623,7 @@ export interface ReflectResult {
 
 export interface Playbook extends NormalizedMemoryScope {
   id: number;
+  visibility_class: MemoryVisibilityClass;
   title: string;
   description: string;
   instructions: string;
@@ -637,6 +644,7 @@ export interface Playbook extends NormalizedMemoryScope {
 }
 
 export interface NewPlaybook extends MemoryScope {
+  visibility_class?: MemoryVisibilityClass;
   title: string;
   description: string;
   instructions: string;
@@ -670,6 +678,7 @@ export interface NewPlaybookRevision extends MemoryScope {
 
 export interface Association extends NormalizedMemoryScope {
   id: number;
+  visibility_class: MemoryVisibilityClass;
   source_kind: AssociationTargetKind;
   source_id: number;
   target_kind: AssociationTargetKind;
@@ -681,6 +690,7 @@ export interface Association extends NormalizedMemoryScope {
 }
 
 export interface NewAssociation extends MemoryScope {
+  visibility_class?: MemoryVisibilityClass;
   source_kind: AssociationTargetKind;
   source_id: number;
   target_kind: AssociationTargetKind;

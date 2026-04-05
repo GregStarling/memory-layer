@@ -241,4 +241,86 @@ describe('buildMemoryContext', () => {
     expect(context.activeObjectives).toHaveLength(1);
     expect(context.unresolvedWork).toContain('Fix retrieval edge cases');
   });
+
+  it('derives session state and explanation traces for prompt-facing short-term memory', async () => {
+    const scope = makeScope();
+    const { sessionId } = seedTurns(adapter, scope, 0);
+    adapter.insertTurn({
+      ...scope,
+      session_id: sessionId,
+      actor: 'user',
+      role: 'user',
+      content: 'Assume staging is current and we should decide on rollback ownership.',
+    });
+    adapter.insertTurn({
+      ...scope,
+      session_id: sessionId,
+      actor: 'deploy-bot',
+      role: 'assistant',
+      content: 'Tool deploy-bot output: rollback rehearsal passed.',
+    });
+    adapter.insertWorkItem({
+      ...scope,
+      session_id: sessionId,
+      kind: 'unresolved_work',
+      title: 'Wait for security approval',
+      status: 'blocked',
+    });
+    adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'Choose a single rollback owner before deploy',
+      fact_type: 'decision',
+      source: 'manual',
+      confidence: 'high',
+    });
+
+    const context = await buildMemoryContext(asyncAdapter, scope, { relevanceQuery: 'rollback owner' });
+    expect(context.sessionState.currentObjective).toBeTruthy();
+    expect(context.sessionState.blockers).toContain('Wait for security approval');
+    expect(context.sessionState.assumptions.join(' ')).toContain('Assume staging is current');
+    expect(context.sessionState.pendingDecisions.join(' ')).toContain('decide on rollback ownership');
+    expect(context.sessionState.activeTools).toContain('deploy-bot');
+    expect(context.sessionState.recentOutputs.join(' ')).toContain('rollback rehearsal passed');
+    expect(context.debugTrace.scope.scopeSource).toBe('local');
+    expect(context.debugTrace.selectedKnowledge).toEqual(context.knowledgeSelectionReasons);
+  });
+
+  it('caps associated knowledge expansion and records truncated candidates', async () => {
+    const scope = makeScope();
+    seedTurns(adapter, scope, 1);
+    const seed = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'Primary rollback plan lives in ops/runbook.md',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+
+    for (let index = 0; index < 15; index += 1) {
+      const related = adapter.insertKnowledgeMemory({
+        ...scope,
+        fact: `Associated rollback note ${index}`,
+        fact_type: 'reference',
+        source: 'manual',
+        confidence: 'high',
+      });
+      adapter.insertAssociation({
+        ...scope,
+        source_kind: 'knowledge',
+        source_id: seed.id,
+        target_kind: 'knowledge',
+        target_id: related.id,
+        association_type: 'supports',
+        confidence: 0.9,
+      });
+    }
+
+    const context = await buildMemoryContext(asyncAdapter, scope, {
+      relevanceQuery: 'rollback runbook',
+      maxKnowledgeItems: 1,
+    });
+    expect(context.associatedKnowledge.length).toBeLessThanOrEqual(12);
+    expect(context.debugTrace.associationExpansion.candidateKnowledgeIds.length).toBe(15);
+    expect(context.debugTrace.associationExpansion.truncatedKnowledgeIds.length).toBeGreaterThan(0);
+  });
 });

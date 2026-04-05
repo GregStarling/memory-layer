@@ -3,6 +3,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createSQLiteAdapter } from '../adapters/sqlite/index.js';
 import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
+import {
+  ResourceNotFoundError,
+  ScopeMismatchError,
+} from '../contracts/errors.js';
 import type { StorageAdapter } from '../contracts/storage.js';
 import type { MemoryScope } from '../contracts/identity.js';
 import type { StructuredGenerationClient } from '../summarizers/client.js';
@@ -149,13 +153,13 @@ describe('playbook core', () => {
       const otherScope = scope({ scope_id: 'thread-2' });
       await expect(
         revisePlaybook(asyncAdapter, otherScope, playbook.id, 'Hijacked', 'xss'),
-      ).rejects.toThrow('does not belong');
+      ).rejects.toBeInstanceOf(ScopeMismatchError);
     });
 
     it('throws for nonexistent playbook', async () => {
       await expect(
         revisePlaybook(asyncAdapter, s, 9999, 'new', 'reason'),
-      ).rejects.toThrow('not found');
+      ).rejects.toBeInstanceOf(ResourceNotFoundError);
     });
 
     it('increments revision count', async () => {

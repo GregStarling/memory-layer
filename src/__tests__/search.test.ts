@@ -127,6 +127,13 @@ describe('search', () => {
 
   it('returns an empty array for invalid FTS syntax', () => {
     const scope = makeScope();
+    adapter.insertTurn({
+      ...scope,
+      session_id: 's1',
+      actor: 'user-1',
+      role: 'user',
+      content: 'The project uses sqlite',
+    });
     adapter.insertKnowledgeMemory({
       ...scope,
       fact: 'The project uses sqlite',
@@ -135,6 +142,7 @@ describe('search', () => {
       confidence: 'high',
     });
 
+    expect(adapter.searchTurns(scope, '"sqlite')).toHaveLength(1);
     expect(adapter.searchKnowledge(scope, '"unterminated')).toEqual([]);
   });
 

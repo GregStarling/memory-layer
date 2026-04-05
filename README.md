@@ -252,6 +252,8 @@ npx memory-layer serve --transport http --db ./memory.db --port 3100
 
 Full REST API documented in [`openapi.yaml`](openapi.yaml). Supports multi-tenant routing via scope headers, event streaming via SSE, and API key authentication.
 
+Important trust-model note: the built-in HTTP server treats a valid API key as one trust domain. Scope headers and query/body scope overrides are routing inputs, not authorization boundaries. If you expose the server beyond localhost or a private service mesh, put tenant-aware auth in front of it.
+
 ---
 
 ## Python

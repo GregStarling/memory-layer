@@ -2,6 +2,28 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 
 import type { AsyncStorageAdapter } from '../../contracts/async-storage.js';
 import { UniqueConstraintError } from '../../contracts/storage.js';
+import { ConflictError } from '../../contracts/errors.js';
+import type {
+  ActorRef,
+  HandoffQuery,
+  HandoffRecord,
+  NewHandoffInput,
+  NewWorkClaimInput,
+  WorkClaim,
+  WorkClaimQuery,
+  WorkItemPatch,
+} from '../../contracts/coordination.js';
+import type {
+  MemoryEventEntityKind,
+  MemoryEventQuery,
+  MemoryEventRecord,
+  NewMemoryEventRecord,
+  NewSessionStateProjection,
+  NewTemporalProjectionWatermark,
+  SessionStateProjection,
+  TemporalProjectionWatermark,
+  TimelineResult,
+} from '../../contracts/temporal.js';
 import type {
   EmbeddingAdapter,
   EmbeddingVector,
@@ -199,6 +221,7 @@ function mapKnowledgeMemory(row: Record<string, unknown>): KnowledgeMemory {
     workspace_id: String(row.workspace_id ?? ''),
     collaboration_id: String(row.collaboration_id ?? ''),
     scope_id: String(row.scope_id),
+    visibility_class: (row.visibility_class as KnowledgeMemory['visibility_class']) ?? 'private',
     fact: String(row.fact),
     fact_type: row.fact_type as KnowledgeMemory['fact_type'],
     knowledge_state: (row.knowledge_state as KnowledgeMemory['knowledge_state']) ?? 'trusted',
@@ -255,11 +278,13 @@ function mapWorkItem(row: Record<string, unknown>): WorkItem {
     collaboration_id: String(row.collaboration_id ?? ''),
     scope_id: String(row.scope_id),
     session_id: row.session_id != null ? String(row.session_id) : null,
+    visibility_class: (row.visibility_class as WorkItem['visibility_class']) ?? 'private',
     title: String(row.title),
     kind: row.kind as WorkItem['kind'],
     status: row.status as WorkItem['status'],
     detail: row.detail != null ? String(row.detail) : null,
     source_working_memory_id: row.source_working_memory_id != null ? Number(row.source_working_memory_id) : null,
+    version: Number(row.version ?? 1),
     created_at: Number(row.created_at),
     updated_at: Number(row.updated_at),
   };
@@ -276,6 +301,55 @@ function parseJsonStringArray(value: unknown): string[] {
   return [];
 }
 
+function parseJsonObject(value: unknown): Record<string, unknown> | null {
+  if (value == null) return null;
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function serializeActorMetadata(
+  actor: ActorRef,
+): [string, string, string | null, string | null, string | null] {
+  return [
+    actor.actor_kind,
+    actor.actor_id,
+    actor.system_id ?? null,
+    actor.display_name ?? null,
+    actor.metadata ? JSON.stringify(actor.metadata) : null,
+  ];
+}
+
+function parseActorRef(
+  row: Record<string, unknown>,
+  prefix: 'actor' | 'from_actor' | 'to_actor',
+): ActorRef {
+  const base = `${prefix}_`;
+  return {
+    actor_kind: String(row[`${base}kind`]) as ActorRef['actor_kind'],
+    actor_id: String(row[`${base}id`]),
+    system_id: row[`${base}system_id`] != null ? String(row[`${base}system_id`]) : null,
+    display_name:
+      row[`${base}display_name`] != null ? String(row[`${base}display_name`]) : null,
+    metadata: parseJsonObject(row[`${base}metadata`]) ?? null,
+  };
+}
+
+function sameActor(actor: Pick<ActorRef, 'actor_kind' | 'actor_id'>, other: Pick<ActorRef, 'actor_kind' | 'actor_id'>): boolean {
+  return actor.actor_kind === other.actor_kind && actor.actor_id === other.actor_id;
+}
+
 function mapPlaybook(row: Record<string, unknown>): Playbook {
   return {
     id: Number(row.id),
@@ -284,6 +358,7 @@ function mapPlaybook(row: Record<string, unknown>): Playbook {
     workspace_id: String(row.workspace_id ?? ''),
     collaboration_id: String(row.collaboration_id ?? ''),
     scope_id: String(row.scope_id),
+    visibility_class: (row.visibility_class as Playbook['visibility_class']) ?? 'private',
     title: String(row.title),
     description: String(row.description),
     instructions: String(row.instructions),
@@ -328,6 +403,7 @@ function mapAssociation(row: Record<string, unknown>): Association {
     workspace_id: String(row.workspace_id ?? ''),
     collaboration_id: String(row.collaboration_id ?? ''),
     scope_id: String(row.scope_id),
+    visibility_class: (row.visibility_class as Association['visibility_class']) ?? 'private',
     source_kind: row.source_kind as AssociationTargetKind,
     source_id: Number(row.source_id),
     target_kind: row.target_kind as AssociationTargetKind,
@@ -336,6 +412,56 @@ function mapAssociation(row: Record<string, unknown>): Association {
     confidence: Number(row.confidence),
     auto_generated: Boolean(row.auto_generated),
     created_at: Number(row.created_at),
+  };
+}
+
+function mapWorkClaim(row: Record<string, unknown>): WorkClaim {
+  return {
+    id: Number(row.id),
+    tenant_id: String(row.tenant_id),
+    system_id: String(row.system_id),
+    workspace_id: String(row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? ''),
+    scope_id: String(row.scope_id),
+    work_item_id: Number(row.work_item_id),
+    actor: parseActorRef(row, 'actor'),
+    session_id: row.session_id != null ? String(row.session_id) : null,
+    claim_token: String(row.claim_token),
+    status: row.status as WorkClaim['status'],
+    claimed_at: Number(row.claimed_at),
+    expires_at: Number(row.expires_at),
+    released_at: row.released_at != null ? Number(row.released_at) : null,
+    release_reason: row.release_reason != null ? String(row.release_reason) : null,
+    source_event_id: row.source_event_id != null ? Number(row.source_event_id) : null,
+    visibility_class: row.visibility_class as WorkClaim['visibility_class'],
+    version: Number(row.version ?? 1),
+  };
+}
+
+function mapHandoff(row: Record<string, unknown>): HandoffRecord {
+  return {
+    id: Number(row.id),
+    tenant_id: String(row.tenant_id),
+    system_id: String(row.system_id),
+    workspace_id: String(row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? ''),
+    scope_id: String(row.scope_id),
+    work_item_id: Number(row.work_item_id),
+    from_actor: parseActorRef(row, 'from_actor'),
+    to_actor: parseActorRef(row, 'to_actor'),
+    session_id: row.session_id != null ? String(row.session_id) : null,
+    summary: String(row.summary),
+    context_bundle_ref: row.context_bundle_ref != null ? String(row.context_bundle_ref) : null,
+    status: row.status as HandoffRecord['status'],
+    created_at: Number(row.created_at),
+    accepted_at: row.accepted_at != null ? Number(row.accepted_at) : null,
+    rejected_at: row.rejected_at != null ? Number(row.rejected_at) : null,
+    canceled_at: row.canceled_at != null ? Number(row.canceled_at) : null,
+    expires_at: row.expires_at != null ? Number(row.expires_at) : null,
+    decision_reason: row.decision_reason != null ? String(row.decision_reason) : null,
+    source_event_id: row.source_event_id != null ? Number(row.source_event_id) : null,
+    visibility_class: row.visibility_class as HandoffRecord['visibility_class'],
+    version: Number(row.version ?? 1),
   };
 }
 
@@ -464,6 +590,61 @@ function mapKnowledgeEvidenceRow(row: Record<string, unknown>): KnowledgeEvidenc
   };
 }
 
+function mapMemoryEventRecord(row: Record<string, unknown>): MemoryEventRecord {
+  return {
+    event_id: Number(row.event_id),
+    tenant_id: String(row.tenant_id),
+    system_id: String(row.system_id),
+    workspace_id: String(row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? ''),
+    scope_id: String(row.scope_id),
+    session_id: row.session_id != null ? String(row.session_id) : null,
+    actor_id: row.actor_id != null ? String(row.actor_id) : null,
+    actor_kind: row.actor_kind != null ? String(row.actor_kind) : null,
+    actor_system_id: row.actor_system_id != null ? String(row.actor_system_id) : null,
+    actor_display_name: row.actor_display_name != null ? String(row.actor_display_name) : null,
+    actor_metadata: parseJsonObject(row.actor_metadata) ?? null,
+    entity_kind: row.entity_kind as MemoryEventEntityKind,
+    entity_id: String(row.entity_id),
+    event_type: row.event_type as MemoryEventRecord['event_type'],
+    payload: parseJsonObject(row.payload) ?? {},
+    causation_id: row.causation_id != null ? String(row.causation_id) : null,
+    correlation_id: row.correlation_id != null ? String(row.correlation_id) : null,
+    created_at: Number(row.created_at),
+  };
+}
+
+function mapSessionStateProjection(row: Record<string, unknown>): SessionStateProjection {
+  return {
+    tenant_id: String(row.tenant_id),
+    system_id: String(row.system_id),
+    workspace_id: String(row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? ''),
+    scope_id: String(row.scope_id),
+    session_id: String(row.session_id),
+    currentObjective: row.current_objective != null ? String(row.current_objective) : null,
+    blockers: parseJsonStringArray(row.blockers),
+    assumptions: parseJsonStringArray(row.assumptions),
+    pendingDecisions: parseJsonStringArray(row.pending_decisions),
+    activeTools: parseJsonStringArray(row.active_tools),
+    recentOutputs: parseJsonStringArray(row.recent_outputs),
+    updatedAt: Number(row.updated_at),
+    source_event_id: row.source_event_id != null ? Number(row.source_event_id) : null,
+  };
+}
+
+function mapTemporalProjectionWatermark(
+  row: Record<string, unknown>,
+): TemporalProjectionWatermark {
+  return {
+    projection_name: String(row.projection_name),
+    last_event_id: Number(row.last_event_id),
+    updated_at: Number(row.updated_at),
+    cutover_at: row.cutover_at != null ? Number(row.cutover_at) : null,
+    metadata: parseJsonObject(row.metadata),
+  };
+}
+
 /**
  * Creates a PostgreSQL-backed AsyncStorageAdapter.
  *
@@ -491,18 +672,312 @@ export function createPostgresAdapter(
     const context = txStorage.getStore();
     return context ? context.client.query(text, values) : rootQuery(text, values);
   }) as PgPool['query'];
+  let temporalInitPromise: Promise<void> | null = null;
+
+  function resolveEventQuery(query?: MemoryEventQuery): {
+    sessionId: string;
+    entityKind: MemoryEventEntityKind | null;
+    entityId: string;
+    startAt: number;
+    endAt: number;
+    limit: number;
+    cursor: number;
+  } {
+    return {
+      sessionId: query?.sessionId ?? '',
+      entityKind: query?.entityKind ?? null,
+      entityId: query?.entityId ?? '',
+      startAt: query?.startAt ?? Number.NEGATIVE_INFINITY,
+      endAt: query?.endAt ?? Number.POSITIVE_INFINITY,
+      limit: query?.limit ?? 100,
+      cursor: query?.cursor ?? 0,
+    };
+  }
+
+  async function ensureTemporalCutover(): Promise<void> {
+    if (!temporalInitPromise) {
+      temporalInitPromise = (async () => {
+        const current = await readTemporalWatermark('temporal');
+        if (current?.cutover_at != null) return;
+        const cutoverAt = now();
+        await writeTemporalWatermark({
+          projection_name: 'temporal',
+          last_event_id: current?.last_event_id ?? 0,
+          updated_at: cutoverAt,
+          cutover_at: cutoverAt,
+          metadata: current?.metadata ?? null,
+        });
+      })();
+    }
+    return temporalInitPromise;
+  }
+
+  async function readTemporalWatermark(
+    projectionName = 'temporal',
+  ): Promise<TemporalProjectionWatermark | null> {
+    const { rows } = await pool.query(
+      'SELECT * FROM projection_watermarks WHERE projection_name = $1',
+      [projectionName],
+    );
+    return rows[0] ? mapTemporalProjectionWatermark(rows[0]) : null;
+  }
+
+  async function writeTemporalWatermark(
+    input: NewTemporalProjectionWatermark,
+  ): Promise<TemporalProjectionWatermark> {
+    const updatedAt = input.updated_at ?? now();
+    const { rows } = await pool.query(
+      `INSERT INTO projection_watermarks
+        (projection_name, last_event_id, updated_at, cutover_at, metadata)
+       VALUES ($1, $2, $3, $4, $5::jsonb)
+       ON CONFLICT (projection_name) DO UPDATE SET
+         last_event_id = EXCLUDED.last_event_id,
+         updated_at = EXCLUDED.updated_at,
+         cutover_at = EXCLUDED.cutover_at,
+         metadata = EXCLUDED.metadata
+       RETURNING *`,
+      [
+        input.projection_name,
+        input.last_event_id,
+        updatedAt,
+        input.cutover_at ?? null,
+        input.metadata ? JSON.stringify(input.metadata) : null,
+      ],
+    );
+    if (rows[0]) {
+      return mapTemporalProjectionWatermark(rows[0]);
+    }
+    return {
+      projection_name: input.projection_name,
+      last_event_id: input.last_event_id,
+      updated_at: updatedAt,
+      cutover_at: input.cutover_at ?? null,
+      metadata: input.metadata ?? null,
+    };
+  }
+
+  async function insertMemoryEventInternal(
+    input: NewMemoryEventRecord,
+  ): Promise<MemoryEventRecord> {
+    await ensureTemporalCutover();
+    const normalized = normalizeScope(input);
+    const createdAt = input.created_at ?? now();
+    const previousWatermark = await readTemporalWatermark('temporal');
+    const { rows } = await pool.query(
+      `INSERT INTO memory_event_log
+        (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, actor_id,
+         actor_kind, actor_system_id, actor_display_name, actor_metadata,
+         entity_kind, entity_id, event_type, payload, causation_id, correlation_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15::jsonb, $16, $17, $18)
+       RETURNING *`,
+      [
+        normalized.tenant_id,
+        normalized.system_id,
+        normalized.workspace_id,
+        normalized.collaboration_id,
+        normalized.scope_id,
+        input.session_id ?? null,
+        input.actor_id ?? null,
+        input.actor_kind ?? null,
+        input.actor_system_id ?? null,
+        input.actor_display_name ?? null,
+        input.actor_metadata ? JSON.stringify(input.actor_metadata) : null,
+        input.entity_kind,
+        input.entity_id,
+        input.event_type,
+        JSON.stringify(input.payload ?? {}),
+        input.causation_id ?? null,
+        input.correlation_id ?? null,
+        createdAt,
+      ],
+    );
+    const record = rows[0]
+      ? mapMemoryEventRecord(rows[0])
+      : {
+          event_id: (previousWatermark?.last_event_id ?? 0) + 1,
+          tenant_id: normalized.tenant_id,
+          system_id: normalized.system_id,
+          workspace_id: normalized.workspace_id,
+          collaboration_id: normalized.collaboration_id,
+          scope_id: normalized.scope_id,
+          session_id: input.session_id ?? null,
+          actor_id: input.actor_id ?? null,
+          actor_kind: input.actor_kind ?? null,
+          actor_system_id: input.actor_system_id ?? null,
+          actor_display_name: input.actor_display_name ?? null,
+          actor_metadata: input.actor_metadata ?? null,
+          entity_kind: input.entity_kind,
+          entity_id: input.entity_id,
+          event_type: input.event_type,
+          payload: input.payload ?? {},
+          causation_id: input.causation_id ?? null,
+          correlation_id: input.correlation_id ?? null,
+          created_at: createdAt,
+        };
+    await writeTemporalWatermark({
+      projection_name: 'temporal',
+      last_event_id: record.event_id,
+      updated_at: createdAt,
+      cutover_at: previousWatermark?.cutover_at ?? createdAt,
+      metadata: previousWatermark?.metadata ?? null,
+    });
+    return record;
+  }
+
+  async function listScopedMemoryEvents(
+    scope: MemoryScope,
+    query?: MemoryEventQuery,
+  ): Promise<TimelineResult> {
+    await ensureTemporalCutover();
+    const resolved = resolveEventQuery(query);
+    const params: unknown[] = [...scopeParams(scope), resolved.startAt, resolved.endAt];
+    const clauses = [`${scopeWhere()}`, `created_at >= $6`, `created_at <= $7`];
+    let nextParam = 8;
+    if (resolved.cursor > 0) {
+      clauses.push(`event_id > $${nextParam}`);
+      params.push(resolved.cursor);
+      nextParam += 1;
+    }
+    if (resolved.sessionId) {
+      clauses.push(`session_id = $${nextParam}`);
+      params.push(resolved.sessionId);
+      nextParam += 1;
+    }
+    if (resolved.entityKind) {
+      clauses.push(`entity_kind = $${nextParam}`);
+      params.push(resolved.entityKind);
+      nextParam += 1;
+    }
+    if (resolved.entityId) {
+      clauses.push(`entity_id = $${nextParam}`);
+      params.push(resolved.entityId);
+      nextParam += 1;
+    }
+    params.push(resolved.limit + 1);
+    const { rows } = await pool.query(
+      `SELECT * FROM memory_event_log
+       WHERE ${clauses.join(' AND ')}
+       ORDER BY created_at ASC, event_id ASC
+       LIMIT $${nextParam}`,
+      params,
+    );
+    const items = rows.slice(0, resolved.limit).map(mapMemoryEventRecord);
+    return {
+      events: items,
+      nextCursor: rows.length > resolved.limit ? items[items.length - 1]?.event_id ?? null : null,
+    };
+  }
+
+  async function readSessionStateProjection(
+    scope: MemoryScope,
+    sessionId: string,
+  ): Promise<SessionStateProjection | null> {
+    const { rows } = await pool.query(
+      `SELECT * FROM session_state_current WHERE ${scopeWhere()} AND session_id = $6`,
+      [...scopeParams(scope), sessionId],
+    );
+    return rows[0] ? mapSessionStateProjection(rows[0]) : null;
+  }
+
+  async function writeSessionStateProjection(
+    input: NewSessionStateProjection,
+  ): Promise<SessionStateProjection> {
+    const normalized = normalizeScope(input);
+    const { rows } = await pool.query(
+      `INSERT INTO session_state_current
+        (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id,
+         current_objective, blockers, assumptions, pending_decisions, active_tools, recent_outputs,
+         updated_at, source_event_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb, $13, $14)
+       ON CONFLICT (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id) DO UPDATE SET
+         current_objective = EXCLUDED.current_objective,
+         blockers = EXCLUDED.blockers,
+         assumptions = EXCLUDED.assumptions,
+         pending_decisions = EXCLUDED.pending_decisions,
+         active_tools = EXCLUDED.active_tools,
+         recent_outputs = EXCLUDED.recent_outputs,
+         updated_at = EXCLUDED.updated_at,
+         source_event_id = EXCLUDED.source_event_id
+       RETURNING *`,
+      [
+        normalized.tenant_id,
+        normalized.system_id,
+        normalized.workspace_id,
+        normalized.collaboration_id,
+        normalized.scope_id,
+        input.session_id,
+        input.currentObjective,
+        JSON.stringify(input.blockers),
+        JSON.stringify(input.assumptions),
+        JSON.stringify(input.pendingDecisions),
+        JSON.stringify(input.activeTools),
+        JSON.stringify(input.recentOutputs),
+        input.updatedAt,
+        input.source_event_id ?? null,
+      ],
+    );
+    return mapSessionStateProjection(rows[0]);
+  }
+
+  async function expireClaimRecord(row: Record<string, unknown>, expiredAt = now()): Promise<WorkClaim> {
+    const { rows } = await pool.query(
+      `UPDATE work_claims_current
+       SET status = 'expired', released_at = $2, release_reason = 'expired', version = COALESCE(version, 1) + 1
+       WHERE id = $1
+       RETURNING *`,
+      [Number(row.id), expiredAt],
+    );
+    const expired = mapWorkClaim(rows[0] ?? row);
+    await insertMemoryEventInternal({
+      ...normalizeScope(expired),
+      session_id: expired.session_id,
+      actor_id: expired.actor.actor_id,
+      actor_kind: expired.actor.actor_kind,
+      actor_system_id: expired.actor.system_id,
+      actor_display_name: expired.actor.display_name,
+      actor_metadata: expired.actor.metadata,
+      entity_kind: 'work_claim',
+      entity_id: String(expired.id),
+      event_type: 'work_claim.expired',
+      payload: { after: expired },
+      created_at: expiredAt,
+    });
+    return expired;
+  }
+
+  async function getAnyClaimRowByWorkItem(workItemId: number): Promise<Record<string, unknown> | null> {
+    const { rows } = await pool.query(
+      'SELECT * FROM work_claims_current WHERE work_item_id = $1 ORDER BY id DESC LIMIT 1',
+      [workItemId],
+    );
+    return rows[0] ?? null;
+  }
 
   return {
     async insertTurn(input: NewTurn): Promise<Turn> {
       const n = normalizeScope(input);
+      const createdAt = now();
       const tokenEst = input.token_estimate ?? estimateTokens(input.content);
       const { rows } = await pool.query(
         `INSERT INTO turns (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, actor, role, content, priority, token_estimate, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          RETURNING *`,
-        [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.session_id, input.actor, input.role, input.content, input.priority ?? (input.role === 'system' ? 1.5 : 1), tokenEst, now()],
+        [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.session_id, input.actor, input.role, input.content, input.priority ?? (input.role === 'system' ? 1.5 : 1), tokenEst, createdAt],
       );
-      return mapTurn(rows[0]);
+      const turn = mapTurn(rows[0]);
+      await insertMemoryEventInternal({
+        ...n,
+        session_id: turn.session_id,
+        actor_id: turn.actor,
+        entity_kind: 'turn',
+        entity_id: String(turn.id),
+        event_type: 'turn.created',
+        payload: {
+          after: turn,
+        },
+        created_at: createdAt,
+      });
+      return turn;
     },
 
     async insertTurns(inputs) {
@@ -591,10 +1066,31 @@ export function createPostgresAdapter(
     },
 
     async archiveTurn(id, archivedAt, compactionLogId) {
+      const before = await this.getTurnById(id);
       await pool.query(
         `UPDATE turns SET status = 'archived', archived_at = $2, compaction_log_id = $3 WHERE id = $1`,
         [id, archivedAt, compactionLogId],
       );
+      const after = await this.getTurnById(id);
+      if (before && after) {
+        await insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          actor_id: after.actor,
+          entity_kind: 'turn',
+          entity_id: String(after.id),
+          event_type: 'turn.archived',
+          payload: {
+            before,
+            after,
+            patch: {
+              archived_at: archivedAt,
+              compaction_log_id: compactionLogId,
+            },
+          },
+          created_at: archivedAt,
+        });
+      }
     },
 
     async getArchivedTurnRange(sessionId, startId, endId, scope) {
@@ -619,16 +1115,29 @@ export function createPostgresAdapter(
 
     async insertWorkingMemory(input) {
       const n = normalizeScope(input);
+      const createdAt = now();
       const { rows } = await pool.query(
         `INSERT INTO working_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, summary, key_entities, topic_tags, turn_id_start, turn_id_end, turn_count, compaction_trigger, created_at, episode_recap)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
          RETURNING *`,
         [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.session_id, input.summary,
          JSON.stringify(input.key_entities), JSON.stringify(input.topic_tags),
-         input.turn_id_start, input.turn_id_end, input.turn_count, input.compaction_trigger, now(),
+         input.turn_id_start, input.turn_id_end, input.turn_count, input.compaction_trigger, createdAt,
          input.episode_recap ? JSON.stringify(input.episode_recap) : null],
       );
-      return mapWorkingMemory(rows[0]);
+      const workingMemory = mapWorkingMemory(rows[0]);
+      await insertMemoryEventInternal({
+        ...n,
+        session_id: workingMemory.session_id,
+        entity_kind: 'working_memory',
+        entity_id: String(workingMemory.id),
+        event_type: 'working_memory.created',
+        payload: {
+          after: workingMemory,
+        },
+        created_at: createdAt,
+      });
+      return workingMemory;
     },
 
     async getWorkingMemoryById(id) {
@@ -680,15 +1189,55 @@ export function createPostgresAdapter(
     },
 
     async expireWorkingMemory(id) {
-      await pool.query(`UPDATE working_memory SET status = 'expired', expires_at = $2 WHERE id = $1`, [id, now()]);
+      const before = await this.getWorkingMemoryById(id);
+      const expiredAt = now();
+      await pool.query(`UPDATE working_memory SET status = 'expired', expires_at = $2 WHERE id = $1`, [id, expiredAt]);
+      const after = await this.getWorkingMemoryById(id);
+      if (before && after) {
+        await insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          entity_kind: 'working_memory',
+          entity_id: String(after.id),
+          event_type: 'working_memory.expired',
+          payload: {
+            before,
+            after,
+            patch: {
+              expires_at: expiredAt,
+            },
+          },
+          created_at: expiredAt,
+        });
+      }
     },
 
     async markWorkingMemoryPromoted(id, knowledgeMemoryId) {
+      const before = await this.getWorkingMemoryById(id);
       await pool.query(`UPDATE working_memory SET promoted_to_knowledge_id = $2 WHERE id = $1`, [id, knowledgeMemoryId]);
+      const after = await this.getWorkingMemoryById(id);
+      if (before && after) {
+        await insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          entity_kind: 'working_memory',
+          entity_id: String(after.id),
+          event_type: 'working_memory.promoted',
+          payload: {
+            before,
+            after,
+            refs: {
+              knowledge_memory_id: knowledgeMemoryId,
+            },
+          },
+          created_at: now(),
+        });
+      }
     },
 
     async insertKnowledgeMemory(input) {
       const n = normalizeScope(input);
+      const createdAt = now();
       const { rows } = await pool.query(
         `INSERT INTO knowledge_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id, fact, fact_type, knowledge_state, knowledge_class, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated, source, confidence, confidence_score, grounding_strength, evidence_count, trust_score, verification_status, verification_notes, last_verified_at, next_reverification_at, last_confirmed_at, confirmation_count, source_system_id, source_scope_id, source_collaboration_id, source_working_memory_id, source_turn_ids, successful_use_count, failed_use_count, disputed_at, dispute_reason, contradiction_score, superseded_at, retired_at, created_at, last_accessed_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $40)
@@ -709,9 +1258,20 @@ export function createPostgresAdapter(
          input.source_working_memory_id ?? null, JSON.stringify(input.source_turn_ids ?? []),
          input.successful_use_count ?? 0, input.failed_use_count ?? 0,
          input.disputed_at ?? null, input.dispute_reason ?? null, input.contradiction_score ?? 0,
-         input.superseded_at ?? null, input.retired_at ?? null, now()],
+         input.superseded_at ?? null, input.retired_at ?? null, createdAt],
       );
-      return mapKnowledgeMemory(rows[0]);
+      const knowledge = mapKnowledgeMemory(rows[0]);
+      await insertMemoryEventInternal({
+        ...n,
+        entity_kind: 'knowledge_memory',
+        entity_id: String(knowledge.id),
+        event_type: 'knowledge.created',
+        payload: {
+          after: knowledge,
+        },
+        created_at: createdAt,
+      });
+      return knowledge;
     },
 
     async insertKnowledgeMemories(inputs) {
@@ -1008,6 +1568,7 @@ export function createPostgresAdapter(
     },
 
     async updateKnowledgeMemory(id, patch) {
+      const before = await this.getKnowledgeMemoryById(id);
       const assignments: string[] = [];
       const values: unknown[] = [];
       const push = (column: string, value: unknown) => {
@@ -1039,42 +1600,128 @@ export function createPostgresAdapter(
         `UPDATE knowledge_memory SET ${assignments.join(', ')} WHERE id = $${values.length} RETURNING *`,
         values,
       );
-      return rows[0] ? mapKnowledgeMemory(rows[0]) : null;
+      const after = rows[0] ? mapKnowledgeMemory(rows[0]) : null;
+      if (before && after) {
+        await insertMemoryEventInternal({
+          ...normalizeScope(after),
+          entity_kind: 'knowledge_memory',
+          entity_id: String(after.id),
+          event_type: 'knowledge.updated',
+          payload: {
+            before,
+            after,
+            patch,
+          },
+          created_at: now(),
+        });
+      }
+      return after;
     },
 
     async touchKnowledgeMemory(id) {
+      const before = await this.getKnowledgeMemoryById(id);
+      const touchedAt = now();
       await pool.query(
         `UPDATE knowledge_memory SET access_count = access_count + 1, last_accessed_at = $2 WHERE id = $1`,
-        [id, now()],
+        [id, touchedAt],
       );
+      const after = await this.getKnowledgeMemoryById(id);
+      if (before && after) {
+        await insertMemoryEventInternal({
+          ...normalizeScope(after),
+          entity_kind: 'knowledge_memory',
+          entity_id: String(after.id),
+          event_type: 'knowledge.touched',
+          payload: {
+            before,
+            after,
+            patch: {
+              last_accessed_at: touchedAt,
+              access_count: after.access_count,
+            },
+          },
+          created_at: touchedAt,
+        });
+      }
     },
 
     async retireKnowledgeMemory(id, retiredAt) {
+      const before = await this.getKnowledgeMemoryById(id);
+      const effectiveRetiredAt = retiredAt ?? now();
       await pool.query(
         `UPDATE knowledge_memory SET retired_at = $2 WHERE id = $1`,
-        [id, retiredAt ?? now()],
+        [id, effectiveRetiredAt],
       );
+      const after = await this.getKnowledgeMemoryById(id);
+      if (before && after) {
+        await insertMemoryEventInternal({
+          ...normalizeScope(after),
+          entity_kind: 'knowledge_memory',
+          entity_id: String(after.id),
+          event_type: 'knowledge.retired',
+          payload: {
+            before,
+            after,
+            patch: {
+              retired_at: effectiveRetiredAt,
+            },
+          },
+          created_at: effectiveRetiredAt,
+        });
+      }
     },
 
     async supersedeKnowledgeMemory(oldId, newId) {
+      const before = await this.getKnowledgeMemoryById(oldId);
+      const supersededAt = now();
       await pool.query(
         `UPDATE knowledge_memory
          SET superseded_by_id = $2, superseded_at = $3, knowledge_state = 'superseded', retired_at = $3
          WHERE id = $1`,
-        [oldId, newId, now()],
+        [oldId, newId, supersededAt],
       );
+      const after = await this.getKnowledgeMemoryById(oldId);
+      if (before && after) {
+        await insertMemoryEventInternal({
+          ...normalizeScope(after),
+          entity_kind: 'knowledge_memory',
+          entity_id: String(after.id),
+          event_type: 'knowledge.superseded',
+          payload: {
+            before,
+            after,
+            refs: {
+              new_id: newId,
+            },
+          },
+          created_at: supersededAt,
+        });
+      }
     },
 
     async insertWorkItem(input) {
       const n = normalizeScope(input);
+      const createdAt = now();
       const { rows } = await pool.query(
         `INSERT INTO work_items (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, title, kind, status, detail, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
          RETURNING *`,
         [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.session_id,
-         input.title, input.kind ?? 'objective', input.status ?? 'open', input.detail ?? null, now()],
+         input.title, input.kind ?? 'objective', input.status ?? 'open', input.detail ?? null, createdAt],
       );
-      return mapWorkItem(rows[0]);
+      const workItem = mapWorkItem(rows[0]);
+      await insertMemoryEventInternal({
+        ...n,
+        session_id: workItem.session_id,
+        entity_kind: 'work_item',
+        entity_id: String(workItem.id),
+        event_type: 'work_item.created',
+        payload: {
+          after: workItem,
+        },
+        created_at: createdAt,
+      });
+      return workItem;
     },
 
     async getActiveWorkItems(scope) {
@@ -1102,11 +1749,512 @@ export function createPostgresAdapter(
     },
 
     async updateWorkItemStatus(id, status) {
-      await pool.query(`UPDATE work_items SET status = $2, updated_at = $3 WHERE id = $1`, [id, status, now()]);
+      const { rows: beforeRows } = await pool.query('SELECT * FROM work_items WHERE id = $1', [id]);
+      const updatedAt = now();
+      await pool.query(
+        `UPDATE work_items SET status = $2, version = COALESCE(version, 1) + 1, updated_at = $3 WHERE id = $1`,
+        [id, status, updatedAt],
+      );
+      const { rows: afterRows } = await pool.query('SELECT * FROM work_items WHERE id = $1', [id]);
+      if (beforeRows[0] && afterRows[0]) {
+        const before = mapWorkItem(beforeRows[0]);
+        const after = mapWorkItem(afterRows[0]);
+        await insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          entity_kind: 'work_item',
+          entity_id: String(after.id),
+          event_type: 'work_item.status_changed',
+          payload: {
+            before,
+            after,
+            patch: {
+              status,
+              updated_at: updatedAt,
+            },
+          },
+          created_at: updatedAt,
+        });
+      }
+    },
+
+    async updateWorkItem(id, patch: WorkItemPatch, options?: { expectedVersion?: number }) {
+      const { rows: beforeRows } = await pool.query('SELECT * FROM work_items WHERE id = $1', [id]);
+      if (!beforeRows[0]) return null;
+      const before = mapWorkItem(beforeRows[0]);
+      if (options?.expectedVersion != null && before.version !== options.expectedVersion) {
+        throw new ConflictError(`Work item ${id} version mismatch`);
+      }
+      const updatedAt = now();
+      const nextTitle = patch.title ?? before.title;
+      const nextDetail = patch.detail !== undefined ? patch.detail : before.detail;
+      const nextStatus = patch.status ?? before.status;
+      const nextVisibility = patch.visibility_class ?? before.visibility_class;
+      const { rows: afterRows } = await pool.query(
+        `UPDATE work_items
+         SET title = $2, detail = $3, status = $4, visibility_class = $5, version = COALESCE(version, 1) + 1, updated_at = $6
+         WHERE id = $1
+         RETURNING *`,
+        [id, nextTitle, nextDetail, nextStatus, nextVisibility, updatedAt],
+      );
+      const after = mapWorkItem(afterRows[0]);
+      await insertMemoryEventInternal({
+        ...normalizeScope(after),
+        session_id: after.session_id,
+        entity_kind: 'work_item',
+        entity_id: String(after.id),
+        event_type:
+          patch.visibility_class !== undefined &&
+          patch.title === undefined &&
+          patch.detail === undefined &&
+          patch.status === undefined
+            ? 'work_item.visibility_changed'
+            : 'work_item.updated',
+        payload: { before, after, patch },
+        created_at: updatedAt,
+      });
+      return after;
     },
 
     async deleteWorkItem(id) {
+      const { rows } = await pool.query('SELECT * FROM work_items WHERE id = $1', [id]);
       await pool.query('DELETE FROM work_items WHERE id = $1', [id]);
+      if (rows[0]) {
+        const workItem = mapWorkItem(rows[0]);
+        await insertMemoryEventInternal({
+          ...normalizeScope(workItem),
+          session_id: workItem.session_id,
+          entity_kind: 'work_item',
+          entity_id: String(workItem.id),
+          event_type: 'work_item.deleted',
+          payload: {
+            before: workItem,
+          },
+          created_at: now(),
+        });
+      }
+    },
+
+    async claimWorkItem(input: NewWorkClaimInput): Promise<WorkClaim> {
+      return this.transaction(async () => {
+        const { rows: workItemRows } = await pool.query('SELECT * FROM work_items WHERE id = $1', [
+          input.work_item_id,
+        ]);
+        if (!workItemRows[0]) {
+          throw new ConflictError(`Work item ${input.work_item_id} does not exist`);
+        }
+        const workItem = mapWorkItem(workItemRows[0]);
+        if (workItem.status === 'done') {
+          throw new ConflictError(`Work item ${input.work_item_id} is done`);
+        }
+
+        const claimedAt = input.claimed_at ?? now();
+        const existingRow = await getAnyClaimRowByWorkItem(input.work_item_id);
+        if (existingRow) {
+          const existing = mapWorkClaim(existingRow);
+          if (existing.status === 'active' && existing.expires_at <= claimedAt) {
+            await expireClaimRecord(existingRow, claimedAt);
+          } else if (existing.status === 'active') {
+            if (!sameActor(existing.actor, input.actor)) {
+              throw new ConflictError(`Work item ${input.work_item_id} is already claimed`);
+            }
+            return (await this.renewWorkClaim(existing.id, input.actor, input.lease_seconds ?? 300))!;
+          }
+        }
+
+        const normalized = normalizeScope(input);
+        const actorParts = serializeActorMetadata(input.actor);
+        const claimToken = `claim-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        const expiresAt = claimedAt + (input.lease_seconds ?? 300);
+        const { rows } = await pool.query(
+          `INSERT INTO work_claims_current
+            (tenant_id, system_id, workspace_id, collaboration_id, scope_id, work_item_id, session_id,
+             actor_kind, actor_id, actor_system_id, actor_display_name, actor_metadata,
+             claim_token, status, claimed_at, expires_at, released_at, release_reason, source_event_id, visibility_class, version)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, 'active', $14, $15, NULL, NULL, NULL, $16, 1)
+           ON CONFLICT (work_item_id) DO UPDATE SET
+             tenant_id = EXCLUDED.tenant_id,
+             system_id = EXCLUDED.system_id,
+             workspace_id = EXCLUDED.workspace_id,
+             collaboration_id = EXCLUDED.collaboration_id,
+             scope_id = EXCLUDED.scope_id,
+             session_id = EXCLUDED.session_id,
+             actor_kind = EXCLUDED.actor_kind,
+             actor_id = EXCLUDED.actor_id,
+             actor_system_id = EXCLUDED.actor_system_id,
+             actor_display_name = EXCLUDED.actor_display_name,
+             actor_metadata = EXCLUDED.actor_metadata,
+             claim_token = EXCLUDED.claim_token,
+             status = 'active',
+             claimed_at = EXCLUDED.claimed_at,
+             expires_at = EXCLUDED.expires_at,
+             released_at = NULL,
+             release_reason = NULL,
+             source_event_id = NULL,
+             visibility_class = EXCLUDED.visibility_class,
+             version = COALESCE(work_claims_current.version, 1) + 1
+           RETURNING *`,
+          [
+            normalized.tenant_id,
+            normalized.system_id,
+            normalized.workspace_id,
+            normalized.collaboration_id,
+            normalized.scope_id,
+            input.work_item_id,
+            input.session_id ?? null,
+            actorParts[0],
+            actorParts[1],
+            actorParts[2],
+            actorParts[3],
+            actorParts[4],
+            claimToken,
+            claimedAt,
+            expiresAt,
+            input.visibility_class,
+          ],
+        );
+        const claim = mapWorkClaim(rows[0]);
+        const event = await insertMemoryEventInternal({
+          ...normalizeScope(claim),
+          session_id: claim.session_id,
+          actor_id: claim.actor.actor_id,
+          actor_kind: claim.actor.actor_kind,
+          actor_system_id: claim.actor.system_id,
+          actor_display_name: claim.actor.display_name,
+          actor_metadata: claim.actor.metadata,
+          entity_kind: 'work_claim',
+          entity_id: String(claim.id),
+          event_type: 'work_claim.claimed',
+          payload: { after: claim },
+          created_at: claimedAt,
+        });
+        await pool.query('UPDATE work_claims_current SET source_event_id = $2 WHERE id = $1', [
+          claim.id,
+          event.event_id,
+        ]);
+        return { ...claim, source_event_id: event.event_id };
+      });
+    },
+
+    async renewWorkClaim(claimId: number, actor: ActorRef, leaseSeconds = 300): Promise<WorkClaim | null> {
+      return this.transaction(async () => {
+        const { rows: beforeRows } = await pool.query('SELECT * FROM work_claims_current WHERE id = $1', [claimId]);
+        if (!beforeRows[0]) return null;
+        const claim = mapWorkClaim(beforeRows[0]);
+        if (!sameActor(claim.actor, actor)) {
+          throw new ConflictError(`Claim ${claimId} is owned by another actor`);
+        }
+        const currentNow = now();
+        const { rows } = await pool.query(
+          `UPDATE work_claims_current
+           SET expires_at = $2, version = COALESCE(version, 1) + 1
+           WHERE id = $1
+           RETURNING *`,
+          [claimId, Math.max(claim.expires_at, currentNow) + leaseSeconds],
+        );
+        const after = mapWorkClaim(rows[0]);
+        const event = await insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          actor_id: after.actor.actor_id,
+          actor_kind: after.actor.actor_kind,
+          actor_system_id: after.actor.system_id,
+          actor_display_name: after.actor.display_name,
+          actor_metadata: after.actor.metadata,
+          entity_kind: 'work_claim',
+          entity_id: String(after.id),
+          event_type: 'work_claim.renewed',
+          payload: { before: claim, after },
+          created_at: currentNow,
+        });
+        await pool.query('UPDATE work_claims_current SET source_event_id = $2 WHERE id = $1', [
+          after.id,
+          event.event_id,
+        ]);
+        return { ...after, source_event_id: event.event_id };
+      });
+    },
+
+    async releaseWorkClaim(claimId: number, actor: ActorRef, reason?: string): Promise<WorkClaim | null> {
+      return this.transaction(async () => {
+        const { rows: beforeRows } = await pool.query('SELECT * FROM work_claims_current WHERE id = $1', [claimId]);
+        if (!beforeRows[0]) return null;
+        const claim = mapWorkClaim(beforeRows[0]);
+        if (!sameActor(claim.actor, actor)) {
+          throw new ConflictError(`Claim ${claimId} is owned by another actor`);
+        }
+        const releasedAt = now();
+        const { rows } = await pool.query(
+          `UPDATE work_claims_current
+           SET status = 'released', released_at = $2, release_reason = $3, version = COALESCE(version, 1) + 1
+           WHERE id = $1
+           RETURNING *`,
+          [claimId, releasedAt, reason ?? null],
+        );
+        const after = mapWorkClaim(rows[0]);
+        const event = await insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          actor_id: after.actor.actor_id,
+          actor_kind: after.actor.actor_kind,
+          actor_system_id: after.actor.system_id,
+          actor_display_name: after.actor.display_name,
+          actor_metadata: after.actor.metadata,
+          entity_kind: 'work_claim',
+          entity_id: String(after.id),
+          event_type: 'work_claim.released',
+          payload: { before: claim, after },
+          created_at: releasedAt,
+        });
+        await pool.query('UPDATE work_claims_current SET source_event_id = $2 WHERE id = $1', [
+          after.id,
+          event.event_id,
+        ]);
+        return { ...after, source_event_id: event.event_id };
+      });
+    },
+
+    async getActiveWorkClaim(workItemId: number): Promise<WorkClaim | null> {
+      const existingRow = await getAnyClaimRowByWorkItem(workItemId);
+      if (!existingRow) return null;
+      const claim = mapWorkClaim(existingRow);
+      if (claim.status === 'active' && claim.expires_at <= now()) {
+        await this.transaction(async () => {
+          await expireClaimRecord(existingRow);
+        });
+        return null;
+      }
+      return claim.status === 'active' ? claim : null;
+    },
+
+    async listWorkClaims(scope: MemoryScope, options?: WorkClaimQuery): Promise<WorkClaim[]> {
+      const { rows } = await pool.query(
+        `SELECT * FROM work_claims_current WHERE ${scopeWhere()} ORDER BY claimed_at DESC`,
+        scopeParams(scope),
+      );
+      const claims = rows.map(mapWorkClaim);
+      return claims.filter((claim) => {
+        if (!options?.includeExpired && claim.status === 'expired') return false;
+        if (!options?.includeReleased && claim.status === 'released') return false;
+        if (options?.sessionId && claim.session_id !== options.sessionId) return false;
+        if (options?.visibilityClass && claim.visibility_class !== options.visibilityClass) return false;
+        if (options?.actor && !sameActor(claim.actor, options.actor)) return false;
+        return true;
+      });
+    },
+
+    async createHandoff(input: NewHandoffInput): Promise<HandoffRecord> {
+      return this.transaction(async () => {
+        const normalized = normalizeScope(input);
+        const createdAt = input.created_at ?? now();
+        const fromParts = serializeActorMetadata(input.from_actor);
+        const toParts = serializeActorMetadata(input.to_actor);
+        const { rows } = await pool.query(
+          `INSERT INTO handoff_records
+            (tenant_id, system_id, workspace_id, collaboration_id, scope_id, work_item_id, session_id,
+             from_actor_kind, from_actor_id, from_actor_system_id, from_actor_display_name, from_actor_metadata,
+             to_actor_kind, to_actor_id, to_actor_system_id, to_actor_display_name, to_actor_metadata,
+             summary, context_bundle_ref, status, created_at, expires_at, visibility_class, version)
+           VALUES ($1, $2, $3, $4, $5, $6, $7,
+                   $8, $9, $10, $11, $12::jsonb,
+                   $13, $14, $15, $16, $17::jsonb,
+                   $18, $19, 'pending', $20, $21, $22, 1)
+           RETURNING *`,
+          [
+            normalized.tenant_id,
+            normalized.system_id,
+            normalized.workspace_id,
+            normalized.collaboration_id,
+            normalized.scope_id,
+            input.work_item_id,
+            input.session_id ?? null,
+            fromParts[0],
+            fromParts[1],
+            fromParts[2],
+            fromParts[3],
+            fromParts[4],
+            toParts[0],
+            toParts[1],
+            toParts[2],
+            toParts[3],
+            toParts[4],
+            input.summary,
+            input.context_bundle_ref ?? null,
+            createdAt,
+            input.expires_at ?? null,
+            input.visibility_class,
+          ],
+        );
+        const handoff = mapHandoff(rows[0]);
+        const event = await insertMemoryEventInternal({
+          ...normalizeScope(handoff),
+          session_id: handoff.session_id,
+          actor_id: handoff.from_actor.actor_id,
+          actor_kind: handoff.from_actor.actor_kind,
+          actor_system_id: handoff.from_actor.system_id,
+          actor_display_name: handoff.from_actor.display_name,
+          actor_metadata: handoff.from_actor.metadata,
+          entity_kind: 'handoff',
+          entity_id: String(handoff.id),
+          event_type: 'handoff.created',
+          payload: { after: handoff },
+          created_at: createdAt,
+        });
+        await pool.query('UPDATE handoff_records SET source_event_id = $2 WHERE id = $1', [
+          handoff.id,
+          event.event_id,
+        ]);
+        return { ...handoff, source_event_id: event.event_id };
+      });
+    },
+
+    async acceptHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null> {
+      return this.transaction(async () => {
+        const { rows: handoffRows } = await pool.query('SELECT * FROM handoff_records WHERE id = $1', [handoffId]);
+        if (!handoffRows[0]) return null;
+        const handoff = mapHandoff(handoffRows[0]);
+        if (!sameActor(handoff.to_actor, actor)) {
+          throw new ConflictError(`Handoff ${handoffId} is assigned to another actor`);
+        }
+        const activeClaim = await this.getActiveWorkClaim(handoff.work_item_id);
+        if (activeClaim && !sameActor(activeClaim.actor, handoff.from_actor)) {
+          throw new ConflictError(`Work item ${handoff.work_item_id} has another active owner`);
+        }
+        if (activeClaim) {
+          await this.releaseWorkClaim(activeClaim.id, handoff.from_actor, 'handoff_accepted');
+        }
+        await this.claimWorkItem({
+          ...normalizeScope(handoff),
+          work_item_id: handoff.work_item_id,
+          actor,
+          session_id: handoff.session_id,
+          visibility_class: handoff.visibility_class,
+        });
+        const acceptedAt = now();
+        const { rows } = await pool.query(
+          `UPDATE handoff_records
+           SET status = 'accepted', accepted_at = $2, decision_reason = $3, version = COALESCE(version, 1) + 1
+           WHERE id = $1
+           RETURNING *`,
+          [handoffId, acceptedAt, reason ?? null],
+        );
+        const after = mapHandoff(rows[0]);
+        const event = await insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          actor_id: actor.actor_id,
+          actor_kind: actor.actor_kind,
+          actor_system_id: actor.system_id,
+          actor_display_name: actor.display_name,
+          actor_metadata: actor.metadata,
+          entity_kind: 'handoff',
+          entity_id: String(after.id),
+          event_type: 'handoff.accepted',
+          payload: { before: handoff, after },
+          created_at: acceptedAt,
+        });
+        await pool.query('UPDATE handoff_records SET source_event_id = $2 WHERE id = $1', [
+          after.id,
+          event.event_id,
+        ]);
+        return { ...after, source_event_id: event.event_id };
+      });
+    },
+
+    async rejectHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null> {
+      return this.transaction(async () => {
+        const { rows: handoffRows } = await pool.query('SELECT * FROM handoff_records WHERE id = $1', [handoffId]);
+        if (!handoffRows[0]) return null;
+        const handoff = mapHandoff(handoffRows[0]);
+        if (!sameActor(handoff.to_actor, actor)) {
+          throw new ConflictError(`Handoff ${handoffId} is assigned to another actor`);
+        }
+        const rejectedAt = now();
+        const { rows } = await pool.query(
+          `UPDATE handoff_records
+           SET status = 'rejected', rejected_at = $2, decision_reason = $3, version = COALESCE(version, 1) + 1
+           WHERE id = $1
+           RETURNING *`,
+          [handoffId, rejectedAt, reason ?? null],
+        );
+        const after = mapHandoff(rows[0]);
+        const event = await insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          actor_id: actor.actor_id,
+          actor_kind: actor.actor_kind,
+          actor_system_id: actor.system_id,
+          actor_display_name: actor.display_name,
+          actor_metadata: actor.metadata,
+          entity_kind: 'handoff',
+          entity_id: String(after.id),
+          event_type: 'handoff.rejected',
+          payload: { before: handoff, after },
+          created_at: rejectedAt,
+        });
+        await pool.query('UPDATE handoff_records SET source_event_id = $2 WHERE id = $1', [
+          after.id,
+          event.event_id,
+        ]);
+        return { ...after, source_event_id: event.event_id };
+      });
+    },
+
+    async cancelHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null> {
+      return this.transaction(async () => {
+        const { rows: handoffRows } = await pool.query('SELECT * FROM handoff_records WHERE id = $1', [handoffId]);
+        if (!handoffRows[0]) return null;
+        const handoff = mapHandoff(handoffRows[0]);
+        if (!sameActor(handoff.from_actor, actor)) {
+          throw new ConflictError(`Handoff ${handoffId} was created by another actor`);
+        }
+        const canceledAt = now();
+        const { rows } = await pool.query(
+          `UPDATE handoff_records
+           SET status = 'canceled', canceled_at = $2, decision_reason = $3, version = COALESCE(version, 1) + 1
+           WHERE id = $1
+           RETURNING *`,
+          [handoffId, canceledAt, reason ?? null],
+        );
+        const after = mapHandoff(rows[0]);
+        const event = await insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          actor_id: actor.actor_id,
+          actor_kind: actor.actor_kind,
+          actor_system_id: actor.system_id,
+          actor_display_name: actor.display_name,
+          actor_metadata: actor.metadata,
+          entity_kind: 'handoff',
+          entity_id: String(after.id),
+          event_type: 'handoff.canceled',
+          payload: { before: handoff, after },
+          created_at: canceledAt,
+        });
+        await pool.query('UPDATE handoff_records SET source_event_id = $2 WHERE id = $1', [
+          after.id,
+          event.event_id,
+        ]);
+        return { ...after, source_event_id: event.event_id };
+      });
+    },
+
+    async listHandoffs(scope: MemoryScope, options?: HandoffQuery): Promise<HandoffRecord[]> {
+      const { rows } = await pool.query(
+        `SELECT * FROM handoff_records WHERE ${scopeWhere()} ORDER BY created_at DESC`,
+        scopeParams(scope),
+      );
+      const handoffs = rows.map(mapHandoff);
+      return handoffs.filter((handoff) => {
+        if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
+        if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
+        if (options?.actor) {
+          if (options.direction === 'inbound') return sameActor(handoff.to_actor, options.actor);
+          if (options.direction === 'outbound') return sameActor(handoff.from_actor, options.actor);
+          return sameActor(handoff.to_actor, options.actor) || sameActor(handoff.from_actor, options.actor);
+        }
+        return true;
+      }).slice(0, options?.limit ?? handoffs.length);
     },
 
     async upsertContextMonitor(input) {
@@ -1163,6 +2311,7 @@ export function createPostgresAdapter(
 
     async insertPlaybook(input) {
       const n = normalizeScope(input);
+      const createdAt = input.created_at ?? now();
       const { rows } = await pool.query(
         `INSERT INTO playbooks (tenant_id, system_id, workspace_id, collaboration_id, scope_id, title, description, instructions,
            references_json, templates, scripts, assets, tags, status, source_session_id, source_working_memory_id, created_at, updated_at)
@@ -1173,9 +2322,21 @@ export function createPostgresAdapter(
          JSON.stringify(input.references ?? []), JSON.stringify(input.templates ?? []),
          JSON.stringify(input.scripts ?? []), JSON.stringify(input.assets ?? []),
          JSON.stringify(input.tags ?? []), input.status ?? 'draft',
-         input.source_session_id ?? null, input.source_working_memory_id ?? null, input.created_at ?? now()],
+         input.source_session_id ?? null, input.source_working_memory_id ?? null, createdAt],
       );
-      return mapPlaybook(rows[0]);
+      const playbook = mapPlaybook(rows[0]);
+      await insertMemoryEventInternal({
+        ...n,
+        session_id: playbook.source_session_id,
+        entity_kind: 'playbook',
+        entity_id: String(playbook.id),
+        event_type: 'playbook.created',
+        payload: {
+          after: playbook,
+        },
+        created_at: createdAt,
+      });
+      return playbook;
     },
     async getPlaybookById(id) {
       const { rows } = await pool.query('SELECT * FROM playbooks WHERE id = $1', [id]);
@@ -1207,6 +2368,7 @@ export function createPostgresAdapter(
       }));
     },
     async updatePlaybook(id, patch) {
+      const before = await this.getPlaybookById(id);
       const sets: string[] = [];
       const values: unknown[] = [];
       let idx = 1;
@@ -1227,13 +2389,49 @@ export function createPostgresAdapter(
         `UPDATE playbooks SET ${sets.join(', ')} WHERE id = $${idx} RETURNING *`,
         values,
       );
-      return rows[0] ? mapPlaybook(rows[0]) : null;
+      const after = rows[0] ? mapPlaybook(rows[0]) : null;
+      if (before && after) {
+        await insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.source_session_id,
+          entity_kind: 'playbook',
+          entity_id: String(after.id),
+          event_type: 'playbook.updated',
+          payload: {
+            before,
+            after,
+            patch,
+          },
+          created_at: after.updated_at,
+        });
+      }
+      return after;
     },
     async recordPlaybookUse(id) {
+      const before = await this.getPlaybookById(id);
+      const usedAt = now();
       await pool.query(
         'UPDATE playbooks SET use_count = use_count + 1, last_used_at = $1 WHERE id = $2',
-        [now(), id],
+        [usedAt, id],
       );
+      const after = await this.getPlaybookById(id);
+      if (before && after) {
+        await insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.source_session_id,
+          entity_kind: 'playbook',
+          entity_id: String(after.id),
+          event_type: 'playbook.used',
+          payload: {
+            before,
+            after,
+            refs: {
+              use_count: after.use_count,
+            },
+          },
+          created_at: usedAt,
+        });
+      }
     },
     async insertPlaybookRevision(input) {
       const playbook = await this.getPlaybookById(input.playbook_id);
@@ -1252,7 +2450,22 @@ export function createPostgresAdapter(
         'UPDATE playbooks SET revision_count = revision_count + 1 WHERE id = $1',
         [input.playbook_id],
       );
-      return mapPlaybookRevision(rows[0]);
+      const revision = mapPlaybookRevision(rows[0]);
+      await insertMemoryEventInternal({
+        ...normalizeScope(revision),
+        session_id: revision.source_session_id,
+        entity_kind: 'playbook_revision',
+        entity_id: String(revision.id),
+        event_type: 'playbook.revised',
+        payload: {
+          after: revision,
+          refs: {
+            playbook_id: revision.playbook_id,
+          },
+        },
+        created_at: revision.created_at,
+      });
+      return revision;
     },
     async getPlaybookRevisions(playbookId) {
       const { rows } = await pool.query(
@@ -1276,7 +2489,18 @@ export function createPostgresAdapter(
            input.association_type, input.confidence ?? 0.5, input.auto_generated ?? false,
            input.created_at ?? now()],
         );
-        return mapAssociation(rows[0]);
+        const association = mapAssociation(rows[0]);
+        await insertMemoryEventInternal({
+          ...n,
+          entity_kind: 'association',
+          entity_id: String(association.id),
+          event_type: 'association.created',
+          payload: {
+            after: association,
+          },
+          created_at: association.created_at,
+        });
+        return association;
       } catch (err) {
         // Postgres unique_violation is SQLSTATE 23505.
         if (err && typeof err === 'object' && (err as { code?: string }).code === '23505') {
@@ -1314,7 +2538,71 @@ export function createPostgresAdapter(
       return rows.map(mapAssociation);
     },
     async deleteAssociation(id) {
+      const before = await this.getAssociationById(id);
       await pool.query('DELETE FROM associations WHERE id = $1', [id]);
+      if (before) {
+        await insertMemoryEventInternal({
+          ...normalizeScope(before),
+          entity_kind: 'association',
+          entity_id: String(before.id),
+          event_type: 'association.deleted',
+          payload: {
+            before,
+          },
+          created_at: now(),
+        });
+      }
+    },
+
+    async insertMemoryEvent(input) {
+      return insertMemoryEventInternal(input);
+    },
+
+    async listMemoryEvents(scope, query) {
+      return listScopedMemoryEvents(scope, query);
+    },
+
+    async getMemoryEventsByEntity(scope, entityKind, entityId, query) {
+      return listScopedMemoryEvents(scope, {
+        ...query,
+        entityKind,
+        entityId,
+      });
+    },
+
+    async getMemoryEventsBySession(scope, sessionId, query) {
+      return listScopedMemoryEvents(scope, {
+        ...query,
+        sessionId,
+      });
+    },
+
+    async getSessionState(scope, sessionId) {
+      return readSessionStateProjection(scope, sessionId);
+    },
+
+    async upsertSessionState(input) {
+      const projection = await writeSessionStateProjection(input);
+      await insertMemoryEventInternal({
+        ...normalizeScope(projection),
+        session_id: projection.session_id,
+        entity_kind: 'session_state',
+        entity_id: projection.session_id,
+        event_type: 'session_state.updated',
+        payload: {
+          after: projection,
+        },
+        created_at: projection.updatedAt,
+      });
+      return projection;
+    },
+
+    async getTemporalWatermark(projectionName) {
+      return readTemporalWatermark(projectionName);
+    },
+
+    async upsertTemporalWatermark(input) {
+      return writeTemporalWatermark(input);
     },
 
     async transaction<T>(fn: () => Promise<T>): Promise<T> {
@@ -1327,8 +2615,11 @@ export function createPostgresAdapter(
           await existing.client.query(`RELEASE SAVEPOINT ${savepoint}`);
           return result;
         } catch (error) {
-          await existing.client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
-          await existing.client.query(`RELEASE SAVEPOINT ${savepoint}`);
+          try {
+            await existing.client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+          } finally {
+            await existing.client.query(`RELEASE SAVEPOINT ${savepoint}`).catch(() => undefined);
+          }
           throw error;
         }
       }
@@ -1341,7 +2632,7 @@ export function createPostgresAdapter(
         await client.query('COMMIT');
         return result;
       } catch (error) {
-        await client.query('ROLLBACK');
+        await client.query('ROLLBACK').catch(() => undefined);
         throw error;
       } finally {
         client.release();
@@ -1467,10 +2758,20 @@ export function createPostgresEmbeddingAdapter(
       }));
     },
 
-    async deleteEmbedding(knowledgeMemoryId): Promise<void> {
-      await pool.query('DELETE FROM knowledge_embeddings WHERE knowledge_memory_id = $1', [
-        knowledgeMemoryId,
-      ]);
+    async deleteEmbedding(knowledgeMemoryId, scope): Promise<void> {
+      if (scope) {
+        await pool.query(
+          `DELETE FROM knowledge_embeddings ke
+           USING knowledge_memory km
+           WHERE ke.knowledge_memory_id = $1
+             AND km.id = ke.knowledge_memory_id
+             AND km.id = $1
+             AND ${scopeWhere('km')}`,
+          [knowledgeMemoryId, ...scopeParams(scope)],
+        );
+        return;
+      }
+      await pool.query('DELETE FROM knowledge_embeddings WHERE knowledge_memory_id = $1', [knowledgeMemoryId]);
     },
   };
 }

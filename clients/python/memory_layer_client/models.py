@@ -22,6 +22,25 @@ def _normalize_unresolved_work(payload: Any) -> list[str]:
     return normalized
 
 
+def _parse_actor_ref(payload: Any) -> "ActorRef":
+    if not isinstance(payload, dict):
+        return ActorRef(
+            actor_kind="agent",
+            actor_id="unknown",
+            system_id=None,
+            display_name=None,
+            metadata=None,
+        )
+    metadata = payload.get("metadata")
+    return ActorRef(
+        actor_kind=str(payload.get("actor_kind", "agent")),
+        actor_id=str(payload.get("actor_id", "unknown")),
+        system_id=payload.get("system_id") if isinstance(payload.get("system_id"), str) else None,
+        display_name=payload.get("display_name") if isinstance(payload.get("display_name"), str) else None,
+        metadata=dict(metadata) if isinstance(metadata, dict) else None,
+    )
+
+
 @dataclass(slots=True)
 class MemoryScope:
     tenant_id: str
@@ -100,25 +119,183 @@ class MemoryEvent:
 
 
 @dataclass(slots=True)
+class ActorRef:
+    actor_kind: str
+    actor_id: str
+    system_id: Optional[str]
+    display_name: Optional[str]
+    metadata: Optional[dict[str, Any]]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ActorRef":
+        return _parse_actor_ref(payload)
+
+
+@dataclass(slots=True)
+class WorkClaim:
+    id: int
+    work_item_id: int
+    actor: ActorRef
+    session_id: Optional[str]
+    claim_token: str
+    status: str
+    claimed_at: int
+    expires_at: int
+    released_at: Optional[int]
+    release_reason: Optional[str]
+    source_event_id: Optional[int]
+    visibility_class: str
+    version: int
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "WorkClaim":
+        return cls(
+            id=int(payload["id"]),
+            work_item_id=int(payload["work_item_id"]),
+            actor=_parse_actor_ref(payload.get("actor")),
+            session_id=payload.get("session_id"),
+            claim_token=str(payload["claim_token"]),
+            status=str(payload["status"]),
+            claimed_at=int(payload["claimed_at"]),
+            expires_at=int(payload["expires_at"]),
+            released_at=int(payload["released_at"]) if payload.get("released_at") is not None else None,
+            release_reason=payload.get("release_reason"),
+            source_event_id=int(payload["source_event_id"]) if payload.get("source_event_id") is not None else None,
+            visibility_class=str(payload.get("visibility_class", "private")),
+            version=int(payload.get("version", 1)),
+        )
+
+
+@dataclass(slots=True)
+class HandoffRecord:
+    id: int
+    work_item_id: int
+    from_actor: ActorRef
+    to_actor: ActorRef
+    session_id: Optional[str]
+    summary: str
+    context_bundle_ref: Optional[str]
+    status: str
+    created_at: int
+    accepted_at: Optional[int]
+    rejected_at: Optional[int]
+    canceled_at: Optional[int]
+    expires_at: Optional[int]
+    decision_reason: Optional[str]
+    source_event_id: Optional[int]
+    visibility_class: str
+    version: int
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "HandoffRecord":
+        return cls(
+            id=int(payload["id"]),
+            work_item_id=int(payload["work_item_id"]),
+            from_actor=_parse_actor_ref(payload.get("from_actor")),
+            to_actor=_parse_actor_ref(payload.get("to_actor")),
+            session_id=payload.get("session_id"),
+            summary=str(payload["summary"]),
+            context_bundle_ref=payload.get("context_bundle_ref"),
+            status=str(payload["status"]),
+            created_at=int(payload["created_at"]),
+            accepted_at=int(payload["accepted_at"]) if payload.get("accepted_at") is not None else None,
+            rejected_at=int(payload["rejected_at"]) if payload.get("rejected_at") is not None else None,
+            canceled_at=int(payload["canceled_at"]) if payload.get("canceled_at") is not None else None,
+            expires_at=int(payload["expires_at"]) if payload.get("expires_at") is not None else None,
+            decision_reason=payload.get("decision_reason"),
+            source_event_id=int(payload["source_event_id"]) if payload.get("source_event_id") is not None else None,
+            visibility_class=str(payload.get("visibility_class", "private")),
+            version=int(payload.get("version", 1)),
+        )
+
+
+@dataclass(slots=True)
+class CoordinationState:
+    owned_claims: list[WorkClaim]
+    pending_inbound_handoffs: list[HandoffRecord]
+    pending_outbound_handoffs: list[HandoffRecord]
+    shared_work_items: list[dict[str, Any]]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "CoordinationState":
+        return cls(
+            owned_claims=[WorkClaim.from_dict(item) for item in payload.get("ownedClaims", [])],
+            pending_inbound_handoffs=[
+                HandoffRecord.from_dict(item) for item in payload.get("pendingInboundHandoffs", [])
+            ],
+            pending_outbound_handoffs=[
+                HandoffRecord.from_dict(item) for item in payload.get("pendingOutboundHandoffs", [])
+            ],
+            shared_work_items=list(payload.get("sharedWorkItems", [])),
+        )
+
+
+@dataclass(slots=True)
+class MemoryEventRecord:
+    event_id: int
+    entity_kind: str
+    entity_id: str
+    event_type: str
+    created_at: int
+    payload: dict[str, Any]
+    session_id: Optional[str]
+    actor_id: Optional[str]
+    actor_kind: Optional[str]
+    actor_system_id: Optional[str]
+    actor_display_name: Optional[str]
+    actor_metadata: Optional[dict[str, Any]]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "MemoryEventRecord":
+        actor_metadata = payload.get("actor_metadata")
+        return cls(
+            event_id=int(payload["event_id"]),
+            entity_kind=str(payload["entity_kind"]),
+            entity_id=str(payload["entity_id"]),
+            event_type=str(payload["event_type"]),
+            created_at=int(payload["created_at"]),
+            payload=dict(payload.get("payload", {})),
+            session_id=payload.get("session_id"),
+            actor_id=payload.get("actor_id"),
+            actor_kind=payload.get("actor_kind"),
+            actor_system_id=payload.get("actor_system_id"),
+            actor_display_name=payload.get("actor_display_name"),
+            actor_metadata=dict(actor_metadata) if isinstance(actor_metadata, dict) else None,
+        )
+
+
+@dataclass(slots=True)
 class ContextResponse:
     current_objective: Optional[str]
+    session_state: Optional[dict[str, Any]]
     active_turn_count: int
     working_memory: Optional[dict[str, Any]]
     relevant_knowledge: list[dict[str, Any]]
     active_objectives: list[dict[str, Any]]
     unresolved_work: list[str]
     token_estimate: int
+    debug_trace: Optional[dict[str, Any]] = None
+    coordination_state: Optional[CoordinationState] = None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ContextResponse":
+        session_state = payload.get("sessionState")
+        debug_trace = payload.get("debugTrace")
+        coordination_state = payload.get("coordinationState")
         return cls(
             current_objective=payload.get("currentObjective"),
+            session_state=dict(session_state) if isinstance(session_state, dict) else None,
             active_turn_count=int(payload["activeTurnCount"]),
             working_memory=payload.get("workingMemory"),
             relevant_knowledge=list(payload.get("relevantKnowledge", [])),
             active_objectives=list(payload.get("activeObjectives", [])),
             unresolved_work=_normalize_unresolved_work(payload.get("unresolvedWork")),
             token_estimate=int(payload["tokenEstimate"]),
+            debug_trace=dict(debug_trace) if isinstance(debug_trace, dict) else None,
+            coordination_state=
+                CoordinationState.from_dict(coordination_state)
+                if isinstance(coordination_state, dict)
+                else None,
         )
 
 
@@ -269,6 +446,104 @@ class HealthResponse:
             objective_count=int(payload["objectiveCount"]),
             unresolved_work_count=int(payload["unresolvedWorkCount"]),
         )
+
+
+@dataclass(slots=True)
+class TemporalEventLogResponse:
+    events: list[MemoryEventRecord]
+    next_cursor: Optional[int]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "TemporalEventLogResponse":
+        next_cursor = payload.get("nextCursor")
+        return cls(
+            events=[MemoryEventRecord.from_dict(item) for item in payload.get("events", [])],
+            next_cursor=int(next_cursor) if next_cursor is not None else None,
+        )
+
+
+@dataclass(slots=True)
+class TemporalStateResponse:
+    as_of: int
+    exact: bool
+    cutover_at: Optional[int]
+    watermark_event_id: Optional[int]
+    context: ContextResponse
+    session_state: Optional[dict[str, Any]]
+    turns: list[dict[str, Any]]
+    working_memory: list[dict[str, Any]]
+    knowledge: list[dict[str, Any]]
+    work_items: list[dict[str, Any]]
+    associations: list[dict[str, Any]]
+    playbooks: list[dict[str, Any]]
+    work_claims: list[WorkClaim]
+    handoffs: list[HandoffRecord]
+    coordination_state: Optional[CoordinationState]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "TemporalStateResponse":
+        context_payload = payload.get("context")
+        return cls(
+            as_of=int(payload["asOf"]),
+            exact=bool(payload["exact"]),
+            cutover_at=int(payload["cutoverAt"]) if payload.get("cutoverAt") is not None else None,
+            watermark_event_id=int(payload["watermarkEventId"]) if payload.get("watermarkEventId") is not None else None,
+            context=ContextResponse.from_dict(context_payload if isinstance(context_payload, dict) else {}),
+            session_state=dict(payload.get("sessionState", {})) if isinstance(payload.get("sessionState"), dict) else None,
+            turns=list(payload.get("turns", [])),
+            working_memory=list(payload.get("workingMemory", [])),
+            knowledge=list(payload.get("knowledge", [])),
+            work_items=list(payload.get("workItems", [])),
+            associations=list(payload.get("associations", [])),
+            playbooks=list(payload.get("playbooks", [])),
+            work_claims=[WorkClaim.from_dict(item) for item in payload.get("workClaims", [])],
+            handoffs=[HandoffRecord.from_dict(item) for item in payload.get("handoffs", [])],
+            coordination_state=
+                CoordinationState.from_dict(payload["coordinationState"])
+                if isinstance(payload.get("coordinationState"), dict)
+                else None,
+        )
+
+
+@dataclass(slots=True)
+class TemporalDiffResponse:
+    from_timestamp: int
+    to_timestamp: int
+    exact: bool
+    cutover_at: Optional[int]
+    watermark_range: dict[str, Any]
+    events: list[MemoryEventRecord]
+    summary: dict[str, Any]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "TemporalDiffResponse":
+        return cls(
+            from_timestamp=int(payload["from"]),
+            to_timestamp=int(payload["to"]),
+            exact=bool(payload["exact"]),
+            cutover_at=int(payload["cutoverAt"]) if payload.get("cutoverAt") is not None else None,
+            watermark_range=dict(payload.get("watermarkRange", {})),
+            events=[MemoryEventRecord.from_dict(item) for item in payload.get("events", [])],
+            summary=dict(payload.get("summary", {})),
+        )
+
+
+@dataclass(slots=True)
+class WorkClaimListResponse:
+    claims: list[WorkClaim]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "WorkClaimListResponse":
+        return cls(claims=[WorkClaim.from_dict(item) for item in payload.get("claims", [])])
+
+
+@dataclass(slots=True)
+class HandoffListResponse:
+    handoffs: list[HandoffRecord]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "HandoffListResponse":
+        return cls(handoffs=[HandoffRecord.from_dict(item) for item in payload.get("handoffs", [])])
 
 
 @dataclass(slots=True)
@@ -651,6 +926,7 @@ class SessionSnapshot:
     bootstrap: dict[str, Any]
     context: dict[str, Any]
     frozen_at: int
+    watermark_event_id: Optional[int]
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "SessionSnapshot":
@@ -660,6 +936,7 @@ class SessionSnapshot:
             bootstrap=dict(payload.get("bootstrap", {})),
             context=dict(payload.get("context", {})),
             frozen_at=int(payload["frozenAt"]),
+            watermark_event_id=int(payload["watermarkEventId"]) if payload.get("watermarkEventId") is not None else None,
         )
 
 

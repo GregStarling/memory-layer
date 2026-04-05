@@ -1,3 +1,5 @@
+import { ProviderUnavailableError } from '../contracts/errors.js';
+
 export type CircuitState = 'closed' | 'open' | 'half_open';
 
 export interface CircuitBreakerOptions {
@@ -5,9 +7,19 @@ export interface CircuitBreakerOptions {
   resetTimeoutMs?: number;
 }
 
+export interface CircuitBreakerSnapshot {
+  state: CircuitState;
+  failures: number;
+  failureThreshold: number;
+  resetTimeoutMs: number;
+  openedAt: number | null;
+  nextProbeAt: number | null;
+}
+
 export interface CircuitBreaker {
   readonly state: CircuitState;
   execute<T>(run: () => Promise<T>): Promise<T>;
+  getSnapshot(): CircuitBreakerSnapshot;
 }
 
 export function createCircuitBreaker(options: CircuitBreakerOptions = {}): CircuitBreaker {
@@ -28,7 +40,7 @@ export function createCircuitBreaker(options: CircuitBreakerOptions = {}): Circu
 
     async execute<T>(run: () => Promise<T>): Promise<T> {
       if (state === 'open' && !canProbe()) {
-        throw new Error('Circuit breaker is open');
+        throw new ProviderUnavailableError('Circuit breaker is open');
       }
       if (canProbe()) {
         state = 'half_open';
@@ -47,6 +59,18 @@ export function createCircuitBreaker(options: CircuitBreakerOptions = {}): Circu
         }
         throw error;
       }
+    },
+
+    getSnapshot(): CircuitBreakerSnapshot {
+      const effectiveState = canProbe() ? 'half_open' : state;
+      return {
+        state: effectiveState,
+        failures,
+        failureThreshold,
+        resetTimeoutMs,
+        openedAt: openedAt > 0 ? openedAt : null,
+        nextProbeAt: state === 'open' ? openedAt + resetTimeoutMs : null,
+      };
     },
   };
 }

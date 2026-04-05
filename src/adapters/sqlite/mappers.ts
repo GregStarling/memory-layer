@@ -1,4 +1,10 @@
 import type {
+  MemoryEventRecord,
+  SessionStateProjection,
+  TemporalProjectionWatermark,
+} from '../../contracts/temporal.js';
+import type {
+  Association,
   CompactionLog,
   ContextMonitor,
   KnowledgeCandidate,
@@ -22,9 +28,11 @@ interface CompactionLogRow extends Omit<CompactionLog, 'model_call_made'> {
   model_call_made: number;
 }
 
-interface KnowledgeMemoryRow extends Omit<KnowledgeMemory, 'is_negated' | 'source_turn_ids'> {
+interface KnowledgeMemoryRow
+  extends Omit<KnowledgeMemory, 'is_negated' | 'source_turn_ids' | 'visibility_class'> {
   is_negated: number;
   source_turn_ids: string;
+  visibility_class?: KnowledgeMemory['visibility_class'];
 }
 
 interface KnowledgeCandidateRow extends Omit<KnowledgeCandidate, 'source_summary' | 'source_turns'> {
@@ -41,6 +49,34 @@ interface KnowledgeMemoryAuditRow
   is_negated: number;
 }
 
+interface MemoryEventRow
+  extends Omit<
+    MemoryEventRecord,
+    'payload' | 'actor_kind' | 'actor_system_id' | 'actor_display_name' | 'actor_metadata'
+  > {
+  payload: string;
+  actor_kind?: string | null;
+  actor_system_id?: string | null;
+  actor_display_name?: string | null;
+  actor_metadata?: string | null;
+}
+
+interface SessionStateProjectionRow
+  extends Omit<
+    SessionStateProjection,
+    'blockers' | 'assumptions' | 'pendingDecisions' | 'activeTools' | 'recentOutputs'
+  > {
+  blockers: string;
+  assumptions: string;
+  pending_decisions: string;
+  active_tools: string;
+  recent_outputs: string;
+}
+
+interface TemporalProjectionWatermarkRow extends Omit<TemporalProjectionWatermark, 'metadata'> {
+  metadata: string | null;
+}
+
 function parseJsonArray(json: string): string[] {
   try {
     const parsed = JSON.parse(json);
@@ -50,12 +86,28 @@ function parseJsonArray(json: string): string[] {
   }
 }
 
+function parseJsonObject(json: string | null): Record<string, unknown> | null {
+  if (!json) return null;
+  try {
+    const parsed = JSON.parse(json);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function serializeStringArray(values: string[]): string {
   return JSON.stringify(values);
 }
 
 export function serializeNumberArray(values: number[]): string {
   return JSON.stringify(values);
+}
+
+export function serializeObject(value: Record<string, unknown> | null): string | null {
+  return value == null ? null : JSON.stringify(value);
 }
 
 function parseJsonNumberArray(json: string): number[] {
@@ -102,6 +154,7 @@ export function rowToKnowledgeMemory(row: KnowledgeMemoryRow): KnowledgeMemory {
     collaboration_id: row.collaboration_id ?? row.workspace_id,
     source_collaboration_id:
       row.source_collaboration_id ?? row.collaboration_id ?? row.workspace_id ?? null,
+    visibility_class: row.visibility_class ?? 'private',
     is_negated: row.is_negated === 1,
     source_turn_ids: parseJsonNumberArray(row.source_turn_ids),
   };
@@ -145,6 +198,8 @@ export function rowToWorkItem(row: WorkItem): WorkItem {
   return {
     ...row,
     collaboration_id: row.collaboration_id ?? row.workspace_id,
+    visibility_class: row.visibility_class ?? 'private',
+    version: row.version ?? 1,
   };
 }
 
@@ -168,6 +223,7 @@ export function rowToPlaybook(row: PlaybookRow): Playbook {
   return {
     ...row,
     collaboration_id: row.collaboration_id ?? row.workspace_id,
+    visibility_class: row.visibility_class ?? 'private',
     references: parseJsonArray(row.references_json),
     templates: parseJsonArray(row.templates),
     scripts: parseJsonArray(row.scripts),
@@ -183,5 +239,49 @@ export function rowToPlaybookRevision(row: PlaybookRevision): PlaybookRevision {
   };
 }
 
+export function rowToMemoryEvent(row: MemoryEventRow): MemoryEventRecord {
+  return {
+    ...row,
+    collaboration_id: row.collaboration_id ?? row.workspace_id,
+    session_id: row.session_id ?? null,
+    actor_id: row.actor_id ?? null,
+    actor_kind: row.actor_kind ?? null,
+    actor_system_id: row.actor_system_id ?? null,
+    actor_display_name: row.actor_display_name ?? null,
+    actor_metadata: parseJsonObject(row.actor_metadata ?? null),
+    payload: parseJsonObject(row.payload) ?? {},
+  };
+}
+
+export function rowToSessionStateProjection(row: SessionStateProjectionRow): SessionStateProjection {
+  return {
+    ...row,
+    collaboration_id: row.collaboration_id ?? row.workspace_id,
+    blockers: parseJsonArray(row.blockers),
+    assumptions: parseJsonArray(row.assumptions),
+    pendingDecisions: parseJsonArray(row.pending_decisions),
+    activeTools: parseJsonArray(row.active_tools),
+    recentOutputs: parseJsonArray(row.recent_outputs),
+  };
+}
+
+export function rowToAssociation(row: Association): Association {
+  return {
+    ...row,
+    collaboration_id: row.collaboration_id ?? row.workspace_id,
+    visibility_class: row.visibility_class ?? 'private',
+  };
+}
+
+export function rowToTemporalProjectionWatermark(
+  row: TemporalProjectionWatermarkRow,
+): TemporalProjectionWatermark {
+  return {
+    ...row,
+    metadata: parseJsonObject(row.metadata),
+  };
+}
+
 export type { CompactionLogRow, KnowledgeMemoryAuditRow, KnowledgeMemoryRow, PlaybookRow, WorkingMemoryRow };
 export type { KnowledgeCandidateRow, KnowledgeEvidenceRow };
+export type { MemoryEventRow, SessionStateProjectionRow, TemporalProjectionWatermarkRow };

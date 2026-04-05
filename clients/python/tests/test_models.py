@@ -1,11 +1,17 @@
 from memory_layer_client.models import (
     ChangeListResponse,
+    CoordinationState,
     ContextResponse,
+    HandoffListResponse,
     KnowledgeInspectionResponse,
     KnowledgeListResponse,
+    MemoryEventRecord,
     MemoryScope,
     ReverificationResponse,
+    TemporalEventLogResponse,
+    TemporalStateResponse,
     TrustAssessmentResponse,
+    WorkClaimListResponse,
 )
 
 
@@ -48,6 +54,15 @@ def test_context_response_normalizes_unresolved_work_strings_and_legacy_objects(
     context = ContextResponse.from_dict(
         {
             "currentObjective": "Ship rollout",
+            "sessionState": {
+                "currentObjective": "Ship rollout",
+                "blockers": ["Document rollback"],
+                "assumptions": ["Assume staging is current"],
+                "pendingDecisions": ["Choose rollback owner"],
+                "activeTools": ["deploy-bot"],
+                "recentOutputs": ["Rollback dry run succeeded"],
+                "updatedAt": 123,
+            },
             "activeTurnCount": 1,
             "workingMemory": None,
             "relevantKnowledge": [],
@@ -59,6 +74,28 @@ def test_context_response_normalizes_unresolved_work_strings_and_legacy_objects(
                 {"detail": "ignored"},
                 123,
             ],
+            "coordinationState": {
+                "ownedClaims": [
+                    {
+                        "id": 8,
+                        "work_item_id": 99,
+                        "actor": {"actor_kind": "agent", "actor_id": "planner"},
+                        "session_id": "sess-1",
+                        "claim_token": "claim-1",
+                        "status": "active",
+                        "claimed_at": 123,
+                        "expires_at": 456,
+                        "released_at": None,
+                        "release_reason": None,
+                        "source_event_id": 77,
+                        "visibility_class": "workspace",
+                        "version": 2,
+                    }
+                ],
+                "pendingInboundHandoffs": [],
+                "pendingOutboundHandoffs": [],
+                "sharedWorkItems": [{"id": 99, "title": "Coordinate rollout"}],
+            },
             "tokenEstimate": 12,
         }
     )
@@ -67,3 +104,113 @@ def test_context_response_normalizes_unresolved_work_strings_and_legacy_objects(
         "Document rollback checklist",
         "Confirm staging smoke tests",
     ]
+    assert context.session_state is not None
+    assert context.session_state["blockers"] == ["Document rollback"]
+    assert context.coordination_state is not None
+    assert context.coordination_state.owned_claims[0].actor.actor_id == "planner"
+
+
+def test_temporal_and_coordination_models_parse_expected_payloads() -> None:
+    events = TemporalEventLogResponse.from_dict(
+        {
+            "events": [
+                {
+                    "event_id": 10,
+                    "entity_kind": "work_claim",
+                    "entity_id": "8",
+                    "event_type": "work_claim.claimed",
+                    "payload": {"after": {"id": 8}},
+                    "created_at": 123,
+                }
+            ],
+            "nextCursor": 10,
+        }
+    )
+    state = TemporalStateResponse.from_dict(
+        {
+            "asOf": 123,
+            "exact": True,
+            "cutoverAt": 100,
+            "watermarkEventId": 10,
+            "context": {
+                "currentObjective": None,
+                "sessionState": None,
+                "activeTurnCount": 0,
+                "workingMemory": None,
+                "relevantKnowledge": [],
+                "activeObjectives": [],
+                "unresolvedWork": [],
+                "tokenEstimate": 0,
+            },
+            "sessionState": None,
+            "turns": [],
+            "workingMemory": [],
+            "knowledge": [],
+            "workItems": [],
+            "associations": [],
+            "playbooks": [],
+            "workClaims": [
+                {
+                    "id": 8,
+                    "work_item_id": 99,
+                    "actor": {"actor_kind": "agent", "actor_id": "planner"},
+                    "session_id": None,
+                    "claim_token": "claim-1",
+                    "status": "active",
+                    "claimed_at": 123,
+                    "expires_at": 456,
+                    "released_at": None,
+                    "release_reason": None,
+                    "source_event_id": 10,
+                    "visibility_class": "workspace",
+                    "version": 1,
+                }
+            ],
+            "handoffs": [],
+            "coordinationState": {
+                "ownedClaims": [],
+                "pendingInboundHandoffs": [],
+                "pendingOutboundHandoffs": [],
+                "sharedWorkItems": [],
+            },
+        }
+    )
+    claims = WorkClaimListResponse.from_dict(
+        {
+            "claims": [
+                {
+                    "id": 8,
+                    "work_item_id": 99,
+                    "actor": {"actor_kind": "agent", "actor_id": "planner"},
+                    "session_id": None,
+                    "claim_token": "claim-1",
+                    "status": "active",
+                    "claimed_at": 123,
+                    "expires_at": 456,
+                    "released_at": None,
+                    "release_reason": None,
+                    "source_event_id": 10,
+                    "visibility_class": "workspace",
+                    "version": 1,
+                }
+            ]
+        }
+    )
+    handoffs = HandoffListResponse.from_dict({"handoffs": []})
+    event = MemoryEventRecord.from_dict(
+        {
+            "event_id": 11,
+            "entity_kind": "handoff",
+            "entity_id": "12",
+            "event_type": "handoff.created",
+            "payload": {},
+            "created_at": 124,
+        }
+    )
+
+    assert events.events[0].event_type == "work_claim.claimed"
+    assert state.work_claims[0].visibility_class == "workspace"
+    assert isinstance(state.coordination_state, CoordinationState)
+    assert claims.claims[0].id == 8
+    assert handoffs.handoffs == []
+    assert event.entity_kind == "handoff"

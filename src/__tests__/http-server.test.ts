@@ -190,6 +190,46 @@ describe('HTTP server', () => {
     expect(crossScope.knowledge[0].fact).toContain('cache flush');
   });
 
+  it('returns 404 when revising a playbook from the wrong scope', async () => {
+    const base = await setup(13113);
+
+    const created = await fetch(`${base}/v1/playbooks`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-memory-tenant': 'acme',
+        'x-memory-system': 'assistant',
+        'x-memory-workspace': 'shared',
+        'x-memory-scope': 'thread-a',
+      },
+      body: JSON.stringify({
+        title: 'Deploy',
+        description: 'How to deploy',
+        instructions: 'Run deploy.sh',
+      }),
+    }).then((res) => res.json());
+
+    const reviseRes = await fetch(`${base}/v1/playbooks/${created.playbook.id}/revise`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-memory-tenant': 'acme',
+        'x-memory-system': 'assistant',
+        'x-memory-workspace': 'shared',
+        'x-memory-scope': 'thread-b',
+      },
+      body: JSON.stringify({
+        instructions: 'Run deploy.sh && verify',
+        revisionReason: 'Add verification',
+      }),
+    });
+
+    expect(reviseRes.status).toBe(404);
+    await expect(reviseRes.json()).resolves.toMatchObject({
+      error: expect.stringContaining('does not belong'),
+    });
+  });
+
   it('exposes inspection endpoints and reverification controls', async () => {
     const base = await setup(13112);
 
@@ -238,6 +278,14 @@ describe('HTTP server', () => {
     expect(res.status).toBe(404);
   });
 
+  it('maps typed manager not-found errors without regex matching', async () => {
+    const base = await setup(13114);
+    const res = await fetch(`${base}/v1/reverification/999`, { method: 'POST' });
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toContain('was not found');
+  });
+
   it('returns health report', async () => {
     const base = await setup(13104);
     const res = await fetch(`${base}/v1/health`);
@@ -245,6 +293,46 @@ describe('HTTP server', () => {
     const health = await res.json();
     expect(health.activeTurnCount).toBe(0);
     expect(health.tokenEstimate).toBeDefined();
+    expect(health.circuitBreakers.embeddings.state).toBeDefined();
+  });
+
+  it('exposes session-state and retrieval debug inspectors', async () => {
+    const base = await setup(13113);
+
+    await fetch(`${base}/v1/exchanges`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userContent: 'Assume staging is current and decide rollback ownership.',
+        assistantContent: 'Tool deploy-bot output: rollback rehearsal passed.',
+      }),
+    });
+    await fetch(`${base}/v1/work`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Wait for change approval',
+        kind: 'unresolved_work',
+        status: 'blocked',
+      }),
+    });
+
+    const context = await fetch(`${base}/v1/context?query=rollback&debug=true`).then((res) =>
+      res.json(),
+    );
+    expect(context.sessionState.blockers).toContain('Wait for change approval');
+    expect(context.debugTrace).toBeTruthy();
+
+    const sessionState = await fetch(`${base}/v1/inspect/session-state?query=rollback`).then((res) =>
+      res.json(),
+    );
+    expect(sessionState.sessionState.blockers).toContain('Wait for change approval');
+
+    const retrieval = await fetch(`${base}/v1/inspect/retrieval?query=rollback`).then((res) =>
+      res.json(),
+    );
+    expect(Array.isArray(retrieval.knowledgeSelectionReasons)).toBe(true);
+    expect(retrieval.debugTrace.scope.scopeSource).toBe('local');
   });
 
   it('supports multi-scope requests in one process', async () => {
@@ -438,6 +526,25 @@ describe('HTTP server', () => {
     expect(fetched.snapshot.context.relevantKnowledge[0].access_count).toBe(capturedAccessCount);
   });
 
+  it('enforces a per-scope snapshot cache bound', async () => {
+    const base = await setup(13116);
+
+    for (let index = 0; index < 11; index += 1) {
+      const res = await fetch(`${base}/v1/sessions/session-${index}/snapshot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ relevanceQuery: `session-${index}` }),
+      });
+      expect(res.status).toBe(201);
+    }
+
+    const evicted = await fetch(`${base}/v1/sessions/session-0/snapshot`);
+    expect(evicted.status).toBe(404);
+
+    const retained = await fetch(`${base}/v1/sessions/session-10/snapshot`);
+    expect(retained.status).toBe(200);
+  }, 15000);
+
   it('GET /v1/episodes requires query param', async () => {
     const base = await setup(13120);
     const res = await fetch(`${base}/v1/episodes`);
@@ -458,7 +565,7 @@ describe('HTTP server', () => {
       }),
     });
     const res = await fetch(`${base}/v1/episodes?q=deploy`);
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(503);
     const body = await res.json();
     expect(body.error).toContain('structuredClient');
   });
@@ -470,7 +577,7 @@ describe('HTTP server', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session_id: 'sess-1' }),
     });
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(503);
     const body = await res.json();
     expect(body.error).toContain('structuredClient');
   });
@@ -491,7 +598,7 @@ describe('HTTP server', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query: 'test' }),
     });
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(503);
     const body = await res.json();
     expect(body.error).toContain('structuredClient');
   });
@@ -547,8 +654,8 @@ describe('HTTP server', () => {
     const base = await setup(13127);
     // Just verify the params are accepted (will error on structuredClient)
     const res = await fetch(`${base}/v1/episodes?q=test&start_at=0&end_at=999999999`);
-    // Should be 500 (structuredClient) not 400 (bad params)
-    expect(res.status).toBe(500);
+    // Should be 503 (structuredClient unavailable) not 400 (bad params)
+    expect(res.status).toBe(503);
   });
 
   it('rejects malformed request validation inputs with 400s', async () => {

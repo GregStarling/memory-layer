@@ -1,6 +1,11 @@
 import { normalizeScope, type MemoryScope } from '../contracts/identity.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import { getNativeSyncAdapter } from '../adapters/sync-to-async.js';
+import {
+  ConflictError,
+  ResourceNotFoundError,
+  ScopeMismatchError,
+} from '../contracts/errors.js';
 import type {
   Playbook,
   PlaybookRevision,
@@ -165,7 +170,7 @@ export async function revisePlaybook(
     return syncAdapter.transaction(() => {
       const existing = syncAdapter.getPlaybookById(playbookId);
       if (!existing) {
-        throw new Error(`Playbook ${playbookId} not found`);
+        throw new ResourceNotFoundError(`Playbook ${playbookId} not found`);
       }
       const norm = normalizeScope(scope);
       if (
@@ -175,7 +180,7 @@ export async function revisePlaybook(
         existing.collaboration_id !== norm.collaboration_id ||
         existing.scope_id !== norm.scope_id
       ) {
-        throw new Error(`Playbook ${playbookId} does not belong to the requested scope`);
+        throw new ScopeMismatchError(`Playbook ${playbookId} does not belong to the requested scope`);
       }
       const revision = syncAdapter.insertPlaybookRevision({
         ...scope,
@@ -188,7 +193,7 @@ export async function revisePlaybook(
         instructions: newInstructions,
       });
       if (!updated) {
-        throw new Error(`Failed to update playbook ${playbookId}`);
+        throw new ConflictError(`Failed to update playbook ${playbookId}`);
       }
       return { playbook: updated, revision };
     });
@@ -198,7 +203,7 @@ export async function revisePlaybook(
   return adapter.transaction(async () => {
     const existing = await adapter.getPlaybookById(playbookId);
     if (!existing) {
-      throw new Error(`Playbook ${playbookId} not found`);
+      throw new ResourceNotFoundError(`Playbook ${playbookId} not found`);
     }
 
     // Scope safety: verify the playbook belongs to the caller's scope
@@ -210,7 +215,7 @@ export async function revisePlaybook(
       existing.collaboration_id !== norm.collaboration_id ||
       existing.scope_id !== norm.scope_id
     ) {
-      throw new Error(`Playbook ${playbookId} does not belong to the requested scope`);
+      throw new ScopeMismatchError(`Playbook ${playbookId} does not belong to the requested scope`);
     }
 
     // Store current instructions as a revision
@@ -228,7 +233,7 @@ export async function revisePlaybook(
     });
 
     if (!updated) {
-      throw new Error(`Failed to update playbook ${playbookId}`);
+      throw new ConflictError(`Failed to update playbook ${playbookId}`);
     }
 
     return { playbook: updated, revision };

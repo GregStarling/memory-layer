@@ -4,11 +4,13 @@ import type { MemoryContext } from './context.js';
 
 export interface SessionBootstrap {
   currentObjective: string | null;
+  sessionState: MemoryContext['sessionState'];
   workingMemory: WorkingMemory | null;
   relevantKnowledge: KnowledgeMemory[];
   recentSummaries: WorkingMemory[];
   activeObjectives: WorkItem[];
   unresolvedWork: string[];
+  coordinationState?: MemoryContext['coordinationState'] | null;
   profile?: Profile | null;
 }
 
@@ -55,6 +57,34 @@ export function formatContextForPrompt(
     '',
     formatHeading('Current Objective', options),
     context.currentObjective ?? 'None',
+    '',
+    formatHeading('Session State', options),
+    `Objective: ${context.sessionState.currentObjective ?? 'None'}`,
+    `Blockers: ${
+      context.sessionState.blockers.length > 0
+        ? context.sessionState.blockers.join(' | ')
+        : 'None'
+    }`,
+    `Assumptions: ${
+      context.sessionState.assumptions.length > 0
+        ? context.sessionState.assumptions.join(' | ')
+        : 'None'
+    }`,
+    `Pending Decisions: ${
+      context.sessionState.pendingDecisions.length > 0
+        ? context.sessionState.pendingDecisions.join(' | ')
+        : 'None'
+    }`,
+    `Active Tools: ${
+      context.sessionState.activeTools.length > 0
+        ? context.sessionState.activeTools.join(' | ')
+        : 'None'
+    }`,
+    `Recent Outputs: ${
+      context.sessionState.recentOutputs.length > 0
+        ? context.sessionState.recentOutputs.join(' | ')
+        : 'None'
+    }`,
     '',
     formatHeading('Active State', options),
     ...(context.activeState.length > 0 ? context.activeState.map((item) => `- ${item}`) : ['- None']),
@@ -108,6 +138,28 @@ export function formatContextForPrompt(
     );
   }
 
+  if (context.coordinationState) {
+    sections.push(
+      '',
+      formatHeading('Coordination State', options),
+      `Currently Owned Work: ${
+        context.coordinationState.ownedClaims.length > 0
+          ? context.coordinationState.ownedClaims.map((claim) => `#${claim.work_item_id}`).join(' | ')
+          : 'None'
+      }`,
+      `Handoffs To Review: ${
+        context.coordinationState.pendingInboundHandoffs.length > 0
+          ? context.coordinationState.pendingInboundHandoffs.map((handoff) => handoff.summary).join(' | ')
+          : 'None'
+      }`,
+      `Work Awaiting Pickup: ${
+        context.coordinationState.pendingOutboundHandoffs.length > 0
+          ? context.coordinationState.pendingOutboundHandoffs.map((handoff) => handoff.summary).join(' | ')
+          : 'None'
+      }`,
+    );
+  }
+
   if (options?.includeProvisionalKnowledge) {
     sections.push(
       '',
@@ -139,6 +191,34 @@ export function formatBootstrapForPrompt(
     formatHeading('Bootstrap Objective', options),
     bootstrap.currentObjective ?? 'None',
     '',
+    formatHeading('Bootstrap Session State', options),
+    `Objective: ${bootstrap.sessionState.currentObjective ?? 'None'}`,
+    `Blockers: ${
+      bootstrap.sessionState.blockers.length > 0
+        ? bootstrap.sessionState.blockers.join(' | ')
+        : 'None'
+    }`,
+    `Assumptions: ${
+      bootstrap.sessionState.assumptions.length > 0
+        ? bootstrap.sessionState.assumptions.join(' | ')
+        : 'None'
+    }`,
+    `Pending Decisions: ${
+      bootstrap.sessionState.pendingDecisions.length > 0
+        ? bootstrap.sessionState.pendingDecisions.join(' | ')
+        : 'None'
+    }`,
+    `Active Tools: ${
+      bootstrap.sessionState.activeTools.length > 0
+        ? bootstrap.sessionState.activeTools.join(' | ')
+        : 'None'
+    }`,
+    `Recent Outputs: ${
+      bootstrap.sessionState.recentOutputs.length > 0
+        ? bootstrap.sessionState.recentOutputs.join(' | ')
+        : 'None'
+    }`,
+    '',
     formatHeading('Bootstrap Working Memory', options),
     bootstrap.workingMemory?.summary ?? 'None',
     '',
@@ -156,6 +236,27 @@ export function formatBootstrapForPrompt(
     ...(bootstrap.unresolvedWork.length > 0
       ? bootstrap.unresolvedWork.map((item) => `- ${item}`)
       : ['- None']),
+    '',
+    formatHeading('Bootstrap Coordination', options),
+    ...(bootstrap.coordinationState
+      ? [
+          `Owned Claims: ${
+            bootstrap.coordinationState.ownedClaims.length > 0
+              ? bootstrap.coordinationState.ownedClaims.map((claim) => `#${claim.work_item_id}`).join(' | ')
+              : 'None'
+          }`,
+          `Inbound Handoffs: ${
+            bootstrap.coordinationState.pendingInboundHandoffs.length > 0
+              ? bootstrap.coordinationState.pendingInboundHandoffs.map((handoff) => handoff.summary).join(' | ')
+              : 'None'
+          }`,
+          `Outbound Handoffs: ${
+            bootstrap.coordinationState.pendingOutboundHandoffs.length > 0
+              ? bootstrap.coordinationState.pendingOutboundHandoffs.map((handoff) => handoff.summary).join(' | ')
+              : 'None'
+          }`,
+        ]
+      : ['None']),
     ...formatProfileSection(bootstrap.profile, options),
   ].join('\n');
 }

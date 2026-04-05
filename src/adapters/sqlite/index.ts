@@ -6,8 +6,30 @@ import type Database from 'better-sqlite3';
 
 import type { EmbeddingAdapter } from '../../contracts/embedding.js';
 import { normalizeScope, scopeValues, type ScopeLevel } from '../../contracts/identity.js';
+import type {
+  ActorRef,
+  HandoffQuery,
+  HandoffRecord,
+  NewHandoffInput,
+  NewWorkClaimInput,
+  WorkClaim,
+  WorkClaimQuery,
+  WorkItemPatch,
+} from '../../contracts/coordination.js';
 import type { StorageAdapter } from '../../contracts/storage.js';
 import { UniqueConstraintError } from '../../contracts/storage.js';
+import { ConflictError } from '../../contracts/errors.js';
+import type {
+  MemoryEventEntityKind,
+  MemoryEventQuery,
+  MemoryEventRecord,
+  NewMemoryEventRecord,
+  NewSessionStateProjection,
+  NewTemporalProjectionWatermark,
+  SessionStateProjection,
+  TemporalProjectionWatermark,
+  TimelineResult,
+} from '../../contracts/temporal.js';
 import type {
   Association,
   AssociationTargetKind,
@@ -43,7 +65,9 @@ import { estimateTokens } from '../../core/tokens.js';
 import { emitMemoryEvent, type TelemetryOptions } from '../../core/telemetry.js';
 import { matchesKnowledgeSearchOptions } from '../../core/retrieval.js';
 import {
+  assertActorRef,
   assertArchiveInput,
+  assertMemoryVisibilityClass,
   nowSeconds,
   validateContextMonitorUpsert,
   validateNewCompactionLog,
@@ -63,19 +87,27 @@ import {
   rowToKnowledgeEvidence,
   rowToKnowledgeMemory,
   rowToKnowledgeMemoryAudit,
+  rowToMemoryEvent,
+  rowToAssociation,
   rowToTurn,
   rowToPlaybook,
   rowToPlaybookRevision,
+  rowToSessionStateProjection,
+  rowToTemporalProjectionWatermark,
   rowToWorkItem,
   rowToWorkingMemory,
+  serializeObject,
   serializeNumberArray,
   serializeStringArray,
   type CompactionLogRow,
+  type MemoryEventRow,
   type PlaybookRow,
   type KnowledgeCandidateRow,
   type KnowledgeEvidenceRow,
   type KnowledgeMemoryAuditRow,
   type KnowledgeMemoryRow,
+  type SessionStateProjectionRow,
+  type TemporalProjectionWatermarkRow,
   type WorkingMemoryRow,
 } from './mappers.js';
 import { createSQLiteEmbeddingAdapter } from './embeddings.js';
@@ -207,6 +239,30 @@ function resolvePaginationOptions(options?: PaginationOptions): Required<Paginat
   };
 }
 
+function cloneValue<T>(value: T): T {
+  return structuredClone(value);
+}
+
+function resolveEventQuery(query?: MemoryEventQuery): {
+  sessionId: string;
+  entityKind: MemoryEventEntityKind | null;
+  entityId: string;
+  startAt: number;
+  endAt: number;
+  limit: number;
+  cursor: number;
+} {
+  return {
+    sessionId: query?.sessionId ?? '',
+    entityKind: query?.entityKind ?? null,
+    entityId: query?.entityId ?? '',
+    startAt: query?.startAt ?? Number.NEGATIVE_INFINITY,
+    endAt: query?.endAt ?? Number.POSITIVE_INFINITY,
+    limit: query?.limit ?? 100,
+    cursor: query?.cursor ?? 0,
+  };
+}
+
 export function createSQLiteAdapter(
   dbPath: string | ':memory:',
   telemetry?: TelemetryOptions,
@@ -243,6 +299,258 @@ function createAdapterFromDatabase(
   db: Database.Database,
   telemetry?: TelemetryOptions,
 ): StorageAdapter {
+  function readTemporalWatermark(
+    projectionName = 'temporal',
+  ): TemporalProjectionWatermark | null {
+    const row = db
+      .prepare('SELECT * FROM projection_watermarks WHERE projection_name = ?')
+      .get(projectionName) as TemporalProjectionWatermarkRow | undefined;
+    return row ? rowToTemporalProjectionWatermark(row) : null;
+  }
+
+  function writeTemporalWatermark(
+    input: NewTemporalProjectionWatermark,
+  ): TemporalProjectionWatermark {
+    const updatedAt = input.updated_at ?? nowSeconds();
+    db.prepare(
+      `INSERT INTO projection_watermarks
+        (projection_name, last_event_id, updated_at, cutover_at, metadata)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(projection_name) DO UPDATE SET
+         last_event_id = excluded.last_event_id,
+         updated_at = excluded.updated_at,
+         cutover_at = excluded.cutover_at,
+         metadata = excluded.metadata`,
+    ).run(
+      input.projection_name,
+      input.last_event_id,
+      updatedAt,
+      input.cutover_at ?? null,
+      serializeObject(input.metadata ?? null),
+    );
+    return readTemporalWatermark(input.projection_name)!;
+  }
+
+  function insertMemoryEventInternal(input: NewMemoryEventRecord): MemoryEventRecord {
+    const normalized = normalizeScope(input);
+    const createdAt = input.created_at ?? nowSeconds();
+    const result = db
+      .prepare(
+        `INSERT INTO memory_event_log
+          (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, actor_id,
+           actor_kind, actor_system_id, actor_display_name, actor_metadata,
+           entity_kind, entity_id, event_type, payload, causation_id, correlation_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        normalized.tenant_id,
+        normalized.system_id,
+        normalized.workspace_id,
+        normalized.collaboration_id,
+        normalized.scope_id,
+        input.session_id ?? null,
+        input.actor_id ?? null,
+        input.actor_kind ?? null,
+        input.actor_system_id ?? null,
+        input.actor_display_name ?? null,
+        input.actor_metadata ? JSON.stringify(input.actor_metadata) : null,
+        input.entity_kind,
+        input.entity_id,
+        input.event_type,
+        JSON.stringify(input.payload ?? {}),
+        input.causation_id ?? null,
+        input.correlation_id ?? null,
+        createdAt,
+      );
+    const eventId = Number(result.lastInsertRowid);
+    writeTemporalWatermark({
+      projection_name: 'temporal',
+      last_event_id: eventId,
+      updated_at: createdAt,
+      cutover_at: readTemporalWatermark('temporal')?.cutover_at ?? createdAt,
+      metadata: readTemporalWatermark('temporal')?.metadata ?? null,
+    });
+    const row = db
+      .prepare('SELECT * FROM memory_event_log WHERE event_id = ?')
+      .get(eventId) as MemoryEventRow | undefined;
+    return rowToMemoryEvent(row!);
+  }
+
+  function listScopedMemoryEvents(
+    scope: Parameters<StorageAdapter['listMemoryEvents']>[0],
+    query?: MemoryEventQuery,
+  ): TimelineResult {
+    const resolved = resolveEventQuery(query);
+    const clauses = [SCOPE_WHERE, 'created_at >= ?', 'created_at <= ?'];
+    const params: unknown[] = [...scopeValues(scope), resolved.startAt, resolved.endAt];
+    if (resolved.cursor > 0) {
+      clauses.push('event_id > ?');
+      params.push(resolved.cursor);
+    }
+    if (resolved.sessionId) {
+      clauses.push('session_id = ?');
+      params.push(resolved.sessionId);
+    }
+    if (resolved.entityKind) {
+      clauses.push('entity_kind = ?');
+      params.push(resolved.entityKind);
+    }
+    if (resolved.entityId) {
+      clauses.push('entity_id = ?');
+      params.push(resolved.entityId);
+    }
+    const rows = db
+      .prepare(
+        `SELECT * FROM memory_event_log
+         WHERE ${clauses.join(' AND ')}
+         ORDER BY created_at ASC, event_id ASC
+         LIMIT ?`,
+      )
+      .all(...params, resolved.limit + 1) as MemoryEventRow[];
+    const pageRows = rows.slice(0, resolved.limit).map(rowToMemoryEvent);
+    return {
+      events: pageRows,
+      nextCursor:
+        rows.length > resolved.limit ? pageRows[pageRows.length - 1]?.event_id ?? null : null,
+    };
+  }
+
+  function readSessionStateProjection(
+    scope: Parameters<StorageAdapter['getSessionState']>[0],
+    sessionId: string,
+  ): SessionStateProjection | null {
+    const row = db
+      .prepare(
+        `SELECT * FROM session_state_current
+         WHERE ${SCOPE_WHERE} AND session_id = ?`,
+      )
+      .get(...scopeValues(scope), sessionId) as SessionStateProjectionRow | undefined;
+    return row ? rowToSessionStateProjection(row) : null;
+  }
+
+  function writeSessionStateProjection(
+    input: NewSessionStateProjection,
+  ): SessionStateProjection {
+    const normalized = normalizeScope(input);
+    db.prepare(
+      `INSERT INTO session_state_current
+        (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id,
+         current_objective, blockers, assumptions, pending_decisions, active_tools, recent_outputs,
+         updated_at, source_event_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id) DO UPDATE SET
+         current_objective = excluded.current_objective,
+         blockers = excluded.blockers,
+         assumptions = excluded.assumptions,
+         pending_decisions = excluded.pending_decisions,
+         active_tools = excluded.active_tools,
+         recent_outputs = excluded.recent_outputs,
+         updated_at = excluded.updated_at,
+         source_event_id = excluded.source_event_id`,
+    ).run(
+      normalized.tenant_id,
+      normalized.system_id,
+      normalized.workspace_id,
+      normalized.collaboration_id,
+      normalized.scope_id,
+      input.session_id,
+      input.currentObjective,
+      serializeStringArray(input.blockers),
+      serializeStringArray(input.assumptions),
+      serializeStringArray(input.pendingDecisions),
+      serializeStringArray(input.activeTools),
+      serializeStringArray(input.recentOutputs),
+      input.updatedAt,
+      input.source_event_id ?? null,
+    );
+    return readSessionStateProjection(normalized, input.session_id)!;
+  }
+
+  function serializeActorMetadata(actor: ActorRef): [string, string, string | null, string | null, string | null] {
+    return [
+      actor.actor_kind,
+      actor.actor_id,
+      actor.system_id ?? null,
+      actor.display_name ?? null,
+      actor.metadata ? JSON.stringify(actor.metadata) : null,
+    ];
+  }
+
+  function parseActorRef(
+    row: Record<string, unknown>,
+    prefix: '' | 'from_' | 'to_' = '',
+  ): ActorRef {
+    const value = (field: string) => row[`${prefix}${field}`];
+    let metadata: Record<string, unknown> | null = null;
+    if (value('actor_metadata') != null) {
+      try {
+        const parsed = JSON.parse(String(value('actor_metadata')));
+        metadata = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+          ? (parsed as Record<string, unknown>)
+          : null;
+      } catch {
+        metadata = null;
+      }
+    }
+    return {
+      actor_kind: String(value('actor_kind')) as ActorRef['actor_kind'],
+      actor_id: String(value('actor_id')),
+      system_id: value('actor_system_id') != null ? String(value('actor_system_id')) : null,
+      display_name:
+        value('actor_display_name') != null ? String(value('actor_display_name')) : null,
+      metadata,
+    };
+  }
+
+  function mapWorkClaim(row: Record<string, unknown>): WorkClaim {
+    return {
+      id: Number(row.id),
+      tenant_id: String(row.tenant_id),
+      system_id: String(row.system_id),
+      workspace_id: String(row.workspace_id ?? ''),
+      collaboration_id: String(row.collaboration_id ?? ''),
+      scope_id: String(row.scope_id),
+      work_item_id: Number(row.work_item_id),
+      actor: parseActorRef(row),
+      session_id: row.session_id != null ? String(row.session_id) : null,
+      claim_token: String(row.claim_token),
+      status: String(row.status) as WorkClaim['status'],
+      claimed_at: Number(row.claimed_at),
+      expires_at: Number(row.expires_at),
+      released_at: row.released_at != null ? Number(row.released_at) : null,
+      release_reason: row.release_reason != null ? String(row.release_reason) : null,
+      source_event_id: row.source_event_id != null ? Number(row.source_event_id) : null,
+      visibility_class: (row.visibility_class as WorkClaim['visibility_class']) ?? 'private',
+      version: Number(row.version ?? 1),
+    };
+  }
+
+  function mapHandoff(row: Record<string, unknown>): HandoffRecord {
+    return {
+      id: Number(row.id),
+      tenant_id: String(row.tenant_id),
+      system_id: String(row.system_id),
+      workspace_id: String(row.workspace_id ?? ''),
+      collaboration_id: String(row.collaboration_id ?? ''),
+      scope_id: String(row.scope_id),
+      work_item_id: Number(row.work_item_id),
+      from_actor: parseActorRef(row, 'from_'),
+      to_actor: parseActorRef(row, 'to_'),
+      session_id: row.session_id != null ? String(row.session_id) : null,
+      summary: String(row.summary),
+      context_bundle_ref: row.context_bundle_ref != null ? String(row.context_bundle_ref) : null,
+      status: String(row.status) as HandoffRecord['status'],
+      created_at: Number(row.created_at),
+      accepted_at: row.accepted_at != null ? Number(row.accepted_at) : null,
+      rejected_at: row.rejected_at != null ? Number(row.rejected_at) : null,
+      canceled_at: row.canceled_at != null ? Number(row.canceled_at) : null,
+      expires_at: row.expires_at != null ? Number(row.expires_at) : null,
+      decision_reason: row.decision_reason != null ? String(row.decision_reason) : null,
+      source_event_id: row.source_event_id != null ? Number(row.source_event_id) : null,
+      visibility_class: (row.visibility_class as HandoffRecord['visibility_class']) ?? 'private',
+      version: Number(row.version ?? 1),
+    };
+  }
 
   function getTurnById(id: number): Turn | null {
     const row = db.prepare('SELECT * FROM turns WHERE id = ?').get(id) as Turn | undefined;
@@ -340,8 +648,20 @@ function createAdapterFromDatabase(
         tokenEstimate,
         createdAt,
       );
-
-    return getTurnById(Number(result.lastInsertRowid))!;
+    const turn = getTurnById(Number(result.lastInsertRowid))!;
+    insertMemoryEventInternal({
+      ...scope,
+      session_id: turn.session_id,
+      actor_id: turn.actor,
+      entity_kind: 'turn',
+      entity_id: String(turn.id),
+      event_type: 'turn.created',
+      payload: {
+        after: cloneValue(turn),
+      },
+      created_at: turn.created_at,
+    });
+    return turn;
   }
 
   function insertValidatedKnowledgeMemory(input: NewKnowledgeMemory): KnowledgeMemory {
@@ -403,8 +723,151 @@ function createAdapterFromDatabase(
         createdAt,
         createdAt,
       );
-    return getKnowledgeMemoryById(Number(result.lastInsertRowid))!;
+    const knowledge = getKnowledgeMemoryById(Number(result.lastInsertRowid))!;
+    insertMemoryEventInternal({
+      ...scope,
+      entity_kind: 'knowledge_memory',
+      entity_id: String(knowledge.id),
+      event_type: 'knowledge.created',
+      payload: {
+        after: cloneValue(knowledge),
+      },
+      created_at: knowledge.created_at,
+    });
+    return knowledge;
   }
+
+  function bootstrapTemporalCutover(): void {
+    const existing = readTemporalWatermark('temporal');
+    if (existing?.cutover_at != null) {
+      return;
+    }
+
+    const cutoverAt = nowSeconds();
+    const correlationId = 'temporal-cutover-v1';
+    db.transaction(() => {
+      writeTemporalWatermark({
+        projection_name: 'temporal',
+        last_event_id: existing?.last_event_id ?? 0,
+        updated_at: cutoverAt,
+        cutover_at: cutoverAt,
+        metadata: {
+          correlation_id: correlationId,
+        },
+      });
+
+      const turnRows = db.prepare('SELECT * FROM turns ORDER BY created_at ASC, id ASC').all() as Turn[];
+      for (const row of turnRows.map(rowToTurn)) {
+        insertMemoryEventInternal({
+          ...normalizeScope(row),
+          session_id: row.session_id,
+          actor_id: row.actor,
+          entity_kind: 'turn',
+          entity_id: String(row.id),
+          event_type: 'turn.seeded',
+          payload: { after: cloneValue(row) },
+          correlation_id: correlationId,
+          created_at: cutoverAt,
+        });
+      }
+
+      const workingRows = db
+        .prepare('SELECT * FROM working_memory ORDER BY created_at ASC, id ASC')
+        .all() as WorkingMemoryRow[];
+      for (const row of workingRows.map(rowToWorkingMemory)) {
+        insertMemoryEventInternal({
+          ...normalizeScope(row),
+          session_id: row.session_id,
+          entity_kind: 'working_memory',
+          entity_id: String(row.id),
+          event_type: 'working_memory.seeded',
+          payload: { after: cloneValue(row) },
+          correlation_id: correlationId,
+          created_at: cutoverAt,
+        });
+      }
+
+      const knowledgeRows = db
+        .prepare('SELECT * FROM knowledge_memory ORDER BY created_at ASC, id ASC')
+        .all() as KnowledgeMemoryRow[];
+      for (const row of knowledgeRows.map(rowToKnowledgeMemory)) {
+        insertMemoryEventInternal({
+          ...normalizeScope(row),
+          entity_kind: 'knowledge_memory',
+          entity_id: String(row.id),
+          event_type: 'knowledge.seeded',
+          payload: { after: cloneValue(row) },
+          correlation_id: correlationId,
+          created_at: cutoverAt,
+        });
+      }
+
+      const workItemRows = db
+        .prepare('SELECT * FROM work_items ORDER BY created_at ASC, id ASC')
+        .all() as WorkItem[];
+      for (const row of workItemRows.map(rowToWorkItem)) {
+        insertMemoryEventInternal({
+          ...normalizeScope(row),
+          session_id: row.session_id,
+          entity_kind: 'work_item',
+          entity_id: String(row.id),
+          event_type: 'work_item.seeded',
+          payload: { after: cloneValue(row) },
+          correlation_id: correlationId,
+          created_at: cutoverAt,
+        });
+      }
+
+      const associationRows = db
+        .prepare('SELECT * FROM associations ORDER BY created_at ASC, id ASC')
+        .all() as Array<Record<string, unknown>>;
+      for (const row of associationRows.map((item) =>
+        rowToAssociation({
+          id: Number(item.id),
+          tenant_id: String(item.tenant_id),
+          system_id: String(item.system_id),
+          workspace_id: String(item.workspace_id ?? ''),
+          collaboration_id: String(item.collaboration_id ?? item.workspace_id ?? ''),
+          scope_id: String(item.scope_id),
+          visibility_class: (item.visibility_class as Association['visibility_class']) ?? 'private',
+          source_kind: item.source_kind as AssociationTargetKind,
+          source_id: Number(item.source_id),
+          target_kind: item.target_kind as AssociationTargetKind,
+          target_id: Number(item.target_id),
+          association_type: item.association_type as Association['association_type'],
+          confidence: Number(item.confidence ?? 0),
+          auto_generated: Number(item.auto_generated ?? 0) === 1,
+          created_at: Number(item.created_at),
+        } as Association),
+      )) {
+        insertMemoryEventInternal({
+          ...normalizeScope(row),
+          entity_kind: 'association',
+          entity_id: String(row.id),
+          event_type: 'association.seeded',
+          payload: { after: cloneValue(row) },
+          correlation_id: correlationId,
+          created_at: cutoverAt,
+        });
+      }
+
+      const playbookRows = db.prepare('SELECT * FROM playbooks ORDER BY created_at ASC, id ASC').all() as PlaybookRow[];
+      for (const row of playbookRows.map(rowToPlaybook)) {
+        insertMemoryEventInternal({
+          ...normalizeScope(row),
+          session_id: row.source_session_id,
+          entity_kind: 'playbook',
+          entity_id: String(row.id),
+          event_type: 'playbook.seeded',
+          payload: { after: cloneValue(row) },
+          correlation_id: correlationId,
+          created_at: cutoverAt,
+        });
+      }
+    })();
+  }
+
+  bootstrapTemporalCutover();
 
   return {
     insertTurn(input: NewTurn): Turn {
@@ -469,19 +932,34 @@ function createAdapterFromDatabase(
     searchTurns(scope, query, options): SearchResult<Turn>[] {
       const startedAt = Date.now();
       const resolved = resolveSearchOptions(options);
+      const safeQuery = toSafeFtsQuery(query);
+      const executeSearch = (ftsQuery: string): RankedTurnRow[] =>
+        db.prepare(
+          `SELECT turns.*, bm25(turns_fts) AS raw_rank
+           FROM turns_fts
+           JOIN turns ON turns_fts.rowid = turns.id
+           WHERE turns_fts MATCH ?
+             AND ${SCOPE_WHERE}
+             AND (? = 0 OR turns.archived_at IS NULL)
+           ORDER BY bm25(turns_fts)
+           LIMIT ?`,
+        ).all(
+          ftsQuery,
+          ...scopeValues(scope),
+          resolved.activeOnly ? 1 : 0,
+          resolved.limit,
+        ) as RankedTurnRow[];
       try {
-        const rows = db
-          .prepare(
-            `SELECT turns.*, bm25(turns_fts) AS raw_rank
-             FROM turns_fts
-             JOIN turns ON turns_fts.rowid = turns.id
-             WHERE turns_fts MATCH ?
-               AND ${SCOPE_WHERE}
-               AND (? = 0 OR turns.archived_at IS NULL)
-             ORDER BY bm25(turns_fts)
-             LIMIT ?`,
-          )
-          .all(query, ...scopeValues(scope), resolved.activeOnly ? 1 : 0, resolved.limit) as RankedTurnRow[];
+        let rows: RankedTurnRow[];
+        try {
+          rows = executeSearch(query);
+        } catch (error) {
+          if (safeQuery.length === 0 || safeQuery === query) throw error;
+          rows = executeSearch(safeQuery);
+        }
+        if (rows.length === 0 && safeQuery.length > 0 && safeQuery !== query && !/["']/.test(query)) {
+          rows = executeSearch(safeQuery);
+        }
         const results = rows.map((row) => ({
           item: rowToTurn(row),
           rank: normalizeRank(row.raw_rank),
@@ -505,11 +983,32 @@ function createAdapterFromDatabase(
 
     archiveTurn(id: number, archivedAt: number, compactionLogId: number): void {
       assertArchiveInput(id, archivedAt, compactionLogId);
+      const before = getTurnById(id);
       db.prepare(
         `UPDATE turns
          SET archived_at = ?, compaction_log_id = ?
          WHERE id = ? AND archived_at IS NULL`,
       ).run(archivedAt, compactionLogId, id);
+      const after = getTurnById(id);
+      if (before && after && before.archived_at !== after.archived_at) {
+        insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          actor_id: after.actor,
+          entity_kind: 'turn',
+          entity_id: String(after.id),
+          event_type: 'turn.archived',
+          payload: {
+            before: cloneValue(before),
+            after: cloneValue(after),
+            patch: {
+              archived_at: archivedAt,
+              compaction_log_id: compactionLogId,
+            },
+          },
+          created_at: archivedAt,
+        });
+      }
     },
 
     getArchivedTurnRange(sessionId: string, startId: number, endId: number, scope): Turn[] {
@@ -552,7 +1051,19 @@ function createAdapterFromDatabase(
           expiresAt,
           input.episode_recap ? JSON.stringify(input.episode_recap) : null,
         );
-      return getWorkingMemoryById(Number(result.lastInsertRowid))!;
+      const workingMemory = getWorkingMemoryById(Number(result.lastInsertRowid))!;
+      insertMemoryEventInternal({
+        ...scope,
+        session_id: workingMemory.session_id,
+        entity_kind: 'working_memory',
+        entity_id: String(workingMemory.id),
+        event_type: 'working_memory.created',
+        payload: {
+          after: cloneValue(workingMemory),
+        },
+        created_at: workingMemory.created_at,
+      });
+      return workingMemory;
     },
 
     getWorkingMemoryById,
@@ -609,13 +1120,52 @@ function createAdapterFromDatabase(
     },
 
     expireWorkingMemory(id: number): void {
-      db.prepare('UPDATE working_memory SET expires_at = ? WHERE id = ?').run(nowSeconds(), id);
+      const before = getWorkingMemoryById(id);
+      const expiredAt = nowSeconds();
+      db.prepare('UPDATE working_memory SET expires_at = ? WHERE id = ?').run(expiredAt, id);
+      const after = getWorkingMemoryById(id);
+      if (before && after) {
+        insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          entity_kind: 'working_memory',
+          entity_id: String(after.id),
+          event_type: 'working_memory.expired',
+          payload: {
+            before: cloneValue(before),
+            after: cloneValue(after),
+            patch: {
+              expires_at: expiredAt,
+            },
+          },
+          created_at: expiredAt,
+        });
+      }
     },
 
     markWorkingMemoryPromoted(id: number, knowledgeMemoryId: number): void {
+      const before = getWorkingMemoryById(id);
       db.prepare(
         'UPDATE working_memory SET promoted_to_knowledge_id = ? WHERE id = ?',
       ).run(knowledgeMemoryId, id);
+      const after = getWorkingMemoryById(id);
+      if (before && after) {
+        insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          entity_kind: 'working_memory',
+          entity_id: String(after.id),
+          event_type: 'working_memory.promoted',
+          payload: {
+            before: cloneValue(before),
+            after: cloneValue(after),
+            refs: {
+              knowledge_memory_id: knowledgeMemoryId,
+            },
+          },
+          created_at: nowSeconds(),
+        });
+      }
     },
 
     insertKnowledgeMemory(input: NewKnowledgeMemory): KnowledgeMemory {
@@ -1080,6 +1630,7 @@ function createAdapterFromDatabase(
     getKnowledgeMemoryAuditsForKnowledge,
 
     updateKnowledgeMemory(id, patch): KnowledgeMemory | null {
+      const before = getKnowledgeMemoryById(id);
       const assignments: string[] = [];
       const values: unknown[] = [];
       const push = (column: string, value: unknown) => {
@@ -1107,7 +1658,22 @@ function createAdapterFromDatabase(
         return getKnowledgeMemoryById(id);
       }
       db.prepare(`UPDATE knowledge_memory SET ${assignments.join(', ')} WHERE id = ?`).run(...values, id);
-      return getKnowledgeMemoryById(id);
+      const after = getKnowledgeMemoryById(id);
+      if (before && after) {
+        insertMemoryEventInternal({
+          ...normalizeScope(after),
+          entity_kind: 'knowledge_memory',
+          entity_id: String(after.id),
+          event_type: 'knowledge.updated',
+          payload: {
+            before: cloneValue(before),
+            after: cloneValue(after),
+            patch: cloneValue(patch as Record<string, unknown>),
+          },
+          created_at: nowSeconds(),
+        });
+      }
+      return after;
     },
 
     insertWorkItem(input: NewWorkItem): WorkItem {
@@ -1117,8 +1683,8 @@ function createAdapterFromDatabase(
         .prepare(
           `INSERT INTO work_items
             (session_id, tenant_id, system_id, workspace_id, collaboration_id, scope_id, kind, title, detail, status,
-             source_working_memory_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             visibility_class, source_working_memory_id, version, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           input.session_id ?? null,
@@ -1131,14 +1697,28 @@ function createAdapterFromDatabase(
           input.title,
           input.detail ?? null,
           input.status ?? 'open',
+          input.visibility_class ?? 'private',
           input.source_working_memory_id ?? null,
+          1,
           createdAt,
           createdAt,
         );
       const row = db
         .prepare('SELECT * FROM work_items WHERE id = ?')
         .get(Number(result.lastInsertRowid)) as WorkItem;
-      return rowToWorkItem(row);
+      const workItem = rowToWorkItem(row);
+      insertMemoryEventInternal({
+        ...scope,
+        session_id: workItem.session_id,
+        entity_kind: 'work_item',
+        entity_id: String(workItem.id),
+        event_type: 'work_item.created',
+        payload: {
+          after: cloneValue(workItem),
+        },
+        created_at: workItem.created_at,
+      });
+      return workItem;
     },
 
     getActiveWorkItems(scope): WorkItem[] {
@@ -1165,35 +1745,560 @@ function createAdapterFromDatabase(
     },
 
     updateWorkItemStatus(id, status): void {
+      const before = db
+        .prepare('SELECT * FROM work_items WHERE id = ?')
+        .get(id) as WorkItem | undefined;
+      const updatedAt = nowSeconds();
       db.prepare('UPDATE work_items SET status = ?, updated_at = ? WHERE id = ?').run(
         status,
-        nowSeconds(),
+        updatedAt,
         id,
       );
+      const after = db
+        .prepare('SELECT * FROM work_items WHERE id = ?')
+        .get(id) as WorkItem | undefined;
+      if (before && after) {
+        const afterItem = rowToWorkItem(after);
+        insertMemoryEventInternal({
+          ...normalizeScope(afterItem),
+          session_id: afterItem.session_id,
+          entity_kind: 'work_item',
+          entity_id: String(afterItem.id),
+          event_type: 'work_item.status_changed',
+          payload: {
+            before: cloneValue(rowToWorkItem(before)),
+            after: cloneValue(afterItem),
+            patch: {
+              status,
+              updated_at: updatedAt,
+            },
+          },
+          created_at: updatedAt,
+        });
+      }
+    },
+
+    updateWorkItem(id, patch: WorkItemPatch, options?: { expectedVersion?: number }): WorkItem | null {
+      const before = db
+        .prepare('SELECT * FROM work_items WHERE id = ?')
+        .get(id) as WorkItem | undefined;
+      if (!before) return null;
+      const beforeItem = rowToWorkItem(before);
+      if (options?.expectedVersion != null && beforeItem.version !== options.expectedVersion) {
+        throw new ConflictError(`Work item ${id} version mismatch`);
+      }
+      const updatedAt = nowSeconds();
+      const next = {
+        title: patch.title ?? beforeItem.title,
+        detail: patch.detail !== undefined ? patch.detail : beforeItem.detail,
+        status: patch.status ?? beforeItem.status,
+        visibility_class: patch.visibility_class ?? beforeItem.visibility_class,
+      };
+      db.prepare(
+        `UPDATE work_items
+         SET title = ?, detail = ?, status = ?, visibility_class = ?, version = version + 1, updated_at = ?
+         WHERE id = ?`,
+      ).run(next.title, next.detail ?? null, next.status, next.visibility_class, updatedAt, id);
+      const after = db
+        .prepare('SELECT * FROM work_items WHERE id = ?')
+        .get(id) as WorkItem | undefined;
+      if (!after) return null;
+      const afterItem = rowToWorkItem(after);
+      insertMemoryEventInternal({
+        ...normalizeScope(afterItem),
+        session_id: afterItem.session_id,
+        entity_kind: 'work_item',
+        entity_id: String(afterItem.id),
+        event_type:
+          patch.visibility_class !== undefined &&
+          patch.title === undefined &&
+          patch.detail === undefined &&
+          patch.status === undefined
+            ? 'work_item.visibility_changed'
+            : 'work_item.updated',
+        payload: {
+          before: cloneValue(beforeItem),
+          after: cloneValue(afterItem),
+          patch: cloneValue(patch as Record<string, unknown>),
+        },
+        created_at: updatedAt,
+      });
+      return afterItem;
     },
 
     deleteWorkItem(id): void {
+      const before = db
+        .prepare('SELECT * FROM work_items WHERE id = ?')
+        .get(id) as WorkItem | undefined;
       db.prepare('DELETE FROM work_items WHERE id = ?').run(id);
+      if (before) {
+        const item = rowToWorkItem(before);
+        insertMemoryEventInternal({
+          ...normalizeScope(item),
+          session_id: item.session_id,
+          entity_kind: 'work_item',
+          entity_id: String(item.id),
+          event_type: 'work_item.deleted',
+          payload: {
+            before: cloneValue(item),
+          },
+          created_at: nowSeconds(),
+        });
+      }
+    },
+
+    claimWorkItem(input: NewWorkClaimInput): WorkClaim {
+      assertActorRef(input.actor);
+      const workItemRow = db.prepare('SELECT * FROM work_items WHERE id = ?').get(input.work_item_id) as
+        | WorkItem
+        | undefined;
+      if (!workItemRow) throw new ConflictError(`Work item ${input.work_item_id} does not exist`);
+      const workItem = rowToWorkItem(workItemRow);
+      if (workItem.status === 'done') throw new ConflictError(`Work item ${input.work_item_id} is done`);
+      const now = input.claimed_at ?? nowSeconds();
+      const existingRow = db
+        .prepare('SELECT * FROM work_claims_current WHERE work_item_id = ?')
+        .get(input.work_item_id) as Record<string, unknown> | undefined;
+      if (existingRow) {
+        const existing = mapWorkClaim(existingRow);
+        if (existing.status === 'active' && existing.expires_at > now) {
+          if (
+            existing.actor.actor_kind !== input.actor.actor_kind ||
+            existing.actor.actor_id !== input.actor.actor_id
+          ) {
+            throw new ConflictError(`Work item ${input.work_item_id} is already claimed`);
+          }
+          return this.renewWorkClaim(existing.id, input.actor, input.lease_seconds ?? 300)!;
+        }
+        db.prepare(
+          `UPDATE work_claims_current
+           SET status = 'expired', released_at = ?, release_reason = 'expired', version = version + 1
+           WHERE id = ?`,
+        ).run(now, existing.id);
+        const expired = mapWorkClaim(
+          db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(existing.id) as Record<string, unknown>,
+        );
+        insertMemoryEventInternal({
+          ...normalizeScope(expired),
+          session_id: expired.session_id,
+          actor_id: expired.actor.actor_id,
+          actor_kind: expired.actor.actor_kind,
+          actor_system_id: expired.actor.system_id,
+          actor_display_name: expired.actor.display_name,
+          actor_metadata: expired.actor.metadata,
+          entity_kind: 'work_claim',
+          entity_id: String(expired.id),
+          event_type: 'work_claim.expired',
+          payload: { after: cloneValue(expired) },
+          created_at: now,
+        });
+      }
+      const normalized = normalizeScope(input);
+      const actorParts = serializeActorMetadata(input.actor);
+      const claimToken = `claim-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const result = db.prepare(
+        `INSERT INTO work_claims_current
+          (tenant_id, system_id, workspace_id, collaboration_id, scope_id, work_item_id, session_id,
+           actor_kind, actor_id, actor_system_id, actor_display_name, actor_metadata,
+           claim_token, status, claimed_at, expires_at, visibility_class, version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, 1)`,
+      ).run(
+        normalized.tenant_id,
+        normalized.system_id,
+        normalized.workspace_id,
+        normalized.collaboration_id,
+        normalized.scope_id,
+        input.work_item_id,
+        input.session_id ?? null,
+        ...actorParts,
+        claimToken,
+        now,
+        now + (input.lease_seconds ?? 300),
+        input.visibility_class,
+      );
+      const claim = mapWorkClaim(
+        db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(Number(result.lastInsertRowid)) as Record<string, unknown>,
+      );
+      insertMemoryEventInternal({
+        ...normalized,
+        session_id: claim.session_id,
+        actor_id: claim.actor.actor_id,
+        actor_kind: claim.actor.actor_kind,
+        actor_system_id: claim.actor.system_id,
+        actor_display_name: claim.actor.display_name,
+        actor_metadata: claim.actor.metadata,
+        entity_kind: 'work_claim',
+        entity_id: String(claim.id),
+        event_type: 'work_claim.claimed',
+        payload: { after: cloneValue(claim) },
+        created_at: now,
+      });
+      return claim;
+    },
+
+    renewWorkClaim(claimId, actor, leaseSeconds = 300): WorkClaim | null {
+      assertActorRef(actor);
+      const before = db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(claimId) as Record<string, unknown> | undefined;
+      if (!before) return null;
+      const claim = mapWorkClaim(before);
+      if (claim.actor.actor_kind !== actor.actor_kind || claim.actor.actor_id !== actor.actor_id) {
+        throw new ConflictError(`Claim ${claimId} is owned by another actor`);
+      }
+      const now = nowSeconds();
+      db.prepare(
+        `UPDATE work_claims_current
+         SET expires_at = ?, version = version + 1
+         WHERE id = ?`,
+      ).run(Math.max(claim.expires_at, now) + leaseSeconds, claimId);
+      const after = mapWorkClaim(
+        db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(claimId) as Record<string, unknown>,
+      );
+      insertMemoryEventInternal({
+        ...normalizeScope(after),
+        session_id: after.session_id,
+        actor_id: after.actor.actor_id,
+        actor_kind: after.actor.actor_kind,
+        actor_system_id: after.actor.system_id,
+        actor_display_name: after.actor.display_name,
+        actor_metadata: after.actor.metadata,
+        entity_kind: 'work_claim',
+        entity_id: String(after.id),
+        event_type: 'work_claim.renewed',
+        payload: { before: cloneValue(claim), after: cloneValue(after) },
+        created_at: now,
+      });
+      return after;
+    },
+
+    releaseWorkClaim(claimId, actor, reason): WorkClaim | null {
+      assertActorRef(actor);
+      const before = db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(claimId) as Record<string, unknown> | undefined;
+      if (!before) return null;
+      const claim = mapWorkClaim(before);
+      if (claim.actor.actor_kind !== actor.actor_kind || claim.actor.actor_id !== actor.actor_id) {
+        throw new ConflictError(`Claim ${claimId} is owned by another actor`);
+      }
+      const now = nowSeconds();
+      db.prepare(
+        `UPDATE work_claims_current
+         SET status = 'released', released_at = ?, release_reason = ?, version = version + 1
+         WHERE id = ?`,
+      ).run(now, reason ?? null, claimId);
+      const after = mapWorkClaim(
+        db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(claimId) as Record<string, unknown>,
+      );
+      insertMemoryEventInternal({
+        ...normalizeScope(after),
+        session_id: after.session_id,
+        actor_id: after.actor.actor_id,
+        actor_kind: after.actor.actor_kind,
+        actor_system_id: after.actor.system_id,
+        actor_display_name: after.actor.display_name,
+        actor_metadata: after.actor.metadata,
+        entity_kind: 'work_claim',
+        entity_id: String(after.id),
+        event_type: 'work_claim.released',
+        payload: { before: cloneValue(claim), after: cloneValue(after) },
+        created_at: now,
+      });
+      return after;
+    },
+
+    getActiveWorkClaim(workItemId): WorkClaim | null {
+      const row = db
+        .prepare(
+          `SELECT * FROM work_claims_current
+           WHERE work_item_id = ? AND status = 'active' AND expires_at > ?
+           ORDER BY id DESC LIMIT 1`,
+        )
+        .get(workItemId, nowSeconds()) as Record<string, unknown> | undefined;
+      return row ? mapWorkClaim(row) : null;
+    },
+
+    listWorkClaims(scope, options?: WorkClaimQuery): WorkClaim[] {
+      const rows = db
+        .prepare(`SELECT * FROM work_claims_current WHERE ${SCOPE_WHERE} ORDER BY claimed_at DESC`)
+        .all(...scopeValues(scope)) as Array<Record<string, unknown>>;
+      return rows
+        .map(mapWorkClaim)
+        .filter((claim) => {
+          if (!options?.includeExpired && claim.status === 'expired') return false;
+          if (!options?.includeReleased && claim.status === 'released') return false;
+          if (options?.sessionId && claim.session_id !== options.sessionId) return false;
+          if (options?.visibilityClass && claim.visibility_class !== options.visibilityClass) return false;
+          if (options?.actor) {
+            return (
+              claim.actor.actor_kind === options.actor.actor_kind &&
+              claim.actor.actor_id === options.actor.actor_id
+            );
+          }
+          return true;
+        });
+    },
+
+    createHandoff(input: NewHandoffInput): HandoffRecord {
+      assertActorRef(input.from_actor, 'from_actor');
+      assertActorRef(input.to_actor, 'to_actor');
+      const normalized = normalizeScope(input);
+      const createdAt = input.created_at ?? nowSeconds();
+      const fromParts = serializeActorMetadata(input.from_actor);
+      const toParts = serializeActorMetadata(input.to_actor);
+      const result = db.prepare(
+        `INSERT INTO handoff_records
+          (tenant_id, system_id, workspace_id, collaboration_id, scope_id, work_item_id, session_id,
+           from_actor_kind, from_actor_id, from_actor_system_id, from_actor_display_name, from_actor_metadata,
+           to_actor_kind, to_actor_id, to_actor_system_id, to_actor_display_name, to_actor_metadata,
+           summary, context_bundle_ref, status, created_at, expires_at, visibility_class, version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, 1)`,
+      ).run(
+        normalized.tenant_id,
+        normalized.system_id,
+        normalized.workspace_id,
+        normalized.collaboration_id,
+        normalized.scope_id,
+        input.work_item_id,
+        input.session_id ?? null,
+        ...fromParts,
+        ...toParts,
+        input.summary,
+        input.context_bundle_ref ?? null,
+        createdAt,
+        input.expires_at ?? null,
+        input.visibility_class,
+      );
+      const handoff = mapHandoff(
+        db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(Number(result.lastInsertRowid)) as Record<string, unknown>,
+      );
+      insertMemoryEventInternal({
+        ...normalized,
+        session_id: handoff.session_id,
+        actor_id: handoff.from_actor.actor_id,
+        actor_kind: handoff.from_actor.actor_kind,
+        actor_system_id: handoff.from_actor.system_id,
+        actor_display_name: handoff.from_actor.display_name,
+        actor_metadata: handoff.from_actor.metadata,
+        entity_kind: 'handoff',
+        entity_id: String(handoff.id),
+        event_type: 'handoff.created',
+        payload: { after: cloneValue(handoff) },
+        created_at: createdAt,
+      });
+      return handoff;
+    },
+
+    acceptHandoff(handoffId, actor, reason): HandoffRecord | null {
+      assertActorRef(actor);
+      const before = db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown> | undefined;
+      if (!before) return null;
+      const handoff = mapHandoff(before);
+      if (handoff.to_actor.actor_kind !== actor.actor_kind || handoff.to_actor.actor_id !== actor.actor_id) {
+        throw new ConflictError(`Handoff ${handoffId} is assigned to another actor`);
+      }
+      const activeClaim = this.getActiveWorkClaim(handoff.work_item_id);
+      if (activeClaim &&
+        !(activeClaim.actor.actor_kind === handoff.from_actor.actor_kind && activeClaim.actor.actor_id === handoff.from_actor.actor_id)
+      ) {
+        throw new ConflictError(`Work item ${handoff.work_item_id} has another active owner`);
+      }
+      if (activeClaim) {
+        this.releaseWorkClaim(activeClaim.id, handoff.from_actor, 'handoff_accepted');
+      }
+      this.claimWorkItem({
+        ...normalizeScope(handoff),
+        work_item_id: handoff.work_item_id,
+        actor,
+        session_id: handoff.session_id,
+        visibility_class: handoff.visibility_class,
+      });
+      const now = nowSeconds();
+      db.prepare(
+        `UPDATE handoff_records
+         SET status = 'accepted', accepted_at = ?, decision_reason = ?, version = version + 1
+         WHERE id = ?`,
+      ).run(now, reason ?? null, handoffId);
+      const after = mapHandoff(
+        db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown>,
+      );
+      insertMemoryEventInternal({
+        ...normalizeScope(after),
+        session_id: after.session_id,
+        actor_id: actor.actor_id,
+        actor_kind: actor.actor_kind,
+        actor_system_id: actor.system_id,
+        actor_display_name: actor.display_name,
+        actor_metadata: actor.metadata,
+        entity_kind: 'handoff',
+        entity_id: String(after.id),
+        event_type: 'handoff.accepted',
+        payload: { before: cloneValue(handoff), after: cloneValue(after) },
+        created_at: now,
+      });
+      return after;
+    },
+
+    rejectHandoff(handoffId, actor, reason): HandoffRecord | null {
+      assertActorRef(actor);
+      const before = db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown> | undefined;
+      if (!before) return null;
+      const handoff = mapHandoff(before);
+      if (handoff.to_actor.actor_kind !== actor.actor_kind || handoff.to_actor.actor_id !== actor.actor_id) {
+        throw new ConflictError(`Handoff ${handoffId} is assigned to another actor`);
+      }
+      const now = nowSeconds();
+      db.prepare(
+        `UPDATE handoff_records
+         SET status = 'rejected', rejected_at = ?, decision_reason = ?, version = version + 1
+         WHERE id = ?`,
+      ).run(now, reason ?? null, handoffId);
+      const after = mapHandoff(
+        db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown>,
+      );
+      insertMemoryEventInternal({
+        ...normalizeScope(after),
+        session_id: after.session_id,
+        actor_id: actor.actor_id,
+        actor_kind: actor.actor_kind,
+        actor_system_id: actor.system_id,
+        actor_display_name: actor.display_name,
+        actor_metadata: actor.metadata,
+        entity_kind: 'handoff',
+        entity_id: String(after.id),
+        event_type: 'handoff.rejected',
+        payload: { before: cloneValue(handoff), after: cloneValue(after) },
+        created_at: now,
+      });
+      return after;
+    },
+
+    cancelHandoff(handoffId, actor, reason): HandoffRecord | null {
+      assertActorRef(actor);
+      const before = db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown> | undefined;
+      if (!before) return null;
+      const handoff = mapHandoff(before);
+      if (handoff.from_actor.actor_kind !== actor.actor_kind || handoff.from_actor.actor_id !== actor.actor_id) {
+        throw new ConflictError(`Handoff ${handoffId} was created by another actor`);
+      }
+      const now = nowSeconds();
+      db.prepare(
+        `UPDATE handoff_records
+         SET status = 'canceled', canceled_at = ?, decision_reason = ?, version = version + 1
+         WHERE id = ?`,
+      ).run(now, reason ?? null, handoffId);
+      const after = mapHandoff(
+        db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown>,
+      );
+      insertMemoryEventInternal({
+        ...normalizeScope(after),
+        session_id: after.session_id,
+        actor_id: actor.actor_id,
+        actor_kind: actor.actor_kind,
+        actor_system_id: actor.system_id,
+        actor_display_name: actor.display_name,
+        actor_metadata: actor.metadata,
+        entity_kind: 'handoff',
+        entity_id: String(after.id),
+        event_type: 'handoff.canceled',
+        payload: { before: cloneValue(handoff), after: cloneValue(after) },
+        created_at: now,
+      });
+      return after;
+    },
+
+    listHandoffs(scope, options?: HandoffQuery): HandoffRecord[] {
+      const rows = db
+        .prepare(`SELECT * FROM handoff_records WHERE ${SCOPE_WHERE} ORDER BY created_at DESC`)
+        .all(...scopeValues(scope)) as Array<Record<string, unknown>>;
+      return rows.map(mapHandoff).filter((handoff) => {
+        if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
+        if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
+        if (!options?.actor) return true;
+        const inbound =
+          handoff.to_actor.actor_kind === options.actor.actor_kind &&
+          handoff.to_actor.actor_id === options.actor.actor_id;
+        const outbound =
+          handoff.from_actor.actor_kind === options.actor.actor_kind &&
+          handoff.from_actor.actor_id === options.actor.actor_id;
+        if (options.direction === 'inbound') return inbound;
+        if (options.direction === 'outbound') return outbound;
+        return inbound || outbound;
+      });
     },
 
     touchKnowledgeMemory(id: number): void {
+      const before = getKnowledgeMemoryById(id);
+      const touchedAt = nowSeconds();
       db.prepare(
         `UPDATE knowledge_memory
          SET last_accessed_at = ?, access_count = access_count + 1
          WHERE id = ?`,
-      ).run(nowSeconds(), id);
+      ).run(touchedAt, id);
+      const after = getKnowledgeMemoryById(id);
+      if (before && after) {
+        insertMemoryEventInternal({
+          ...normalizeScope(after),
+          entity_kind: 'knowledge_memory',
+          entity_id: String(after.id),
+          event_type: 'knowledge.touched',
+          payload: {
+            before: cloneValue(before),
+            after: cloneValue(after),
+            patch: {
+              last_accessed_at: touchedAt,
+              access_count: after.access_count,
+            },
+          },
+          created_at: touchedAt,
+        });
+      }
     },
 
     retireKnowledgeMemory(id: number, retiredAt = nowSeconds()): void {
+      const before = getKnowledgeMemoryById(id);
       db.prepare('UPDATE knowledge_memory SET retired_at = ? WHERE id = ?').run(retiredAt, id);
+      const after = getKnowledgeMemoryById(id);
+      if (before && after) {
+        insertMemoryEventInternal({
+          ...normalizeScope(after),
+          entity_kind: 'knowledge_memory',
+          entity_id: String(after.id),
+          event_type: 'knowledge.retired',
+          payload: {
+            before: cloneValue(before),
+            after: cloneValue(after),
+            patch: {
+              retired_at: retiredAt,
+            },
+          },
+          created_at: retiredAt,
+        });
+      }
     },
 
     supersedeKnowledgeMemory(oldId: number, newId: number): void {
+      const before = getKnowledgeMemoryById(oldId);
+      const supersededAt = nowSeconds();
       db.prepare(
         `UPDATE knowledge_memory
          SET superseded_by_id = ?, superseded_at = ?, knowledge_state = 'superseded'
          WHERE id = ?`,
-      ).run(newId, nowSeconds(), oldId);
+      ).run(newId, supersededAt, oldId);
+      const after = getKnowledgeMemoryById(oldId);
+      if (before && after) {
+        insertMemoryEventInternal({
+          ...normalizeScope(after),
+          entity_kind: 'knowledge_memory',
+          entity_id: String(after.id),
+          event_type: 'knowledge.superseded',
+          payload: {
+            before: cloneValue(before),
+            after: cloneValue(after),
+            refs: {
+              new_id: newId,
+            },
+          },
+          created_at: supersededAt,
+        });
+      }
     },
 
     upsertContextMonitor(input) {
@@ -1298,7 +2403,19 @@ function createAdapterFromDatabase(
           input.source_session_id ?? null, input.source_working_memory_id ?? null,
           input.created_at ?? now, now,
         );
-      return this.getPlaybookById(Number(result.lastInsertRowid))!;
+      const playbook = this.getPlaybookById(Number(result.lastInsertRowid))!;
+      insertMemoryEventInternal({
+        ...scope,
+        session_id: playbook.source_session_id,
+        entity_kind: 'playbook',
+        entity_id: String(playbook.id),
+        event_type: 'playbook.created',
+        payload: {
+          after: cloneValue(playbook),
+        },
+        created_at: playbook.created_at,
+      });
+      return playbook;
     },
     getPlaybookById(id: number): Playbook | null {
       const row = db.prepare('SELECT * FROM playbooks WHERE id = ?').get(id) as PlaybookRow | undefined;
@@ -1334,6 +2451,7 @@ function createAdapterFromDatabase(
       }
     },
     updatePlaybook(id, patch): Playbook | null {
+      const before = this.getPlaybookById(id);
       const sets: string[] = [];
       const values: unknown[] = [];
       if (patch.title != null) { sets.push('title = ?'); values.push(patch.title); }
@@ -1350,10 +2468,46 @@ function createAdapterFromDatabase(
       values.push(nowSeconds());
       values.push(id);
       db.prepare(`UPDATE playbooks SET ${sets.join(', ')} WHERE id = ?`).run(...values);
-      return this.getPlaybookById(id);
+      const after = this.getPlaybookById(id);
+      if (before && after) {
+        insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.source_session_id,
+          entity_kind: 'playbook',
+          entity_id: String(after.id),
+          event_type: 'playbook.updated',
+          payload: {
+            before: cloneValue(before),
+            after: cloneValue(after),
+            patch: cloneValue(patch as Record<string, unknown>),
+          },
+          created_at: after.updated_at,
+        });
+      }
+      return after;
     },
     recordPlaybookUse(id: number): void {
-      db.prepare('UPDATE playbooks SET use_count = use_count + 1, last_used_at = ? WHERE id = ?').run(nowSeconds(), id);
+      const before = this.getPlaybookById(id);
+      const usedAt = nowSeconds();
+      db.prepare('UPDATE playbooks SET use_count = use_count + 1, last_used_at = ? WHERE id = ?').run(usedAt, id);
+      const after = this.getPlaybookById(id);
+      if (before && after) {
+        insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.source_session_id,
+          entity_kind: 'playbook',
+          entity_id: String(after.id),
+          event_type: 'playbook.used',
+          payload: {
+            before: cloneValue(before),
+            after: cloneValue(after),
+            refs: {
+              use_count: after.use_count,
+            },
+          },
+          created_at: usedAt,
+        });
+      }
     },
     insertPlaybookRevision(input: NewPlaybookRevision): PlaybookRevision {
       const playbook = this.getPlaybookById(input.playbook_id);
@@ -1374,7 +2528,22 @@ function createAdapterFromDatabase(
         );
       db.prepare('UPDATE playbooks SET revision_count = revision_count + 1 WHERE id = ?').run(input.playbook_id);
       const row = db.prepare('SELECT * FROM playbook_revisions WHERE id = ?').get(Number(result.lastInsertRowid)) as PlaybookRevision;
-      return rowToPlaybookRevision(row);
+      const revision = rowToPlaybookRevision(row);
+      insertMemoryEventInternal({
+        ...normalizeScope(revision),
+        session_id: revision.source_session_id,
+        entity_kind: 'playbook_revision',
+        entity_id: String(revision.id),
+        event_type: 'playbook.revised',
+        payload: {
+          after: cloneValue(revision),
+          refs: {
+            playbook_id: revision.playbook_id,
+          },
+        },
+        created_at: revision.created_at,
+      });
+      return revision;
     },
     getPlaybookRevisions(playbookId: number): PlaybookRevision[] {
       const rows = db
@@ -1415,11 +2584,22 @@ function createAdapterFromDatabase(
         throw err;
       }
       const row = db.prepare('SELECT * FROM associations WHERE id = ?').get(Number(result.lastInsertRowid)) as any;
-      return {
+      const association = {
         ...row,
         collaboration_id: row.collaboration_id ?? row.workspace_id,
         auto_generated: row.auto_generated === 1,
       };
+      insertMemoryEventInternal({
+        ...scope,
+        entity_kind: 'association',
+        entity_id: String(association.id),
+        event_type: 'association.created',
+        payload: {
+          after: cloneValue(association),
+        },
+        created_at: association.created_at,
+      });
+      return association;
     },
     getAssociationById(id: number): Association | null {
       const row = db.prepare('SELECT * FROM associations WHERE id = ?').get(id) as any;
@@ -1451,8 +2631,66 @@ function createAdapterFromDatabase(
       }));
     },
     deleteAssociation(id: number): void {
+      const before = this.getAssociationById(id);
       db.prepare('DELETE FROM associations WHERE id = ?').run(id);
+      if (before) {
+        insertMemoryEventInternal({
+          ...normalizeScope(before),
+          entity_kind: 'association',
+          entity_id: String(before.id),
+          event_type: 'association.deleted',
+          payload: {
+            before: cloneValue(before),
+          },
+          created_at: nowSeconds(),
+        });
+      }
     },
+
+    insertMemoryEvent(input): MemoryEventRecord {
+      return insertMemoryEventInternal(input);
+    },
+
+    listMemoryEvents(scope, query): TimelineResult {
+      return listScopedMemoryEvents(scope, query);
+    },
+
+    getMemoryEventsByEntity(scope, entityKind, entityId, query): TimelineResult {
+      return listScopedMemoryEvents(scope, {
+        ...query,
+        entityKind,
+        entityId,
+      });
+    },
+
+    getMemoryEventsBySession(scope, sessionId, query): TimelineResult {
+      return listScopedMemoryEvents(scope, {
+        ...query,
+        sessionId,
+      });
+    },
+
+    getSessionState: readSessionStateProjection,
+
+    upsertSessionState(input): SessionStateProjection {
+      const projection = writeSessionStateProjection(input);
+      insertMemoryEventInternal({
+        ...normalizeScope(projection),
+        session_id: projection.session_id,
+        entity_kind: 'session_state',
+        entity_id: projection.session_id,
+        event_type: 'session_state.updated',
+        payload: {
+          after: cloneValue(projection),
+        },
+        created_at: projection.updatedAt,
+      });
+      return projection;
+    },
+
+    getTemporalWatermark: readTemporalWatermark,
+
+    upsertTemporalWatermark: writeTemporalWatermark,
 
     transaction<T>(fn: () => T): T {
       return db.transaction(fn)();

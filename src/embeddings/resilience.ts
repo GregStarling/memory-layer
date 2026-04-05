@@ -46,21 +46,32 @@ export function createCachedEmbeddingGenerator(
 ): EmbeddingGenerator {
   const cache = new Map<string, EmbeddingVector>();
 
+  function touch(text: string, vector: EmbeddingVector): void {
+    cache.delete(text);
+    cache.set(text, vector);
+    while (cache.size > maxEntries) {
+      const oldestKey = cache.keys().next().value;
+      if (!oldestKey) break;
+      cache.delete(oldestKey);
+    }
+  }
+
   return async (texts: string[]): Promise<EmbeddingVector[]> => {
-    const missing = texts.filter((text) => !cache.has(text));
+    const missing = Array.from(new Set(texts.filter((text) => !cache.has(text))));
     if (missing.length > 0) {
       const generated = await generator(missing);
       missing.forEach((text, index) => {
         const vector = generated[index];
         if (!vector) return;
-        cache.set(text, vector);
-        if (cache.size > maxEntries) {
-          const firstKey = cache.keys().next().value;
-          if (firstKey) cache.delete(firstKey);
-        }
+        touch(text, vector);
       });
     }
 
-    return texts.map((text) => cache.get(text) ?? new Float32Array());
+    return texts.map((text) => {
+      const vector = cache.get(text);
+      if (!vector) return new Float32Array();
+      touch(text, vector);
+      return vector;
+    });
   };
 }

@@ -13,5 +13,11 @@ describe('circuit breaker', () => {
       'boom',
     );
     await expect(breaker.execute(async () => 'ok')).rejects.toThrow('Circuit breaker is open');
+    expect(breaker.getSnapshot()).toMatchObject({
+      state: 'open',
+      failures: 2,
+      failureThreshold: 2,
+      resetTimeoutMs: 10,
+    });
   });
 });
