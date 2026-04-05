@@ -699,6 +699,21 @@ export function createPostgresAdapter(
     };
   }
 
+  async function getExistingIds(
+    table: 'working_memory' | 'knowledge_memory' | 'work_items' | 'playbooks',
+    ids: number[],
+  ): Promise<number[]> {
+    const uniqueIds = [...new Set(ids)];
+    if (uniqueIds.length === 0) {
+      return [];
+    }
+    const { rows } = await pool.query(`SELECT id FROM ${table} WHERE id = ANY($1::int[])`, [
+      uniqueIds,
+    ]);
+    const existing = new Set(rows.map((row) => Number(row.id)));
+    return uniqueIds.filter((id) => existing.has(id));
+  }
+
   async function ensureTemporalCutover(): Promise<void> {
     if (!temporalInitPromise) {
       temporalInitPromise = (async () => {
@@ -1289,6 +1304,10 @@ export function createPostgresAdapter(
       return rows[0] ? mapWorkingMemory(rows[0]) : null;
     },
 
+    async getExistingWorkingMemoryIds(ids) {
+      return getExistingIds('working_memory', ids);
+    },
+
     async getWorkingMemoryBySession(sessionId, scope) {
       const params = [sessionId, ...scopeParams(scope)];
       const { rows } = await pool.query(
@@ -1548,6 +1567,10 @@ export function createPostgresAdapter(
     async getKnowledgeMemoryById(id) {
       const { rows } = await pool.query('SELECT * FROM knowledge_memory WHERE id = $1', [id]);
       return rows[0] ? mapKnowledgeMemory(rows[0]) : null;
+    },
+
+    async getExistingKnowledgeMemoryIds(ids) {
+      return getExistingIds('knowledge_memory', ids);
     },
 
     async getActiveKnowledgeMemory(scope) {
@@ -1925,6 +1948,10 @@ export function createPostgresAdapter(
     async getWorkItemById(id) {
       const { rows } = await pool.query('SELECT * FROM work_items WHERE id = $1', [id]);
       return rows[0] ? mapWorkItem(rows[0]) : null;
+    },
+
+    async getExistingWorkItemIds(ids) {
+      return getExistingIds('work_items', ids);
     },
 
     async getActiveWorkItemsCrossScope(scope, level) {
@@ -2687,6 +2714,10 @@ export function createPostgresAdapter(
     async getPlaybookById(id) {
       const { rows } = await pool.query('SELECT * FROM playbooks WHERE id = $1', [id]);
       return rows[0] ? mapPlaybook(rows[0]) : null;
+    },
+
+    async getExistingPlaybookIds(ids) {
+      return getExistingIds('playbooks', ids);
     },
     async getActivePlaybooks(scope) {
       const { rows } = await pool.query(

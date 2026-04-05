@@ -672,6 +672,22 @@ function createAdapterFromDatabase(
     return row ? rowToWorkingMemory(row) : null;
   }
 
+  function getExistingIds(
+    table: 'working_memory' | 'knowledge_memory' | 'work_items' | 'playbooks',
+    ids: number[],
+  ): number[] {
+    const uniqueIds = [...new Set(ids)];
+    if (uniqueIds.length === 0) {
+      return [];
+    }
+    const placeholders = uniqueIds.map(() => '?').join(', ');
+    const rows = db
+      .prepare(`SELECT id FROM ${table} WHERE id IN (${placeholders})`)
+      .all(...uniqueIds) as Array<{ id: number }>;
+    const existing = new Set(rows.map((row) => Number(row.id)));
+    return uniqueIds.filter((id) => existing.has(id));
+  }
+
   function getKnowledgeMemoryById(id: number): KnowledgeMemory | null {
     const row = db
       .prepare('SELECT * FROM knowledge_memory WHERE id = ?')
@@ -1176,6 +1192,10 @@ function createAdapterFromDatabase(
 
     getWorkingMemoryById,
 
+    getExistingWorkingMemoryIds(ids: number[]): number[] {
+      return getExistingIds('working_memory', ids);
+    },
+
     getWorkingMemoryBySession(sessionId: string, scope): WorkingMemory[] {
       const query = `SELECT * FROM working_memory
            WHERE session_id = ? AND ${SCOPE_WHERE}
@@ -1409,6 +1429,10 @@ function createAdapterFromDatabase(
     },
 
     getKnowledgeMemoryById,
+
+    getExistingKnowledgeMemoryIds(ids: number[]): number[] {
+      return getExistingIds('knowledge_memory', ids);
+    },
 
     getActiveKnowledgeMemory(scope): KnowledgeMemory[] {
       const rows = db
@@ -1843,6 +1867,10 @@ function createAdapterFromDatabase(
     getWorkItemById(id: number): WorkItem | null {
       const row = db.prepare('SELECT * FROM work_items WHERE id = ?').get(id) as WorkItem | undefined;
       return row ? rowToWorkItem(row) : null;
+    },
+
+    getExistingWorkItemIds(ids: number[]): number[] {
+      return getExistingIds('work_items', ids);
     },
 
     getActiveWorkItemsCrossScope(scope, level): WorkItem[] {
@@ -2908,6 +2936,9 @@ function createAdapterFromDatabase(
     getPlaybookById(id: number): Playbook | null {
       const row = db.prepare('SELECT * FROM playbooks WHERE id = ?').get(id) as PlaybookRow | undefined;
       return row ? rowToPlaybook(row) : null;
+    },
+    getExistingPlaybookIds(ids: number[]): number[] {
+      return getExistingIds('playbooks', ids);
     },
     getActivePlaybooks(scope): Playbook[] {
       const rows = db

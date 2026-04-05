@@ -69,6 +69,76 @@ describe('memory runtime helpers', () => {
     await manager.close();
   });
 
+  it('uses historical bootstrap data when beforeModelCall is replayed asOf', async () => {
+    const scope = makeScope();
+    const manager = createMemoryManager({
+      adapter,
+      scope,
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      autoCompact: false,
+    });
+    const runtime = createMemoryRuntime(manager);
+    const cutoff = 200;
+
+    adapter.insertTurn({
+      ...scope,
+      session_id: 'session-1',
+      actor: 'user',
+      role: 'user',
+      content: 'Need the rollback owner',
+      created_at: 100,
+    });
+    adapter.insertWorkItem({
+      ...scope,
+      session_id: 'session-1',
+      title: 'Past blocker',
+      kind: 'unresolved_work',
+      status: 'blocked',
+      created_at: 120,
+    });
+    adapter.insertWorkItem({
+      ...scope,
+      session_id: 'session-1',
+      title: 'Future blocker',
+      kind: 'unresolved_work',
+      status: 'blocked',
+      created_at: 260,
+    });
+    adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'Past profile fact',
+      fact_type: 'preference',
+      source: 'manual',
+      confidence: 'high',
+      created_at: 130,
+    });
+    adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'Future profile fact',
+      fact_type: 'preference',
+      source: 'manual',
+      confidence: 'high',
+      created_at: 270,
+    });
+
+    const payload = await runtime.beforeModelCall({
+      input: 'rollback',
+      relevanceQuery: 'rollback',
+      asOf: cutoff,
+    });
+
+    expect(payload.bootstrap.unresolvedWork.join(' ')).toContain('Past blocker');
+    expect(payload.bootstrap.unresolvedWork.join(' ')).not.toContain('Future blocker');
+    expect(payload.context.unresolvedWork.join(' ')).toContain('Past blocker');
+    expect(payload.context.unresolvedWork.join(' ')).not.toContain('Future blocker');
+    await manager.close();
+  });
+
   describe('snapshot mode', () => {
     function makeManager() {
       return createMemoryManager({
@@ -92,11 +162,13 @@ describe('memory runtime helpers', () => {
       await runtime.startSession('hello');
 
       const snapshot = runtime.getSnapshot();
+      const latestCursor = await manager.resolveChangeStreamCursor();
       expect(snapshot).not.toBeNull();
       expect(snapshot!.snapshotId).toMatch(/^snap-/);
       expect(snapshot!.frozenAt).toBeGreaterThan(0);
       expect(snapshot!.bootstrap).toBeDefined();
       expect(snapshot!.context).toBeDefined();
+      expect(snapshot!.watermarkEventId).toBe(latestCursor === '0' ? null : latestCursor);
       await manager.close();
     });
 

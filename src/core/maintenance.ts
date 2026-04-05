@@ -126,6 +126,34 @@ export async function runMaintenance(
 
   const associations = await adapter.listAssociations(scope);
   const existenceCache = new Map<string, boolean>();
+
+  async function primeExistenceCache(
+    kind: 'knowledge' | 'work_item' | 'playbook' | 'working_memory',
+    ids: number[],
+  ): Promise<void> {
+    const uniqueIds = [...new Set(ids)];
+    if (uniqueIds.length === 0) {
+      return;
+    }
+
+    const existingIds =
+      kind === 'knowledge'
+        ? await adapter.getExistingKnowledgeMemoryIds?.(uniqueIds)
+        : kind === 'work_item'
+          ? await adapter.getExistingWorkItemIds?.(uniqueIds)
+          : kind === 'playbook'
+            ? await adapter.getExistingPlaybookIds?.(uniqueIds)
+            : await adapter.getExistingWorkingMemoryIds?.(uniqueIds);
+    if (!existingIds) {
+      return;
+    }
+
+    const existingSet = new Set(existingIds);
+    for (const id of uniqueIds) {
+      existenceCache.set(`${kind}:${id}`, existingSet.has(id));
+    }
+  }
+
   async function entityExists(
     kind: 'knowledge' | 'work_item' | 'playbook' | 'working_memory',
     id: number,
@@ -145,6 +173,24 @@ export async function runMaintenance(
     existenceCache.set(cacheKey, exists);
     return exists;
   }
+
+  const idsByKind = {
+    knowledge: new Set<number>(),
+    work_item: new Set<number>(),
+    playbook: new Set<number>(),
+    working_memory: new Set<number>(),
+  };
+  for (const association of associations) {
+    idsByKind[association.source_kind].add(association.source_id);
+    idsByKind[association.target_kind].add(association.target_id);
+  }
+  await Promise.all([
+    primeExistenceCache('knowledge', [...idsByKind.knowledge]),
+    primeExistenceCache('work_item', [...idsByKind.work_item]),
+    primeExistenceCache('playbook', [...idsByKind.playbook]),
+    primeExistenceCache('working_memory', [...idsByKind.working_memory]),
+  ]);
+
   for (const association of associations) {
     const sourceExists =
       association.source_kind === 'knowledge'

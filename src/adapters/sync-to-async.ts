@@ -32,6 +32,9 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
 
     insertWorkingMemory: (input) => Promise.resolve(adapter.insertWorkingMemory(input)),
     getWorkingMemoryById: (id) => Promise.resolve(adapter.getWorkingMemoryById(id)),
+    getExistingWorkingMemoryIds: adapter.getExistingWorkingMemoryIds
+      ? (ids) => Promise.resolve(adapter.getExistingWorkingMemoryIds!(ids))
+      : undefined,
     getWorkingMemoryBySession: (sessionId, scope) =>
       Promise.resolve(adapter.getWorkingMemoryBySession(sessionId, scope)),
     getActiveWorkingMemory: (scope, sessionId) =>
@@ -63,6 +66,9 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
     promoteKnowledgeCandidate: (candidateId, input) =>
       Promise.resolve(adapter.promoteKnowledgeCandidate(candidateId, input)),
     getKnowledgeMemoryById: (id) => Promise.resolve(adapter.getKnowledgeMemoryById(id)),
+    getExistingKnowledgeMemoryIds: adapter.getExistingKnowledgeMemoryIds
+      ? (ids) => Promise.resolve(adapter.getExistingKnowledgeMemoryIds!(ids))
+      : undefined,
     getActiveKnowledgeMemory: (scope) =>
       Promise.resolve(adapter.getActiveKnowledgeMemory(scope)),
     getActiveKnowledgeMemoryPaginated: (scope, options) =>
@@ -93,6 +99,9 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
 
     insertWorkItem: (input) => Promise.resolve(adapter.insertWorkItem(input)),
     getWorkItemById: (id) => Promise.resolve(adapter.getWorkItemById(id)),
+    getExistingWorkItemIds: adapter.getExistingWorkItemIds
+      ? (ids) => Promise.resolve(adapter.getExistingWorkItemIds!(ids))
+      : undefined,
     getActiveWorkItems: (scope) => Promise.resolve(adapter.getActiveWorkItems(scope)),
     getActiveWorkItemsCrossScope: (scope, level) =>
       Promise.resolve(adapter.getActiveWorkItemsCrossScope(scope, level)),
@@ -135,6 +144,9 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
 
     insertPlaybook: (input) => Promise.resolve(adapter.insertPlaybook(input)),
     getPlaybookById: (id) => Promise.resolve(adapter.getPlaybookById(id)),
+    getExistingPlaybookIds: adapter.getExistingPlaybookIds
+      ? (ids) => Promise.resolve(adapter.getExistingPlaybookIds!(ids))
+      : undefined,
     getActivePlaybooks: (scope) => Promise.resolve(adapter.getActivePlaybooks(scope)),
     getActivePlaybooksCrossScope: (scope, level) =>
       Promise.resolve(adapter.getActivePlaybooksCrossScope(scope, level)),

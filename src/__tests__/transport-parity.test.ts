@@ -158,6 +158,10 @@ describe('transport parity — Phase 3 playbooks', () => {
       method: 'POST',
     });
     expect(useRes.status).toBe(200);
+    const useBody = await useRes.json();
+    expect(useBody.recorded).toBe(true);
+    expect(useBody.playbook.id).toBe(playbook.id);
+    expect(useBody.playbook.use_count).toBeGreaterThan(0);
 
     const refetch = await fetch(`${base}/v1/playbooks/${playbook.id}`);
     const refetchBody = await refetch.json();

@@ -86,6 +86,7 @@ export interface StorageAdapter {
 
   insertWorkingMemory(input: NewWorkingMemory): WorkingMemory;
   getWorkingMemoryById(id: number): WorkingMemory | null;
+  getExistingWorkingMemoryIds?(ids: number[]): number[];
   getWorkingMemoryBySession(sessionId: string, scope: MemoryScope): WorkingMemory[];
   getActiveWorkingMemory(scope: MemoryScope, sessionId?: string): WorkingMemory[];
   getLatestWorkingMemory(scope: MemoryScope, sessionId?: string): WorkingMemory | null;
@@ -108,6 +109,7 @@ export interface StorageAdapter {
   listKnowledgeEvidenceForCandidate(candidateId: number): KnowledgeEvidence[];
   promoteKnowledgeCandidate(candidateId: number, input: NewKnowledgeMemory): KnowledgeMemory;
   getKnowledgeMemoryById(id: number): KnowledgeMemory | null;
+  getExistingKnowledgeMemoryIds?(ids: number[]): number[];
   getActiveKnowledgeMemory(scope: MemoryScope): KnowledgeMemory[];
   getActiveKnowledgeMemoryPaginated(
     scope: MemoryScope,
@@ -161,6 +163,7 @@ export interface StorageAdapter {
 
   insertWorkItem(input: NewWorkItem): WorkItem;
   getWorkItemById(id: number): WorkItem | null;
+  getExistingWorkItemIds?(ids: number[]): number[];
   getActiveWorkItems(scope: MemoryScope): WorkItem[];
   getActiveWorkItemsCrossScope(scope: MemoryScope, level: ScopeLevel): WorkItem[];
   getWorkItemsByTimeRange(scope: MemoryScope, range: TimeRange): WorkItem[];
@@ -206,6 +209,7 @@ export interface StorageAdapter {
 
   insertPlaybook(input: NewPlaybook): Playbook;
   getPlaybookById(id: number): Playbook | null;
+  getExistingPlaybookIds?(ids: number[]): number[];
   getActivePlaybooks(scope: MemoryScope): Playbook[];
   getActivePlaybooksCrossScope(scope: MemoryScope, level: ScopeLevel): Playbook[];
   searchPlaybooks(scope: MemoryScope, query: string, options?: SearchOptions): SearchResult<Playbook>[];

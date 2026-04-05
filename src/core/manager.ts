@@ -6,7 +6,7 @@ import type {
   WorkClaim,
   WorkItemPatch,
 } from '../contracts/coordination.js';
-import type { MemoryScope, ScopeLevel } from '../contracts/identity.js';
+import { matchesScope, normalizeScope, type MemoryScope, type ScopeLevel } from '../contracts/identity.js';
 import {
   ProviderUnavailableError,
   ResourceNotFoundError,
@@ -115,18 +115,18 @@ import { searchEpisodes, summarizeEpisode, reflect } from './episodic.js';
 import { searchCognitive } from './cognitive.js';
 import { traverseAssociations, type AssociationGraph } from './associations.js';
 import type { Profile, ProfileOptions } from '../contracts/profile.js';
-import { getProfile } from './profile.js';
+import { buildProfileFromKnowledge, getProfile } from './profile.js';
 import {
   createPlaybookFromTask,
   revisePlaybook,
   findRelevantPlaybooks,
   type CreatePlaybookFromTaskInput,
 } from './playbook.js';
-import { normalizeScope } from '../contracts/identity.js';
 import {
   createTemporalReplayAdapter,
   foldTemporalState,
   listAllMemoryEvents,
+  listAllMemoryEventsBounded,
   listAllMemoryEventsCrossScope,
   normalizeReplayedTemporalState,
   normalizeHandoffAt,
@@ -214,7 +214,12 @@ export interface MemoryManager {
   diffState(
     from: number,
     to: number,
-    options?: { sessionId?: string; entityKind?: MemoryEventEntityKind; entityId?: string },
+    options?: {
+      sessionId?: string;
+      entityKind?: MemoryEventEntityKind;
+      entityId?: string;
+      maxEvents?: number;
+    },
   ): Promise<TemporalStateDiff>;
   listMemoryEvents(options?: {
     sessionId?: string;
@@ -226,6 +231,15 @@ export interface MemoryManager {
     cursor?: TemporalIdInput;
   }): Promise<TimelineResult>;
   getSessionBootstrap(
+    relevanceQuery?: string,
+    options?: {
+      view?: ContextViewPolicy;
+      viewer?: ActorRef;
+      includeCoordinationState?: boolean;
+    },
+  ): Promise<SessionBootstrap>;
+  getSessionBootstrapAt(
+    asOf: number,
     relevanceQuery?: string,
     options?: {
       view?: ContextViewPolicy;
@@ -864,6 +878,9 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         await Promise.all([
           asyncAdapter.getActiveTurns(config.scope, config.sessionId),
           asyncAdapter.getActiveWorkingMemory(config.scope, config.sessionId),
+          // Session-state projection stays scope-local even when wider
+          // retrieval is configured; it is a fast resume artifact, not a full
+          // cross-scope context assembly.
           getContextWorkItems(asyncAdapter, config.scope, undefined, 'scope'),
           asyncAdapter.getTemporalWatermark('temporal'),
         ]);
@@ -1036,6 +1053,9 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     const cutoverAt = await getTemporalCutoverAt();
     if (cutoverAt == null || asOf < cutoverAt) {
       return {
+        // Pre-cutover replay is best-effort only. The historical filters still
+        // apply, but semantic retrieval may consult the live embedding index
+        // because that index has no temporal dimension before the cutover.
         context: await getContextInternal(relevanceQuery, asOf, options),
         events: [],
         state: null,
@@ -1067,6 +1087,8 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       .join('\n')
       .trim();
     const resolvedRelevanceQuery = relevanceQuery ?? (inferredRelevanceQuery || undefined);
+    // Exact replay stays on the replay adapter only, so no live semantic data
+    // can leak into the assembled historical context after temporal cutover.
     const context = await buildMemoryContext(replayAdapter, config.scope, {
       sessionId: config.sessionId,
       relevanceQuery: resolvedRelevanceQuery,
@@ -1087,6 +1109,47 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       exact: true,
       cutoverAt,
     };
+  }
+
+  function buildSessionBootstrapPayload(
+    context: MemoryContext,
+    profile: Profile,
+  ): SessionBootstrap {
+    return {
+      currentObjective: context.currentObjective,
+      sessionState: context.sessionState,
+      workingMemory: context.workingMemory,
+      relevantKnowledge: context.relevantKnowledge,
+      recentSummaries: context.recentSummaries,
+      activeObjectives: context.activeObjectives,
+      unresolvedWork: context.unresolvedWork,
+      coordinationState: context.coordinationState,
+      profile,
+    };
+  }
+
+  async function getHistoricalProfileAt(asOf: number): Promise<Profile> {
+    const cutoverAt = await getTemporalCutoverAt();
+    if (cutoverAt != null && asOf >= cutoverAt) {
+      const replayed = normalizeReplayedTemporalState(
+        foldTemporalState(
+          await listAllMemoryEvents(asyncAdapter, config.scope, {
+            endAt: asOf,
+            limit: 500,
+          }),
+          { sessionId: config.sessionId },
+        ),
+        asOf,
+      );
+      return buildProfileFromKnowledge(
+        replayed.knowledge.filter((item) => matchesScope(item, config.scope)),
+      );
+    }
+
+    const bestEffort = await collectBestEffortTemporalState(asOf);
+    return buildProfileFromKnowledge(
+      bestEffort.knowledge.filter((item) => matchesScope(item, config.scope)),
+    );
   }
 
   async function executeCompaction(
@@ -1332,14 +1395,18 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
     async diffState(from, to, options) {
       const cutoverAt = await getTemporalCutoverAt();
-      const events = await listAllMemoryEvents(asyncAdapter, config.scope, {
+      const eventQuery = {
         sessionId: options?.sessionId,
         entityKind: options?.entityKind,
         entityId: options?.entityId,
         startAt: from + 1,
         endAt: to,
         limit: 500,
-      });
+      };
+      const events =
+        options?.maxEvents != null
+          ? await listAllMemoryEventsBounded(asyncAdapter, config.scope, options.maxEvents, eventQuery)
+          : await listAllMemoryEvents(asyncAdapter, config.scope, eventQuery);
       const byEntityKind: Partial<Record<MemoryEventEntityKind, number>> = {};
       const byEventType: Partial<Record<MemoryEventRecord['event_type'], number>> = {};
       for (const event of events) {
@@ -1383,17 +1450,15 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     async getSessionBootstrap(relevanceQuery, options) {
       const context = await getContextInternal(relevanceQuery, undefined, options);
       const profile = await getProfile(asyncAdapter, config.scope);
-      return {
-        currentObjective: context.currentObjective,
-        sessionState: context.sessionState,
-        workingMemory: context.workingMemory,
-        relevantKnowledge: context.relevantKnowledge,
-        recentSummaries: context.recentSummaries,
-        activeObjectives: context.activeObjectives,
-        unresolvedWork: context.unresolvedWork,
-        coordinationState: context.coordinationState,
-        profile,
-      };
+      return buildSessionBootstrapPayload(context, profile);
+    },
+
+    async getSessionBootstrapAt(asOf, relevanceQuery, options) {
+      const [replay, profile] = await Promise.all([
+        buildReplayedContext(asOf, relevanceQuery, options),
+        getHistoricalProfileAt(asOf),
+      ]);
+      return buildSessionBootstrapPayload(replay.context, profile);
     },
 
     async getRuntimeDiagnostics() {

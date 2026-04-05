@@ -78,25 +78,18 @@ function emptyProfile(view: ProfileView): Profile {
   };
 }
 
-export async function getProfile(
-  adapter: AsyncStorageAdapter,
-  scope: MemoryScope,
+export function buildProfileFromKnowledge(
+  knowledge: KnowledgeMemory[],
   options: ProfileOptions = {},
-): Promise<Profile> {
+): Profile {
   const view = options.view ?? 'user';
   const includeProvisional = options.includeProvisional ?? false;
   const includeDisputed = options.includeDisputed ?? false;
   const minimumTrustScore = options.minimumTrustScore ?? 0;
   const requestedSections = options.sections ?? ALL_SECTIONS;
-  const scopeLevel = viewToScopeLevel(view);
-
-  const allKnowledge = scopeLevel === 'scope'
-    ? await adapter.getActiveKnowledgeMemory(scope)
-    : await adapter.getActiveKnowledgeCrossScope(scope, scopeLevel);
-
   const profile = emptyProfile(view);
 
-  for (const km of allKnowledge) {
+  for (const km of knowledge) {
     // Exclude retired/superseded
     if (km.knowledge_state === 'retired' || km.knowledge_state === 'superseded') continue;
     // Profiles surface trusted knowledge by default. Provisional entries are
@@ -119,4 +112,17 @@ export async function getProfile(
   }
 
   return profile;
+}
+
+export async function getProfile(
+  adapter: AsyncStorageAdapter,
+  scope: MemoryScope,
+  options: ProfileOptions = {},
+): Promise<Profile> {
+  const view = options.view ?? 'user';
+  const scopeLevel = viewToScopeLevel(view);
+  const knowledge = scopeLevel === 'scope'
+    ? await adapter.getActiveKnowledgeMemory(scope)
+    : await adapter.getActiveKnowledgeCrossScope(scope, scopeLevel);
+  return buildProfileFromKnowledge(knowledge, options);
 }

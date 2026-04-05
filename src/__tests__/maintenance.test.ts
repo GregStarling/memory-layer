@@ -156,4 +156,105 @@ describe('maintenance workflow', () => {
     expect(report.deletedAssociationIds).not.toContain(association.id);
     expect(adapter.getAssociationById(association.id)).not.toBeNull();
   });
+
+  it('uses optional batch existence lookups when available', async () => {
+    const scope = makeScope();
+    const workingMemory = adapter.insertWorkingMemory({
+      ...scope,
+      session_id: 'session-1',
+      summary: 'summary',
+      key_entities: [],
+      topic_tags: [],
+      turn_id_start: 1,
+      turn_id_end: 1,
+      turn_count: 1,
+      compaction_trigger: 'manual',
+    });
+    const knowledge = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'Rollback checklist',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+    const workItem = adapter.insertWorkItem({
+      ...scope,
+      session_id: 'session-1',
+      title: 'Ship rollout',
+      kind: 'objective',
+      status: 'open',
+    });
+    const playbook = adapter.insertPlaybook({
+      ...scope,
+      title: 'Deploy',
+      description: 'Deploy safely',
+      instructions: 'Run deploy',
+    });
+    adapter.insertAssociation({
+      ...scope,
+      source_kind: 'knowledge',
+      source_id: knowledge.id,
+      target_kind: 'work_item',
+      target_id: workItem.id,
+      association_type: 'supports',
+      confidence: 0.9,
+    });
+    const brokenAssociation = adapter.insertAssociation({
+      ...scope,
+      source_kind: 'playbook',
+      source_id: playbook.id,
+      target_kind: 'working_memory',
+      target_id: workingMemory.id + 999,
+      association_type: 'references',
+      confidence: 0.9,
+    });
+
+    const baseAsyncAdapter = wrapSyncAdapter(adapter);
+    const asyncWithBatch: AsyncStorageAdapter = {
+      ...baseAsyncAdapter,
+      getExistingKnowledgeMemoryIds: vi.fn((ids) => baseAsyncAdapter.getExistingKnowledgeMemoryIds!(ids)),
+      getExistingWorkItemIds: vi.fn((ids) => baseAsyncAdapter.getExistingWorkItemIds!(ids)),
+      getExistingPlaybookIds: vi.fn((ids) => baseAsyncAdapter.getExistingPlaybookIds!(ids)),
+      getExistingWorkingMemoryIds: vi.fn((ids) => baseAsyncAdapter.getExistingWorkingMemoryIds!(ids)),
+    };
+
+    const report = await runMaintenance(asyncWithBatch, scope, {
+      knowledgeStaleAfterSeconds: Number.MAX_SAFE_INTEGER,
+      maxActiveKnowledgeItems: 10,
+    });
+
+    expect(report.deletedAssociationIds).toContain(brokenAssociation.id);
+    expect(asyncWithBatch.getExistingKnowledgeMemoryIds).toHaveBeenCalled();
+    expect(asyncWithBatch.getExistingWorkItemIds).toHaveBeenCalled();
+    expect(asyncWithBatch.getExistingPlaybookIds).toHaveBeenCalled();
+    expect(asyncWithBatch.getExistingWorkingMemoryIds).toHaveBeenCalled();
+  });
+
+  it('falls back to per-entity existence lookups when batch methods are absent', async () => {
+    const scope = makeScope();
+    const brokenAssociation = adapter.insertAssociation({
+      ...scope,
+      source_kind: 'knowledge',
+      source_id: 999,
+      target_kind: 'work_item',
+      target_id: 998,
+      association_type: 'supports',
+      confidence: 0.9,
+    });
+    const baseAsyncAdapter = wrapSyncAdapter(adapter);
+    asyncAdapter = {
+      ...baseAsyncAdapter,
+      getExistingKnowledgeMemoryIds: undefined,
+      getExistingWorkItemIds: undefined,
+      getExistingPlaybookIds: undefined,
+      getExistingWorkingMemoryIds: undefined,
+    };
+
+    const report = await runMaintenance(asyncAdapter, scope, {
+      knowledgeStaleAfterSeconds: Number.MAX_SAFE_INTEGER,
+      maxActiveKnowledgeItems: 10,
+    });
+
+    expect(report.deletedAssociationIds).toContain(brokenAssociation.id);
+  });
 });

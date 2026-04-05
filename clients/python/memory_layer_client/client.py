@@ -357,6 +357,7 @@ class MemoryClient:
         session_id: Optional[str] = None,
         entity_kind: Optional[str] = None,
         entity_id: Optional[str] = None,
+        max_events: Optional[int] = None,
         scope: Optional[MemoryScope] = None,
     ) -> TemporalDiffResponse:
         params: dict[str, Any] = {
@@ -365,6 +366,7 @@ class MemoryClient:
             "session_id": session_id,
             "entity_kind": entity_kind,
             "entity_id": entity_id,
+            "max_events": max_events,
         }
         if scope or self.default_scope:
             params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
@@ -942,12 +944,13 @@ class MemoryClient:
         playbook_id: int,
         *,
         scope: Optional[MemoryScope] = None,
-    ) -> None:
-        self._request(
+    ) -> Playbook:
+        payload = self._request(
             "POST",
             f"/v1/playbooks/{playbook_id}/use",
             headers=_scope_headers(scope, self.default_scope),
         )
+        return Playbook.from_dict(payload["playbook"])
 
     def create_playbook_from_task(
         self,
@@ -1507,6 +1510,7 @@ class AsyncMemoryClient:
         session_id: Optional[str] = None,
         entity_kind: Optional[str] = None,
         entity_id: Optional[str] = None,
+        max_events: Optional[int] = None,
         scope: Optional[MemoryScope] = None,
     ) -> TemporalDiffResponse:
         params: dict[str, Any] = {
@@ -1515,6 +1519,7 @@ class AsyncMemoryClient:
             "session_id": session_id,
             "entity_kind": entity_kind,
             "entity_id": entity_id,
+            "max_events": max_events,
         }
         if scope or self.default_scope:
             params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
@@ -2098,12 +2103,13 @@ class AsyncMemoryClient:
         playbook_id: int,
         *,
         scope: Optional[MemoryScope] = None,
-    ) -> None:
-        await self._request(
+    ) -> Playbook:
+        payload = await self._request(
             "POST",
             f"/v1/playbooks/{playbook_id}/use",
             headers=_scope_headers(scope, self.default_scope),
         )
+        return Playbook.from_dict(payload["playbook"])
 
     async def create_playbook_from_task(
         self,

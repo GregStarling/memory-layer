@@ -238,6 +238,70 @@ describe('memory manager', () => {
     await manager.close();
   });
 
+  it('keeps manager diffState unbounded by default but rejects ranges above maxEvents when requested', async () => {
+    const scope = makeScope();
+    const manager = createMemoryManager({
+      adapter,
+      scope,
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      autoCompact: false,
+    });
+
+    for (let index = 0; index < 25; index += 1) {
+      adapter.insertTurn({
+        ...scope,
+        session_id: 'session-1',
+        actor: 'user',
+        role: 'user',
+        content: `turn-${index}`,
+      });
+    }
+
+    await expect(
+      manager.diffState(0, Math.floor(Date.now() / 1000) + 1, {
+        entityKind: 'turn',
+        maxEvents: 10,
+      }),
+    ).rejects.toThrow(/event range exceeds maximum of 10/i);
+    await manager.close();
+  });
+
+  it('reconstructs large exact historical state snapshots without diff caps', async () => {
+    const scope = makeScope();
+    const manager = createMemoryManager({
+      adapter,
+      scope,
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      autoCompact: false,
+    });
+
+    for (let index = 0; index < 520; index += 1) {
+      adapter.insertTurn({
+        ...scope,
+        session_id: 'session-1',
+        actor: 'user',
+        role: 'user',
+        content: `historical-${index}`,
+      });
+    }
+
+    const state = await manager.getStateAt(Math.floor(Date.now() / 1000) + 1);
+
+    expect(state.exact).toBe(true);
+    expect(state.turns).toHaveLength(520);
+    await manager.close();
+  });
+
   it('keeps processing turns when session-state projection refresh fails', async () => {
     const scope = makeScope();
     const asyncAdapter = wrapSyncAdapter(adapter);

@@ -12,6 +12,7 @@ import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type { StorageAdapter } from '../contracts/storage.js';
 import { UniqueConstraintError } from '../contracts/storage.js';
 import type {
+  Association,
   CompactionTrigger,
   EvidenceSourceType,
   FactConfidence,
@@ -21,7 +22,9 @@ import type {
   KnowledgeClass,
   KnowledgeDecision,
   KnowledgeMemory,
+  KnowledgeMemoryAudit,
   KnowledgeRelation,
+  NewAssociation,
   NewKnowledgeEvidence,
   Turn,
   VerificationStatus,
@@ -104,6 +107,29 @@ interface PromotionPersistencePlan {
   promotedKnowledgeInput: PromotedKnowledgeInput;
   auditInput: KnowledgeAuditInput;
   supersededKnowledgeId: number | null;
+}
+
+type MaybePromise<T> = T | Promise<T>;
+
+interface CandidatePersistenceOps<
+  TCandidate extends { id: number },
+  TEvidence extends { id: number } & KnowledgeEvidenceInput,
+> {
+  insertKnowledgeCandidate(input: KnowledgeCandidateInput): MaybePromise<TCandidate>;
+  insertKnowledgeEvidenceBatch(inputs: KnowledgeEvidenceInput[]): MaybePromise<TEvidence[]>;
+}
+
+interface PromotionPersistenceOps<
+  TCandidate extends { id: number },
+  TEvidence extends { id: number } & KnowledgeEvidenceInput,
+> extends CandidatePersistenceOps<TCandidate, TEvidence> {
+  promoteKnowledgeCandidate(
+    candidateId: number,
+    input: PromotedKnowledgeInput,
+  ): MaybePromise<KnowledgeMemory>;
+  supersedeKnowledgeMemory(oldId: number, newId: number): MaybePromise<void>;
+  insertAssociation(input: NewAssociation): MaybePromise<Association>;
+  insertKnowledgeMemoryAudit(input: KnowledgeAuditInput): MaybePromise<KnowledgeMemoryAudit>;
 }
 
 function resolveExtractionPolicy(
@@ -324,6 +350,42 @@ function bindCandidateEvidenceToKnowledge(
   }));
 }
 
+function isPromiseLike<T>(value: MaybePromise<T>): value is Promise<T> {
+  return typeof value === 'object' && value !== null && 'then' in value;
+}
+
+function chainMaybe<T, U>(
+  value: MaybePromise<T>,
+  next: (value: T) => MaybePromise<U>,
+): MaybePromise<U> {
+  return isPromiseLike(value) ? value.then(next) : next(value);
+}
+
+function attemptMaybe<T>(
+  work: () => MaybePromise<T>,
+  onError: (error: unknown) => MaybePromise<T>,
+): MaybePromise<T> {
+  try {
+    const result = work();
+    return isPromiseLike(result) ? result.catch(onError) : result;
+  } catch (error) {
+    return onError(error);
+  }
+}
+
+function assertSyncResult<T>(value: MaybePromise<T>): T {
+  if (isPromiseLike(value)) {
+    throw new Error('Expected synchronous persistence result');
+  }
+  return value;
+}
+
+function ignoreUniqueConstraint(error: unknown): void {
+  if (!(error instanceof UniqueConstraintError)) {
+    throw error;
+  }
+}
+
 function buildPromotionPersistencePlan(input: {
   normalizedScope: ReturnType<typeof normalizeScope>;
   workingMemoryId: number;
@@ -396,17 +458,35 @@ function buildPromotionPersistencePlan(input: {
   };
 }
 
+function persistRejectedKnowledgeCandidateCore<
+  TCandidate extends { id: number },
+  TEvidence extends { id: number } & KnowledgeEvidenceInput,
+>(
+  adapter: CandidatePersistenceOps<TCandidate, TEvidence>,
+  candidateInput: KnowledgeCandidateInput,
+  candidateEvidenceInputs: KnowledgeEvidenceInput[],
+): MaybePromise<void> {
+  return chainMaybe(adapter.insertKnowledgeCandidate(candidateInput), (rejectedCandidate) => {
+    if (candidateEvidenceInputs.length === 0) {
+      return undefined;
+    }
+    return chainMaybe(
+      adapter.insertKnowledgeEvidenceBatch(
+        bindCandidateEvidenceToCandidate(candidateEvidenceInputs, rejectedCandidate.id),
+      ),
+      () => undefined,
+    );
+  });
+}
+
 async function persistRejectedKnowledgeCandidateAsync(
   adapter: AsyncStorageAdapter,
   candidateInput: KnowledgeCandidateInput,
   candidateEvidenceInputs: KnowledgeEvidenceInput[],
 ): Promise<void> {
-  const rejectedCandidate = await adapter.insertKnowledgeCandidate(candidateInput);
-  if (candidateEvidenceInputs.length > 0) {
-    await adapter.insertKnowledgeEvidenceBatch(
-      bindCandidateEvidenceToCandidate(candidateEvidenceInputs, rejectedCandidate.id),
-    );
-  }
+  await Promise.resolve(
+    persistRejectedKnowledgeCandidateCore(adapter, candidateInput, candidateEvidenceInputs),
+  );
 }
 
 function persistRejectedKnowledgeCandidateSync(
@@ -414,12 +494,74 @@ function persistRejectedKnowledgeCandidateSync(
   candidateInput: KnowledgeCandidateInput,
   candidateEvidenceInputs: KnowledgeEvidenceInput[],
 ): void {
-  const rejectedCandidate = adapter.insertKnowledgeCandidate(candidateInput);
-  if (candidateEvidenceInputs.length > 0) {
-    adapter.insertKnowledgeEvidenceBatch(
-      bindCandidateEvidenceToCandidate(candidateEvidenceInputs, rejectedCandidate.id),
+  assertSyncResult(
+    persistRejectedKnowledgeCandidateCore(adapter, candidateInput, candidateEvidenceInputs),
+  );
+}
+
+function persistPromotedKnowledgeCore<
+  TCandidate extends { id: number },
+  TEvidence extends { id: number } & KnowledgeEvidenceInput,
+>(
+  adapter: PromotionPersistenceOps<TCandidate, TEvidence>,
+  normalizedScope: ReturnType<typeof normalizeScope>,
+  plan: PromotionPersistencePlan,
+): MaybePromise<KnowledgeMemory> {
+  return chainMaybe(adapter.insertKnowledgeCandidate(plan.candidateInput), (candidate) => {
+    const candidateEvidenceResult: MaybePromise<TEvidence[]> =
+      plan.candidateEvidenceInputs.length > 0
+        ? adapter.insertKnowledgeEvidenceBatch(
+            bindCandidateEvidenceToCandidate(plan.candidateEvidenceInputs, candidate.id),
+          )
+        : [];
+    return chainMaybe(candidateEvidenceResult, (candidateEvidence) =>
+      chainMaybe(
+        adapter.promoteKnowledgeCandidate(candidate.id, plan.promotedKnowledgeInput),
+        (knowledge) =>
+          chainMaybe(
+            candidateEvidence.length > 0
+              ? adapter.insertKnowledgeEvidenceBatch(
+                  bindCandidateEvidenceToKnowledge(candidateEvidence, knowledge.id),
+                )
+              : undefined,
+            () =>
+              chainMaybe(
+                plan.supersededKnowledgeId != null
+                  ? chainMaybe(
+                      adapter.supersedeKnowledgeMemory(plan.supersededKnowledgeId, knowledge.id),
+                      () =>
+                        attemptMaybe(
+                          () =>
+                            adapter.insertAssociation({
+                              ...normalizedScope,
+                              source_kind: 'knowledge',
+                              source_id: knowledge.id,
+                              target_kind: 'knowledge',
+                              target_id: plan.supersededKnowledgeId!,
+                              association_type: 'supersedes',
+                              confidence: 1,
+                              auto_generated: true,
+                            }),
+                          (error) => {
+                            ignoreUniqueConstraint(error);
+                            return undefined;
+                          },
+                        ),
+                    )
+                  : undefined,
+                () =>
+                  chainMaybe(
+                    adapter.insertKnowledgeMemoryAudit({
+                      ...plan.auditInput,
+                      created_knowledge_id: knowledge.id,
+                    }),
+                    () => knowledge,
+                  ),
+              ),
+          ),
+      ),
     );
-  }
+  });
 }
 
 async function persistPromotedKnowledgeAsync(
@@ -427,49 +569,7 @@ async function persistPromotedKnowledgeAsync(
   normalizedScope: ReturnType<typeof normalizeScope>,
   plan: PromotionPersistencePlan,
 ): Promise<KnowledgeMemory> {
-  const candidate = await adapter.insertKnowledgeCandidate(plan.candidateInput);
-  const candidateEvidence =
-    plan.candidateEvidenceInputs.length > 0
-      ? await adapter.insertKnowledgeEvidenceBatch(
-          bindCandidateEvidenceToCandidate(plan.candidateEvidenceInputs, candidate.id),
-        )
-      : [];
-  const knowledge = await adapter.promoteKnowledgeCandidate(
-    candidate.id,
-    plan.promotedKnowledgeInput,
-  );
-
-  if (candidateEvidence.length > 0) {
-    await adapter.insertKnowledgeEvidenceBatch(
-      bindCandidateEvidenceToKnowledge(candidateEvidence, knowledge.id),
-    );
-  }
-
-  if (plan.supersededKnowledgeId != null) {
-    await adapter.supersedeKnowledgeMemory(plan.supersededKnowledgeId, knowledge.id);
-    try {
-      await adapter.insertAssociation({
-        ...normalizedScope,
-        source_kind: 'knowledge',
-        source_id: knowledge.id,
-        target_kind: 'knowledge',
-        target_id: plan.supersededKnowledgeId,
-        association_type: 'supersedes',
-        confidence: 1,
-        auto_generated: true,
-      });
-    } catch (error) {
-      if (!(error instanceof UniqueConstraintError)) {
-        throw error;
-      }
-    }
-  }
-
-  await adapter.insertKnowledgeMemoryAudit({
-    ...plan.auditInput,
-    created_knowledge_id: knowledge.id,
-  });
-  return knowledge;
+  return Promise.resolve(persistPromotedKnowledgeCore(adapter, normalizedScope, plan));
 }
 
 function persistPromotedKnowledgeSync(
@@ -477,44 +577,7 @@ function persistPromotedKnowledgeSync(
   normalizedScope: ReturnType<typeof normalizeScope>,
   plan: PromotionPersistencePlan,
 ): KnowledgeMemory {
-  const candidate = adapter.insertKnowledgeCandidate(plan.candidateInput);
-  const candidateEvidence =
-    plan.candidateEvidenceInputs.length > 0
-      ? adapter.insertKnowledgeEvidenceBatch(
-          bindCandidateEvidenceToCandidate(plan.candidateEvidenceInputs, candidate.id),
-        )
-      : [];
-  const knowledge = adapter.promoteKnowledgeCandidate(candidate.id, plan.promotedKnowledgeInput);
-
-  if (candidateEvidence.length > 0) {
-    adapter.insertKnowledgeEvidenceBatch(bindCandidateEvidenceToKnowledge(candidateEvidence, knowledge.id));
-  }
-
-  if (plan.supersededKnowledgeId != null) {
-    adapter.supersedeKnowledgeMemory(plan.supersededKnowledgeId, knowledge.id);
-    try {
-      adapter.insertAssociation({
-        ...normalizedScope,
-        source_kind: 'knowledge',
-        source_id: knowledge.id,
-        target_kind: 'knowledge',
-        target_id: plan.supersededKnowledgeId,
-        association_type: 'supersedes',
-        confidence: 1,
-        auto_generated: true,
-      });
-    } catch (error) {
-      if (!(error instanceof UniqueConstraintError)) {
-        throw error;
-      }
-    }
-  }
-
-  adapter.insertKnowledgeMemoryAudit({
-    ...plan.auditInput,
-    created_knowledge_id: knowledge.id,
-  });
-  return knowledge;
+  return assertSyncResult(persistPromotedKnowledgeCore(adapter, normalizedScope, plan));
 }
 
 function evidenceSourceTypeForTurn(turn: Turn): EvidenceSourceType {

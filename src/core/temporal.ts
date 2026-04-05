@@ -8,7 +8,13 @@ import type {
   WorkClaimQuery,
   WorkItemPatch,
 } from '../contracts/coordination.js';
-import { normalizeScope, type MemoryScope, type ScopeLevel } from '../contracts/identity.js';
+import {
+  matchesScope,
+  matchesScopeLevel,
+  normalizeScope,
+  type MemoryScope,
+  type ScopeLevel,
+} from '../contracts/identity.js';
 import { compareTemporalIds, normalizeTemporalId } from '../contracts/temporal.js';
 import type {
   TemporalId,
@@ -50,6 +56,7 @@ import type {
   WorkItem,
   WorkingMemory,
 } from '../contracts/types.js';
+import { ValidationError } from '../contracts/errors.js';
 
 export interface ReplayedTemporalState {
   turns: Turn[];
@@ -110,33 +117,29 @@ function scoreText(query: string, text: string): number {
   return matches / queryTokens.size + (text.toLowerCase().includes(query.toLowerCase()) ? 0.25 : 0);
 }
 
-function matchesScope(item: MemoryScope, scope: MemoryScope): boolean {
-  const left = normalizeScope(item);
-  const right = normalizeScope(scope);
-  return (
-    left.tenant_id === right.tenant_id &&
-    left.system_id === right.system_id &&
-    left.workspace_id === right.workspace_id &&
-    left.collaboration_id === right.collaboration_id &&
-    left.scope_id === right.scope_id
-  );
-}
-
-function matchesLevel(item: MemoryScope, scope: MemoryScope, level: ScopeLevel): boolean {
-  const left = normalizeScope(item);
-  const right = normalizeScope(scope);
-  if (left.tenant_id !== right.tenant_id) return false;
-  if (level === 'tenant') return true;
-  if (level === 'workspace') return left.workspace_id === right.workspace_id;
-  if (left.system_id !== right.system_id) return false;
-  if (level === 'system') return true;
-  return matchesScope(left, right);
-}
-
 function inRange(createdAt: number, range: TimeRange): boolean {
   if (range.start_at !== undefined && createdAt < range.start_at) return false;
   if (range.end_at !== undefined && createdAt > range.end_at) return false;
   return true;
+}
+
+async function accumulateMemoryEvents(
+  fetchPage: (cursor: MemoryEventQuery['cursor']) => Promise<TimelineResult>,
+  initialCursor?: MemoryEventQuery['cursor'],
+  maxEvents?: number,
+): Promise<MemoryEventRecord[]> {
+  const events: MemoryEventRecord[] = [];
+  let cursor = initialCursor;
+  for (;;) {
+    const page = await fetchPage(cursor);
+    events.push(...page.events);
+    if (maxEvents != null && events.length > maxEvents) {
+      throw new ValidationError(`Memory validation: event range exceeds maximum of ${maxEvents}`);
+    }
+    if (page.nextCursor == null) break;
+    cursor = page.nextCursor;
+  }
+  return events;
 }
 
 function activeSearchKnowledge(items: KnowledgeMemory[], options?: SearchOptions): KnowledgeMemory[] {
@@ -151,19 +154,33 @@ export async function listAllMemoryEvents(
   scope: MemoryScope,
   query?: MemoryEventQuery,
 ): Promise<MemoryEventRecord[]> {
-  const events: MemoryEventRecord[] = [];
-  let cursor = query?.cursor;
-  for (;;) {
-    const page: TimelineResult = await adapter.listMemoryEvents(scope, {
-      ...query,
-      cursor,
-      limit: query?.limit ?? 500,
-    });
-    events.push(...page.events);
-    if (page.nextCursor == null) break;
-    cursor = page.nextCursor;
-  }
-  return events;
+  return accumulateMemoryEvents(
+    (cursor) =>
+      adapter.listMemoryEvents(scope, {
+        ...query,
+        cursor,
+        limit: query?.limit ?? 500,
+      }),
+    query?.cursor,
+  );
+}
+
+export async function listAllMemoryEventsBounded(
+  adapter: AsyncStorageAdapter,
+  scope: MemoryScope,
+  maxEvents: number,
+  query?: MemoryEventQuery,
+): Promise<MemoryEventRecord[]> {
+  return accumulateMemoryEvents(
+    (cursor) =>
+      adapter.listMemoryEvents(scope, {
+        ...query,
+        cursor,
+        limit: query?.limit ?? 500,
+      }),
+    query?.cursor,
+    maxEvents,
+  );
 }
 
 export async function listAllMemoryEventsCrossScope(
@@ -172,19 +189,34 @@ export async function listAllMemoryEventsCrossScope(
   level: ScopeLevel,
   query?: MemoryEventQuery,
 ): Promise<MemoryEventRecord[]> {
-  const events: MemoryEventRecord[] = [];
-  let cursor = query?.cursor;
-  for (;;) {
-    const page: TimelineResult = await adapter.listMemoryEventsCrossScope(scope, level, {
-      ...query,
-      cursor,
-      limit: query?.limit ?? 500,
-    });
-    events.push(...page.events);
-    if (page.nextCursor == null) break;
-    cursor = page.nextCursor;
-  }
-  return events;
+  return accumulateMemoryEvents(
+    (cursor) =>
+      adapter.listMemoryEventsCrossScope(scope, level, {
+        ...query,
+        cursor,
+        limit: query?.limit ?? 500,
+      }),
+    query?.cursor,
+  );
+}
+
+export async function listAllMemoryEventsCrossScopeBounded(
+  adapter: AsyncStorageAdapter,
+  scope: MemoryScope,
+  level: ScopeLevel,
+  maxEvents: number,
+  query?: MemoryEventQuery,
+): Promise<MemoryEventRecord[]> {
+  return accumulateMemoryEvents(
+    (cursor) =>
+      adapter.listMemoryEventsCrossScope(scope, level, {
+        ...query,
+        cursor,
+        limit: query?.limit ?? 500,
+      }),
+    query?.cursor,
+    maxEvents,
+  );
 }
 
 export function foldTemporalState(
@@ -395,14 +427,14 @@ export function createTemporalReplayAdapter(
     getActiveKnowledgeCrossScope: async (scope, level) =>
       replayState.knowledge.filter(
         (item) =>
-          matchesLevel(item, scope, level) &&
+          matchesScopeLevel(item, scope, level) &&
           item.superseded_by_id === null &&
           item.retired_at === null,
       ),
     getKnowledgeSince: async (scope, level, since) =>
       replayState.knowledge.filter(
         (item) =>
-          matchesLevel(item, scope, level) &&
+          matchesScopeLevel(item, scope, level) &&
           item.created_at >= since &&
           item.superseded_by_id === null &&
           item.retired_at === null,
@@ -422,7 +454,7 @@ export function createTemporalReplayAdapter(
         .slice(0, options?.limit ?? 10),
     searchKnowledgeCrossScope: async (scope, level, query, options) =>
       activeSearchKnowledge(
-        replayState.knowledge.filter((item) => matchesLevel(item, scope, level)),
+        replayState.knowledge.filter((item) => matchesScopeLevel(item, scope, level)),
         options,
       )
         .map((item) => ({ item, rank: scoreText(query, item.fact) }))
@@ -443,7 +475,7 @@ export function createTemporalReplayAdapter(
       replayState.workItems.filter((item) => matchesScope(item, scope) && item.status !== 'done'),
     getActiveWorkItemsCrossScope: async (scope, level) =>
       replayState.workItems.filter(
-        (item) => matchesLevel(item, scope, level) && item.status !== 'done',
+        (item) => matchesScopeLevel(item, scope, level) && item.status !== 'done',
       ),
     getWorkItemsByTimeRange: async (scope, range) =>
       replayState.workItems.filter(
@@ -451,7 +483,7 @@ export function createTemporalReplayAdapter(
       ),
     getWorkItemsByTimeRangeCrossScope: async (scope, level, range) =>
       replayState.workItems.filter(
-        (item) => matchesLevel(item, scope, level) && inRange(item.created_at, range),
+        (item) => matchesScopeLevel(item, scope, level) && inRange(item.created_at, range),
       ),
     updateWorkItemStatus: () => unsupported('updateWorkItemStatus'),
     updateWorkItem: async () => unsupported('updateWorkItem'),
@@ -482,7 +514,7 @@ export function createTemporalReplayAdapter(
       }),
     listWorkClaimsCrossScope: async (scope, level, options?: WorkClaimQuery) =>
       replayState.workClaims.filter((claim) => {
-        if (!matchesLevel(claim, scope, level)) return false;
+        if (!matchesScopeLevel(claim, scope, level)) return false;
         if (!options?.includeExpired && claim.status === 'expired') return false;
         if (!options?.includeReleased && claim.status === 'released') return false;
         if (options?.sessionId && claim.session_id !== options.sessionId) return false;
@@ -520,7 +552,7 @@ export function createTemporalReplayAdapter(
       }),
     listHandoffsCrossScope: async (scope, level, options) =>
       replayState.handoffs.filter((handoff) => {
-        if (!matchesLevel(handoff, scope, level)) return false;
+        if (!matchesScopeLevel(handoff, scope, level)) return false;
         if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
         if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
         if (!options?.actor) return true;
@@ -547,7 +579,9 @@ export function createTemporalReplayAdapter(
       ),
     getActivePlaybooksCrossScope: async (scope, level) =>
       replayState.playbooks.filter(
-        (item) => matchesLevel(item, scope, level) && (item.status === 'draft' || item.status === 'active'),
+        (item) =>
+          matchesScopeLevel(item, scope, level) &&
+          (item.status === 'draft' || item.status === 'active'),
       ),
     searchPlaybooks: async (scope, query, options) =>
       replayState.playbooks
@@ -567,7 +601,7 @@ export function createTemporalReplayAdapter(
       replayState.playbooks
         .filter(
           (item) =>
-            matchesLevel(item, scope, level) &&
+            matchesScopeLevel(item, scope, level) &&
             (options?.activeOnly === false || (item.status !== 'archived' && item.status !== 'deprecated')),
         )
         .map((item) => ({

@@ -1,5 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import { rmSync } from 'node:fs';
 import { startHttpServer } from '../server/http-server.js';
+import { createSQLiteAdapter } from '../adapters/sqlite/index.js';
 
 describe('HTTP server', () => {
   let cleanup: (() => Promise<void>) | null = null;
@@ -595,6 +597,61 @@ describe('HTTP server', () => {
     expect(retained.status).toBe(200);
   }, 15000);
 
+  it('captures HTTP snapshot watermarks from the latest event cursor', async () => {
+    const instance = await startHttpServer({ port: 13117, dbPath: ':memory:' });
+    cleanup = instance.close;
+    const base = 'http://localhost:13117';
+
+    await fetch(`${base}/v1/exchanges`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userContent: 'First event',
+        assistantContent: 'Second event',
+      }),
+    });
+
+    const latestCursor = await instance.manager.resolveChangeStreamCursor();
+    const snapshot = await fetch(`${base}/v1/sessions/review-session/snapshot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }).then((res) => res.json());
+
+    expect(snapshot.snapshot.watermarkEventId).toBe(latestCursor === '0' ? null : latestCursor);
+  });
+
+  it('rejects oversized HTTP diff ranges at the default transport cap', async () => {
+    const dbPath = `/tmp/memory-layer-http-diff-${Date.now()}-${Math.random()}.sqlite`;
+    const instance = await startHttpServer({ port: 13118, dbPath });
+    cleanup = async () => {
+      await instance.close();
+      rmSync(dbPath, { force: true });
+    };
+    const adapter = createSQLiteAdapter(dbPath);
+
+    for (let index = 0; index < 5001; index += 1) {
+      adapter.insertTurn({
+        tenant_id: 'default',
+        system_id: 'default',
+        workspace_id: '',
+        collaboration_id: '',
+        scope_id: 'default',
+        session_id: 'session-1',
+        actor: 'user',
+        role: 'user',
+        content: `turn-${index}`,
+      });
+    }
+    adapter.close();
+
+    const res = await fetch(`http://localhost:13118/v1/state/diff?from=0&to=${Math.floor(Date.now() / 1000) + 1}`);
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({
+      error: expect.stringMatching(/event range exceeds maximum of 5000/i),
+    });
+  });
+
   it('GET /v1/episodes requires query param', async () => {
     const base = await setup(13120);
     const res = await fetch(`${base}/v1/episodes`);
@@ -726,5 +783,59 @@ describe('HTTP server', () => {
 
     const badScopeLevel = await fetch(`${base}/v1/search/cross-scope?q=test&scope_level=planet`);
     expect(badScopeLevel.status).toBe(400);
+  });
+
+  it('rejects malformed numeric transport inputs with 400s', async () => {
+    const base = await setup(13119);
+
+    const work = await fetch(`${base}/v1/work`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Ship rollout' }),
+    }).then((res) => res.json());
+
+    expect((await fetch(`${base}/v1/state?as_of=NaN`)).status).toBe(400);
+    expect((await fetch(`${base}/v1/timeline?cursor=abc`)).status).toBe(400);
+    expect((await fetch(`${base}/v1/state/diff?from=Infinity&to=1`)).status).toBe(400);
+    expect((await fetch(`${base}/v1/memory?q=test&minimumTrustScore=Infinity`)).status).toBe(400);
+    expect((await fetch(`${base}/v1/profile?min_trust=NaN`)).status).toBe(400);
+
+    expect(
+      (
+        await fetch(`${base}/v1/work-items/${work.workItemId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ expectedVersion: 'NaN' }),
+        })
+      ).status,
+    ).toBe(400);
+
+    expect(
+      (
+        await fetch(`${base}/v1/work-items/${work.workItemId}/claim`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            actor: { actor_kind: 'agent', actor_id: 'planner' },
+            leaseSeconds: 'Infinity',
+          }),
+        })
+      ).status,
+    ).toBe(400);
+
+    expect(
+      (
+        await fetch(`${base}/v1/work-items/${work.workItemId}/handoffs`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            from_actor: { actor_kind: 'agent', actor_id: 'planner' },
+            to_actor: { actor_kind: 'human', actor_id: 'operator' },
+            summary: 'Take over',
+            expires_at: 'Infinity',
+          }),
+        })
+      ).status,
+    ).toBe(400);
   });
 });

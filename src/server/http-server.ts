@@ -39,6 +39,11 @@ import type { CognitiveMemoryType } from '../contracts/cognitive.js';
 import type { ProfileSection, ProfileView } from '../contracts/profile.js';
 import { createSQLiteAdapterWithEmbeddings } from '../adapters/sqlite/index.js';
 import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
+import {
+  parseOptionalFiniteInteger,
+  parseOptionalFiniteNumber,
+  parseOptionalTemporalIdValue,
+} from './parsing.js';
 export interface HttpServerConfig {
   /** Port to listen on. Defaults to 3100. */
   port?: number;
@@ -92,6 +97,12 @@ const PER_SCOPE_SESSION_SNAPSHOT_LIMIT = 10;
 const MANAGER_CACHE_LIMIT = 256;
 const SESSION_MANAGER_CACHE_LIMIT = 256;
 const MAX_LIST_LIMIT = 100;
+const DEFAULT_DIFF_MAX_EVENTS = 5000;
+const MAX_DIFF_MAX_EVENTS = 20000;
+
+function failHttpValidation(message: string): never {
+  throw new HttpRequestError(400, message);
+}
 
 function safeSecretEquals(provided: string | string[] | undefined, expected: string): boolean {
   if (typeof provided !== 'string') return false;
@@ -334,8 +345,7 @@ function parseOptionalInteger(value: string | undefined): number | undefined {
 }
 
 function parseOptionalTemporalId(value: string | undefined): string | undefined {
-  if (value == null || value === '') return undefined;
-  return /^\d+$/.test(value.trim()) ? BigInt(value.trim()).toString() : undefined;
+  return parseOptionalTemporalIdValue(value, 'cursor', failHttpValidation);
 }
 
 function normalizePath(path: string): string {
@@ -844,8 +854,8 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // GET /v1/state
       if (path === '/v1/state' && req.method === 'GET') {
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const asOf = query.as_of != null ? Number(query.as_of) : undefined;
-        if (asOf == null || !Number.isFinite(asOf)) {
+        const asOf = parseOptionalFiniteNumber(query.as_of, { name: 'as_of' }, failHttpValidation);
+        if (asOf == null) {
           writeError(res, 400, 'Missing or invalid as_of parameter');
           return;
         }
@@ -864,18 +874,10 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // GET /v1/timeline
       if (path === '/v1/timeline' && req.method === 'GET') {
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const startAt = query.start_at != null ? Number(query.start_at) : undefined;
-        const endAt = query.end_at != null ? Number(query.end_at) : undefined;
+        const startAt = parseOptionalFiniteNumber(query.start_at, { name: 'start_at' }, failHttpValidation);
+        const endAt = parseOptionalFiniteNumber(query.end_at, { name: 'end_at' }, failHttpValidation);
         const cursor = parseOptionalTemporalId(query.cursor);
         const limit = parseLimit(query.limit);
-        if (
-          (query.start_at != null && !Number.isFinite(startAt)) ||
-          (query.end_at != null && !Number.isFinite(endAt)) ||
-          (query.cursor != null && cursor == null)
-        ) {
-          writeError(res, 400, 'Invalid timeline parameters');
-          return;
-        }
         const timeline = await requestManager.getTimeline({
           sessionId: query.session_id || undefined,
           entityKind: query.entity_kind as never,
@@ -892,9 +894,14 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // GET /v1/state/diff
       if (path === '/v1/state/diff' && req.method === 'GET') {
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const from = query.from != null ? Number(query.from) : undefined;
-        const to = query.to != null ? Number(query.to) : undefined;
-        if (from == null || to == null || !Number.isFinite(from) || !Number.isFinite(to)) {
+        const from = parseOptionalFiniteNumber(query.from, { name: 'from' }, failHttpValidation);
+        const to = parseOptionalFiniteNumber(query.to, { name: 'to' }, failHttpValidation);
+        const maxEvents = parseOptionalFiniteInteger(
+          query.max_events,
+          { name: 'max_events', min: 1, max: MAX_DIFF_MAX_EVENTS },
+          failHttpValidation,
+        );
+        if (from == null || to == null) {
           writeError(res, 400, 'Missing or invalid from/to parameters');
           return;
         }
@@ -902,6 +909,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           sessionId: query.session_id || undefined,
           entityKind: query.entity_kind as never,
           entityId: query.entity_id || undefined,
+          maxEvents: maxEvents ?? DEFAULT_DIFF_MAX_EVENTS,
         });
         writeJson(res, 200, diff);
         return;
@@ -910,18 +918,10 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // GET /v1/events/log
       if (path === '/v1/events/log' && req.method === 'GET') {
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const startAt = query.start_at != null ? Number(query.start_at) : undefined;
-        const endAt = query.end_at != null ? Number(query.end_at) : undefined;
+        const startAt = parseOptionalFiniteNumber(query.start_at, { name: 'start_at' }, failHttpValidation);
+        const endAt = parseOptionalFiniteNumber(query.end_at, { name: 'end_at' }, failHttpValidation);
         const cursor = parseOptionalTemporalId(query.cursor);
         const limit = parseLimit(query.limit);
-        if (
-          (query.start_at != null && !Number.isFinite(startAt)) ||
-          (query.end_at != null && !Number.isFinite(endAt)) ||
-          (query.cursor != null && cursor == null)
-        ) {
-          writeError(res, 400, 'Invalid event log parameters');
-          return;
-        }
         const events = await requestManager.listMemoryEvents({
           sessionId: query.session_id || undefined,
           entityKind: query.entity_kind as never,
@@ -1107,11 +1107,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // GET /v1/inspect/context
       if (path === '/v1/inspect/context' && req.method === 'GET') {
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const asOf = query.as_of != null ? Number(query.as_of) : undefined;
-        if (query.as_of != null && !Number.isFinite(asOf)) {
-          writeError(res, 400, 'Invalid as_of parameter');
-          return;
-        }
+        const asOf = parseOptionalFiniteNumber(query.as_of, { name: 'as_of' }, failHttpValidation);
         const context = asOf != null
           ? await requestManager.getContextAt(asOf, query.query || undefined)
           : await requestManager.getContext(query.query || undefined);
@@ -1122,11 +1118,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // GET /v1/inspect/session-state
       if (path === '/v1/inspect/session-state' && req.method === 'GET') {
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const asOf = query.as_of != null ? Number(query.as_of) : undefined;
-        if (query.as_of != null && !Number.isFinite(asOf)) {
-          writeError(res, 400, 'Invalid as_of parameter');
-          return;
-        }
+        const asOf = parseOptionalFiniteNumber(query.as_of, { name: 'as_of' }, failHttpValidation);
         const context = asOf != null
           ? await requestManager.getContextAt(asOf, query.query || undefined)
           : await requestManager.getContext(query.query || undefined);
@@ -1137,11 +1129,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // GET /v1/inspect/retrieval
       if (path === '/v1/inspect/retrieval' && req.method === 'GET') {
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const asOf = query.as_of != null ? Number(query.as_of) : undefined;
-        if (query.as_of != null && !Number.isFinite(asOf)) {
-          writeError(res, 400, 'Invalid as_of parameter');
-          return;
-        }
+        const asOf = parseOptionalFiniteNumber(query.as_of, { name: 'as_of' }, failHttpValidation);
         const context = asOf != null
           ? await requestManager.getContextAt(asOf, query.query || undefined)
           : await requestManager.getContext(query.query || undefined);
@@ -1235,8 +1223,11 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
                 : undefined,
           },
           {
-            expectedVersion:
-              body.expectedVersion != null ? Number(body.expectedVersion) : undefined,
+            expectedVersion: parseOptionalFiniteInteger(
+              body.expectedVersion,
+              { name: 'expectedVersion', min: 0 },
+              failHttpValidation,
+            ),
           },
         );
         writeJson(res, 200, { workItem: item });
@@ -1255,7 +1246,11 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const claim = await requestManager.claimWorkItem({
           workItemId: Number(claimMatch[1]),
           actor,
-          leaseSeconds: body.leaseSeconds != null ? Number(body.leaseSeconds) : undefined,
+          leaseSeconds: parseOptionalFiniteInteger(
+            body.leaseSeconds,
+            { name: 'leaseSeconds', min: 1 },
+            failHttpValidation,
+          ),
         });
         writeJson(res, 200, { claim: serializeWorkClaim(claim) });
         return;
@@ -1273,7 +1268,11 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const claim = await requestManager.renewWorkClaim(
           Number(renewMatch[1]),
           actor,
-          body.leaseSeconds != null ? Number(body.leaseSeconds) : undefined,
+          parseOptionalFiniteInteger(
+            body.leaseSeconds,
+            { name: 'leaseSeconds', min: 1 },
+            failHttpValidation,
+          ),
         );
         writeJson(res, 200, { claim: claim ? serializeWorkClaim(claim) : null });
         return;
@@ -1320,7 +1319,12 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           toActor,
           summary: requireString(body.summary, 'summary'),
           contextBundleRef: optionalString(body.context_bundle_ref, 'context_bundle_ref') ?? null,
-          expiresAt: body.expires_at != null ? Number(body.expires_at) : null,
+          expiresAt:
+            parseOptionalFiniteInteger(
+              body.expires_at,
+              { name: 'expires_at', min: 0 },
+              failHttpValidation,
+            ) ?? null,
         });
         writeJson(res, 201, { handoff: serializeHandoffRecord(handoff) });
         return;
@@ -1575,9 +1579,11 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const types = query.types
           ? (query.types.split(',').map((t) => t.trim()).filter(Boolean) as CognitiveMemoryType[])
           : undefined;
-        const cogMinTrust = query.minimumTrustScore != null && query.minimumTrustScore !== ''
-          ? Number(query.minimumTrustScore)
-          : undefined;
+        const cogMinTrust = parseOptionalFiniteNumber(
+          query.minimumTrustScore,
+          { name: 'minimumTrustScore', min: 0, max: 1 },
+          failHttpValidation,
+        );
         const cogActiveOnly = query.activeOnly != null
           ? query.activeOnly === 'true'
           : undefined;
@@ -1603,13 +1609,11 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const sections = query.sections
           ? query.sections.split(',').map((s) => requireEnum(s.trim(), validSections, 'sections'))
           : undefined;
-        const minTrust = query.min_trust != null && query.min_trust !== ''
-          ? Number(query.min_trust)
-          : undefined;
-        if (minTrust != null && Number.isNaN(minTrust)) {
-          writeError(res, 400, 'Invalid min_trust parameter');
-          return;
-        }
+        const minTrust = parseOptionalFiniteNumber(
+          query.min_trust,
+          { name: 'min_trust', min: 0, max: 1 },
+          failHttpValidation,
+        );
         const includeProvisional = query.includeProvisional === 'true' ? true : undefined;
         const includeDisputed = query.includeDisputed === 'true' ? true : undefined;
         const profile = await requestManager.getProfile({
@@ -1730,8 +1734,10 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       const playbookUseMatch = path.match(/^\/v1\/playbooks\/(\d+)\/use$/);
       if (playbookUseMatch && req.method === 'POST') {
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        await requestManager.recordPlaybookUse(Number(playbookUseMatch[1]));
-        writeJson(res, 200, { recorded: true });
+        const playbookId = Number(playbookUseMatch[1]);
+        await requestManager.recordPlaybookUse(playbookId);
+        const playbook = await requestManager.getPlaybook(playbookId);
+        writeJson(res, 200, { recorded: true, playbook });
         return;
       }
 
@@ -1815,14 +1821,14 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           requestManager.getSessionBootstrap(relevanceQuery),
           requestManager.getContext(relevanceQuery),
         ]);
-        const events = await requestManager.listMemoryEvents({ limit: 1 });
+        const latestCursor = await requestManager.resolveChangeStreamCursor();
         const snapshot = {
           scopeKey,
           snapshotId: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
           bootstrap,
           context,
           frozenAt: Math.floor(Date.now() / 1000),
-          watermarkEventId: events.events[0]?.event_id ?? null,
+          watermarkEventId: latestCursor === '0' ? null : latestCursor,
         };
         touchSnapshot(`${scopeKey}:${sessionId}`, snapshot);
         const { scopeKey: _scopeKey, ...publicSnapshot } = snapshot;
@@ -1858,14 +1864,14 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           requestManager.getSessionBootstrap(relevanceQuery),
           requestManager.getContext(relevanceQuery),
         ]);
-        const events = await requestManager.listMemoryEvents({ limit: 1 });
+        const latestCursor = await requestManager.resolveChangeStreamCursor();
         const snapshot = {
           scopeKey,
           snapshotId: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
           bootstrap,
           context,
           frozenAt: Math.floor(Date.now() / 1000),
-          watermarkEventId: events.events[0]?.event_id ?? null,
+          watermarkEventId: latestCursor === '0' ? null : latestCursor,
         };
         touchSnapshot(`${scopeKey}:${sessionId}`, snapshot);
         const { scopeKey: _scopeKey, ...publicSnapshot } = snapshot;

@@ -1151,6 +1151,13 @@ paths:
         - name: entity_id
           in: query
           schema: { type: string }
+        - name: max_events
+          in: query
+          description: Optional transport cap for accumulated events. Defaults to 5000 and must not exceed 20000.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 20000
         - $ref: '#/components/parameters/ScopeTenant'
         - $ref: '#/components/parameters/ScopeSystem'
         - $ref: '#/components/parameters/ScopeWorkspace'
@@ -1745,10 +1752,12 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [recorded]
+                required: [recorded, playbook]
                 properties:
                   recorded:
                     type: boolean
+                  playbook:
+                    $ref: '#/components/schemas/Playbook'
         '404':
           description: Playbook not found
           content:

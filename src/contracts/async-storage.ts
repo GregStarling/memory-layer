@@ -86,6 +86,7 @@ export interface AsyncStorageAdapter {
 
   insertWorkingMemory(input: NewWorkingMemory): Promise<WorkingMemory>;
   getWorkingMemoryById(id: number): Promise<WorkingMemory | null>;
+  getExistingWorkingMemoryIds?(ids: number[]): Promise<number[]>;
   getWorkingMemoryBySession(sessionId: string, scope: MemoryScope): Promise<WorkingMemory[]>;
   getActiveWorkingMemory(scope: MemoryScope, sessionId?: string): Promise<WorkingMemory[]>;
   getLatestWorkingMemory(scope: MemoryScope, sessionId?: string): Promise<WorkingMemory | null>;
@@ -108,6 +109,7 @@ export interface AsyncStorageAdapter {
   listKnowledgeEvidenceForCandidate(candidateId: number): Promise<KnowledgeEvidence[]>;
   promoteKnowledgeCandidate(candidateId: number, input: NewKnowledgeMemory): Promise<KnowledgeMemory>;
   getKnowledgeMemoryById(id: number): Promise<KnowledgeMemory | null>;
+  getExistingKnowledgeMemoryIds?(ids: number[]): Promise<number[]>;
   getActiveKnowledgeMemory(scope: MemoryScope): Promise<KnowledgeMemory[]>;
   getActiveKnowledgeMemoryPaginated(
     scope: MemoryScope,
@@ -167,6 +169,7 @@ export interface AsyncStorageAdapter {
 
   insertWorkItem(input: NewWorkItem): Promise<WorkItem>;
   getWorkItemById(id: number): Promise<WorkItem | null>;
+  getExistingWorkItemIds?(ids: number[]): Promise<number[]>;
   getActiveWorkItems(scope: MemoryScope): Promise<WorkItem[]>;
   getActiveWorkItemsCrossScope(scope: MemoryScope, level: ScopeLevel): Promise<WorkItem[]>;
   getWorkItemsByTimeRange(scope: MemoryScope, range: TimeRange): Promise<WorkItem[]>;
@@ -212,6 +215,7 @@ export interface AsyncStorageAdapter {
 
   insertPlaybook(input: NewPlaybook): Promise<Playbook>;
   getPlaybookById(id: number): Promise<Playbook | null>;
+  getExistingPlaybookIds?(ids: number[]): Promise<number[]>;
   getActivePlaybooks(scope: MemoryScope): Promise<Playbook[]>;
   getActivePlaybooksCrossScope(scope: MemoryScope, level: ScopeLevel): Promise<Playbook[]>;
   searchPlaybooks(

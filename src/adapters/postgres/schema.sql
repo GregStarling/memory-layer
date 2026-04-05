@@ -584,6 +584,7 @@ CREATE TABLE IF NOT EXISTS projection_watermarks (
   metadata JSONB
 );
 
+-- Current-state projection only; historical claim transitions remain in memory_event_log.
 CREATE TABLE IF NOT EXISTS work_claims_current (
   id BIGSERIAL PRIMARY KEY,
   tenant_id TEXT NOT NULL,

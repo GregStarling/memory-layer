@@ -144,13 +144,13 @@ export function createMemoryRuntime(
       getBootstrapPayload(relevanceQuery, format),
       manager.getContext(relevanceQuery),
     ]);
-    const latestEvents = await manager.listMemoryEvents({ limit: 1 });
+    const latestCursor = await manager.resolveChangeStreamCursor();
     const snapshot: SessionSnapshot = {
       snapshotId: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
       bootstrap: bootstrapPayload.bootstrap,
       context,
       frozenAt,
-      watermarkEventId: latestEvents.events[0]?.event_id ?? null,
+      watermarkEventId: latestCursor === '0' ? null : latestCursor,
       profile: bootstrapPayload.bootstrap.profile ?? null,
     };
     // Deep-freeze so callers can't mutate the cached snapshot's bootstrap,
@@ -223,18 +223,21 @@ export function createMemoryRuntime(
         };
       }
 
-      const [bootstrapPayload, context] = await Promise.all([
-        getBootstrapPayload(resolved.relevanceQuery ?? resolved.input, resolvedFormat),
+      const [bootstrap, context] = await Promise.all([
+        resolved.asOf != null
+          ? manager.getSessionBootstrapAt(resolved.asOf, resolved.relevanceQuery ?? resolved.input)
+          : manager.getSessionBootstrap(resolved.relevanceQuery ?? resolved.input),
         resolved.asOf != null
           ? manager.getContextAt(resolved.asOf, resolved.relevanceQuery ?? resolved.input)
           : manager.getContext(resolved.relevanceQuery ?? resolved.input),
       ]);
+      const bootstrapPrompt = formatBootstrapForPrompt(bootstrap, resolvedFormat);
       const contextPrompt = formatContextForPrompt(context, resolvedFormat);
       return {
-        bootstrap: bootstrapPayload.bootstrap,
+        bootstrap,
         context,
-        bootstrapPrompt: bootstrapPayload.bootstrapPrompt,
-        prompt: [bootstrapPayload.bootstrapPrompt, contextPrompt].join('\n\n'),
+        bootstrapPrompt,
+        prompt: [bootstrapPrompt, contextPrompt].join('\n\n'),
         messages: formatContextAsMessages(context, resolvedFormat),
       };
     },

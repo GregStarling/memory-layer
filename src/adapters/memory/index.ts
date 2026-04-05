@@ -1,4 +1,10 @@
-import { normalizeScope, type MemoryScope, type ScopeLevel } from '../../contracts/identity.js';
+import {
+  matchesScope,
+  matchesScopeLevel,
+  normalizeScope,
+  type MemoryScope,
+  type ScopeLevel,
+} from '../../contracts/identity.js';
 import type {
   ActorRef,
   HandoffQuery,
@@ -102,37 +108,12 @@ interface MemoryState {
   projectionWatermarks: TemporalProjectionWatermark[];
 }
 
-function matchesScope(item: MemoryScope, scope: MemoryScope): boolean {
-  const left = normalizeScope(item);
-  const right = normalizeScope(scope);
-  return (
-    left.tenant_id === right.tenant_id &&
-    left.system_id === right.system_id &&
-    left.workspace_id === right.workspace_id &&
-    left.collaboration_id === right.collaboration_id &&
-    left.scope_id === right.scope_id
-  );
-}
-
 function matchesScopedSession(
   item: MemoryScope & { session_id?: string | null },
   scope: MemoryScope,
   sessionId?: string,
 ): boolean {
   return matchesScope(item, scope) && (sessionId == null || item.session_id === sessionId);
-}
-
-function matchesLevel(item: MemoryScope, scope: MemoryScope, level: ScopeLevel): boolean {
-  const left = normalizeScope(item);
-  const right = normalizeScope(scope);
-  if (left.tenant_id !== right.tenant_id) return false;
-  if (level === 'tenant') return true;
-  if (level === 'workspace') return left.workspace_id === right.workspace_id;
-  if (left.system_id !== right.system_id) return false;
-  if (level === 'system') return true;
-  if (left.workspace_id !== right.workspace_id) return false;
-  if (left.collaboration_id !== right.collaboration_id) return false;
-  return left.scope_id === right.scope_id;
 }
 
 function inRange(createdAt: number, range: TimeRange): boolean {
@@ -204,6 +185,12 @@ function paginateItems<T extends { id: number }>(
 
 function cloneValue<T>(value: T): T {
   return structuredClone(value);
+}
+
+function filterExistingIds<T extends { id: number }>(items: T[], ids: number[]): number[] {
+  const existing = new Set(items.map((item) => item.id));
+  const uniqueIds = [...new Set(ids)];
+  return uniqueIds.filter((id) => existing.has(id));
 }
 
 function normalizeEventQuery(query?: MemoryEventQuery): {
@@ -479,6 +466,10 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       return state.workingMemory.find((item) => item.id === id) ?? null;
     },
 
+    getExistingWorkingMemoryIds(ids) {
+      return filterExistingIds(state.workingMemory, ids);
+    },
+
     getWorkingMemoryBySession(sessionId, scope) {
       return state.workingMemory.filter((item) => item.session_id === sessionId && matchesScope(item, scope));
     },
@@ -706,6 +697,10 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       return state.knowledgeMemory.find((item) => item.id === id) ?? null;
     },
 
+    getExistingKnowledgeMemoryIds(ids) {
+      return filterExistingIds(state.knowledgeMemory, ids);
+    },
+
     getActiveKnowledgeMemory(scope) {
       return state.knowledgeMemory.filter(
         (item) =>
@@ -728,7 +723,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     getActiveKnowledgeCrossScope(scope, level) {
       return state.knowledgeMemory.filter(
         (item) =>
-          matchesLevel(item, scope, level) &&
+          matchesScopeLevel(item, scope, level) &&
           item.superseded_by_id === null &&
           item.retired_at === null,
       );
@@ -737,7 +732,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     getKnowledgeSince(scope, level, since) {
       return state.knowledgeMemory.filter(
         (item) =>
-          matchesLevel(item, scope, level) &&
+          matchesScopeLevel(item, scope, level) &&
           item.created_at >= since &&
           item.superseded_by_id === null &&
           item.retired_at === null,
@@ -782,7 +777,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       const results = state.knowledgeMemory
         .filter(
           (item) =>
-            matchesLevel(item, scope, level) &&
+            matchesScopeLevel(item, scope, level) &&
             (!resolved.activeOnly ||
               (item.superseded_by_id === null && item.retired_at === null)),
         )
@@ -997,6 +992,10 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       return item ? cloneValue(item) : null;
     },
 
+    getExistingWorkItemIds(ids) {
+      return filterExistingIds(state.workItems, ids);
+    },
+
     getActiveWorkItems(scope) {
       return state.workItems.filter(
         (item) => matchesScope(item, scope) && item.status !== 'done',
@@ -1005,7 +1004,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
 
     getActiveWorkItemsCrossScope(scope, level) {
       return state.workItems.filter(
-        (item) => matchesLevel(item, scope, level) && item.status !== 'done',
+        (item) => matchesScopeLevel(item, scope, level) && item.status !== 'done',
       );
     },
 
@@ -1017,7 +1016,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
 
     getWorkItemsByTimeRangeCrossScope(scope, level, range) {
       return state.workItems.filter(
-        (item) => matchesLevel(item, scope, level) && inRange(item.created_at, range),
+        (item) => matchesScopeLevel(item, scope, level) && inRange(item.created_at, range),
       );
     },
 
@@ -1345,7 +1344,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     listWorkClaimsCrossScope(scope, level: ScopeLevel, options?: WorkClaimQuery) {
       const currentNow = nowSeconds();
       for (const claim of state.workClaims) {
-        if (matchesLevel(claim, scope, level) && isClaimExpired(claim, currentNow)) {
+        if (matchesScopeLevel(claim, scope, level) && isClaimExpired(claim, currentNow)) {
           claim.status = 'expired';
           claim.released_at = currentNow;
           claim.release_reason = 'expired';
@@ -1367,7 +1366,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         }
       }
       return state.workClaims.filter((claim) => {
-        if (!matchesLevel(claim, scope, level)) return false;
+        if (!matchesScopeLevel(claim, scope, level)) return false;
         if (!options?.includeExpired && claim.status === 'expired') return false;
         if (!options?.includeReleased && claim.status === 'released') return false;
         if (options?.sessionId && claim.session_id !== options.sessionId) return false;
@@ -1629,7 +1628,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     listHandoffsCrossScope(scope, level: ScopeLevel, options?: HandoffQuery) {
       const currentNow = nowSeconds();
       for (const handoff of state.handoffs) {
-        if (matchesLevel(handoff, scope, level) && isHandoffExpired(handoff, currentNow)) {
+        if (matchesScopeLevel(handoff, scope, level) && isHandoffExpired(handoff, currentNow)) {
           handoff.status = 'expired';
           handoff.decision_reason = 'expired';
           handoff.version += 1;
@@ -1650,7 +1649,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         }
       }
       return state.handoffs.filter((handoff) => {
-        if (!matchesLevel(handoff, scope, level)) return false;
+        if (!matchesScopeLevel(handoff, scope, level)) return false;
         if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
         if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
         if (!options?.actor) return true;
@@ -1770,6 +1769,9 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     getPlaybookById(id: number): Playbook | null {
       return state.playbooks.find((p) => p.id === id) ?? null;
     },
+    getExistingPlaybookIds(ids: number[]): number[] {
+      return filterExistingIds(state.playbooks, ids);
+    },
     getActivePlaybooks(scope: MemoryScope): Playbook[] {
       return state.playbooks.filter(
         (p) => matchesScope(p, scope) && (p.status === 'draft' || p.status === 'active'),
@@ -1777,7 +1779,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     },
     getActivePlaybooksCrossScope(scope: MemoryScope, level: ScopeLevel): Playbook[] {
       return state.playbooks.filter(
-        (p) => matchesLevel(p, scope, level) && (p.status === 'draft' || p.status === 'active'),
+        (p) => matchesScopeLevel(p, scope, level) && (p.status === 'draft' || p.status === 'active'),
       );
     },
     searchPlaybooks(scope: MemoryScope, query: string, options?: SearchOptions): SearchResult<Playbook>[] {
@@ -1807,7 +1809,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       const activeOnly = options?.activeOnly ?? true;
       return state.playbooks
         .filter((p) => {
-          if (!matchesLevel(p, scope, level)) return false;
+          if (!matchesScopeLevel(p, scope, level)) return false;
           if (activeOnly && (p.status === 'archived' || p.status === 'deprecated')) return false;
           const text = `${p.title} ${p.description} ${p.instructions}`.toLowerCase();
           return tokens.every((token) => text.includes(token));
@@ -2026,7 +2028,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     listMemoryEventsCrossScope(scope, level, query) {
       return paginateEvents(
         state.memoryEvents.filter(
-          (item) => matchesLevel(item, scope, level) && matchesEventQuery(item, query),
+          (item) => matchesScopeLevel(item, scope, level) && matchesEventQuery(item, query),
         ),
         query,
       );

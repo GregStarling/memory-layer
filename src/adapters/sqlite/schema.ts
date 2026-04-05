@@ -562,6 +562,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       metadata           TEXT
     );
 
+    -- Current-state projection only; historical claim transitions remain in memory_event_log.
     CREATE TABLE IF NOT EXISTS work_claims_current (
       id                 INTEGER PRIMARY KEY AUTOINCREMENT,
       tenant_id          TEXT    NOT NULL,

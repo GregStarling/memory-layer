@@ -176,30 +176,42 @@ function matchesVisibility(
   }
 }
 
+function isVisibilityAllowed(
+  visibilityClass: MemoryVisibilityClass,
+  item: MemoryScope,
+  scope: MemoryScope,
+  view: ContextViewPolicy,
+): boolean {
+  if (!matchesVisibility(visibilityClass, item, scope)) {
+    return false;
+  }
+  if (view === 'local_only') {
+    return visibilityClass === 'private';
+  }
+  if (view === 'local_plus_shared_collaboration') {
+    return visibilityClass === 'private' || visibilityClass === 'shared_collaboration';
+  }
+  if (view === 'workspace_shared') {
+    return (
+      visibilityClass === 'private' ||
+      visibilityClass === 'shared_collaboration' ||
+      visibilityClass === 'workspace'
+    );
+  }
+  return (
+    visibilityClass === 'private' ||
+    visibilityClass === 'shared_collaboration' ||
+    visibilityClass === 'workspace' ||
+    visibilityClass === 'tenant'
+  );
+}
+
 export function resolveVisibleKnowledge(
   items: KnowledgeMemory[],
   scope: MemoryScope,
   view: ContextViewPolicy,
 ): KnowledgeMemory[] {
-  return items.filter((item) => {
-    if (item.visibility_class === 'tenant') return false;
-    if (view === 'local_only') {
-      return item.visibility_class === 'private' && matchesVisibility('private', item, scope);
-    }
-    if (view === 'local_plus_shared_collaboration' || view === 'operator_supervisor') {
-      return (
-        (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
-        (item.visibility_class === 'shared_collaboration' &&
-          matchesVisibility('shared_collaboration', item, scope))
-      );
-    }
-    return (
-      (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
-      (item.visibility_class === 'shared_collaboration' &&
-        matchesVisibility('shared_collaboration', item, scope)) ||
-      (item.visibility_class === 'workspace' && matchesVisibility('workspace', item, scope))
-    );
-  });
+  return items.filter((item) => isVisibilityAllowed(item.visibility_class, item, scope, view));
 }
 
 export function resolveVisibleWorkItems(
@@ -207,25 +219,7 @@ export function resolveVisibleWorkItems(
   scope: MemoryScope,
   view: ContextViewPolicy,
 ): WorkItem[] {
-  return items.filter((item) => {
-    if (item.visibility_class === 'tenant') return false;
-    if (view === 'local_only') {
-      return item.visibility_class === 'private' && matchesVisibility('private', item, scope);
-    }
-    if (view === 'local_plus_shared_collaboration' || view === 'operator_supervisor') {
-      return (
-        (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
-        (item.visibility_class === 'shared_collaboration' &&
-          matchesVisibility('shared_collaboration', item, scope))
-      );
-    }
-    return (
-      (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
-      (item.visibility_class === 'shared_collaboration' &&
-        matchesVisibility('shared_collaboration', item, scope)) ||
-      (item.visibility_class === 'workspace' && matchesVisibility('workspace', item, scope))
-    );
-  });
+  return items.filter((item) => isVisibilityAllowed(item.visibility_class, item, scope, view));
 }
 
 export function resolveVisiblePlaybooks(
@@ -233,25 +227,7 @@ export function resolveVisiblePlaybooks(
   scope: MemoryScope,
   view: ContextViewPolicy,
 ): Playbook[] {
-  return items.filter((item) => {
-    if (item.visibility_class === 'tenant') return false;
-    if (view === 'local_only') {
-      return item.visibility_class === 'private' && matchesVisibility('private', item, scope);
-    }
-    if (view === 'local_plus_shared_collaboration' || view === 'operator_supervisor') {
-      return (
-        (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
-        (item.visibility_class === 'shared_collaboration' &&
-          matchesVisibility('shared_collaboration', item, scope))
-      );
-    }
-    return (
-      (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
-      (item.visibility_class === 'shared_collaboration' &&
-        matchesVisibility('shared_collaboration', item, scope)) ||
-      (item.visibility_class === 'workspace' && matchesVisibility('workspace', item, scope))
-    );
-  });
+  return items.filter((item) => isVisibilityAllowed(item.visibility_class, item, scope, view));
 }
 
 export function resolveVisibleWorkClaims(
@@ -259,25 +235,7 @@ export function resolveVisibleWorkClaims(
   scope: MemoryScope,
   view: ContextViewPolicy,
 ): WorkClaim[] {
-  return items.filter((item) => {
-    if (item.visibility_class === 'tenant') return false;
-    if (view === 'local_only') {
-      return item.visibility_class === 'private' && matchesVisibility('private', item, scope);
-    }
-    if (view === 'local_plus_shared_collaboration' || view === 'operator_supervisor') {
-      return (
-        (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
-        (item.visibility_class === 'shared_collaboration' &&
-          matchesVisibility('shared_collaboration', item, scope))
-      );
-    }
-    return (
-      (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
-      (item.visibility_class === 'shared_collaboration' &&
-        matchesVisibility('shared_collaboration', item, scope)) ||
-      (item.visibility_class === 'workspace' && matchesVisibility('workspace', item, scope))
-    );
-  });
+  return items.filter((item) => isVisibilityAllowed(item.visibility_class, item, scope, view));
 }
 
 export function resolveVisibleHandoffs(
@@ -285,25 +243,7 @@ export function resolveVisibleHandoffs(
   scope: MemoryScope,
   view: ContextViewPolicy,
 ): HandoffRecord[] {
-  return items.filter((item) => {
-    if (item.visibility_class === 'tenant') return false;
-    if (view === 'local_only') {
-      return item.visibility_class === 'private' && matchesVisibility('private', item, scope);
-    }
-    if (view === 'local_plus_shared_collaboration' || view === 'operator_supervisor') {
-      return (
-        (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
-        (item.visibility_class === 'shared_collaboration' &&
-          matchesVisibility('shared_collaboration', item, scope))
-      );
-    }
-    return (
-      (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
-      (item.visibility_class === 'shared_collaboration' &&
-        matchesVisibility('shared_collaboration', item, scope)) ||
-      (item.visibility_class === 'workspace' && matchesVisibility('workspace', item, scope))
-    );
-  });
+  return items.filter((item) => isVisibilityAllowed(item.visibility_class, item, scope, view));
 }
 
 function resolveContextPolicy(options?: ContextAssemblyOptions): Required<ContextPolicy> {
@@ -511,6 +451,8 @@ export function buildDerivedShortTermState(input: {
     activeObjectives,
     currentObjective,
     activeState: deriveActiveState(workingMemory, input.activeTurns),
+    // The session-state projection intentionally computes a fast-resume subset
+    // even when relevantKnowledge is omitted by projection refresh.
     unresolvedWork: deriveUnresolvedWork(
       workingMemory,
       input.activeTurns,
@@ -557,6 +499,7 @@ export function resolveContextScopeLevel(
   crossScopeLevel: ScopeLevel | undefined,
   view: ContextViewPolicy | undefined,
 ): ScopeLevel | undefined {
+  if (view === 'operator_supervisor') return crossScopeLevel ?? 'tenant';
   if (view && view !== 'local_only') return crossScopeLevel ?? 'workspace';
   return crossScopeLevel;
 }

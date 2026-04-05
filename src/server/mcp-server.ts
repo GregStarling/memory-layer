@@ -22,6 +22,11 @@ import type { ProfileView, ProfileSection } from '../contracts/profile.js';
 import type { CognitiveMemoryType } from '../contracts/cognitive.js';
 import { createSQLiteAdapterWithEmbeddings } from '../adapters/sqlite/index.js';
 import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
+import {
+  parseOptionalFiniteInteger,
+  parseOptionalFiniteNumber,
+  parseOptionalTemporalIdValue,
+} from './parsing.js';
 
 export interface McpServerConfig {
   /** Database path. Defaults to ':memory:'. */
@@ -69,6 +74,8 @@ const MAX_LIST_LIMIT = 100;
 const MANAGER_CACHE_LIMIT = 256;
 const SESSION_MANAGER_CACHE_LIMIT = 256;
 const RUNTIME_CACHE_LIMIT = 256;
+const DEFAULT_DIFF_MAX_EVENTS = 5000;
+const MAX_DIFF_MAX_EVENTS = 20000;
 const TEMPORAL_ENTITY_KINDS = [
   'turn',
   'working_memory',
@@ -81,6 +88,10 @@ const TEMPORAL_ENTITY_KINDS = [
   'work_claim',
   'handoff',
 ] as const;
+
+function failMcpValidation(message: string): never {
+  throw new McpValidationError(message);
+}
 
 const TOOLS: McpTool[] = [
   {
@@ -184,6 +195,10 @@ const TOOLS: McpTool[] = [
           description: 'Optional entity kind filter',
         },
         entityId: { type: 'string', description: 'Optional entity id filter' },
+        maxEvents: {
+          type: 'number',
+          description: `Optional maximum event count to accumulate (default ${DEFAULT_DIFF_MAX_EVENTS}, max ${MAX_DIFF_MAX_EVENTS})`,
+        },
       },
       required: ['from', 'to'],
     },
@@ -349,6 +364,7 @@ const TOOLS: McpTool[] = [
         toActor: { type: 'object' },
         summary: { type: 'string' },
         contextBundleRef: { type: 'string' },
+        expiresAt: { type: 'number' },
       },
       required: ['workItemId', 'fromActor', 'toActor', 'summary'],
     },
@@ -932,17 +948,7 @@ function parseOptionalNonNegativeInteger(value: unknown, name: string): number |
 }
 
 function parseOptionalTemporalId(value: unknown, name: string): string | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value === 'number') {
-    if (!Number.isInteger(value) || value < 0) {
-      throw new McpValidationError(`Invalid field: ${name} (must be a non-negative integer)`);
-    }
-    return String(value);
-  }
-  if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
-    return BigInt(value.trim()).toString();
-  }
-  throw new McpValidationError(`Invalid field: ${name} (must be a non-negative integer)`);
+  return parseOptionalTemporalIdValue(value, name, failMcpValidation);
 }
 
 function resolveScopeInput(
@@ -1185,8 +1191,8 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           );
         }
         case 'memory_get_state_at': {
-          const asOf = typeof args.asOf === 'number' ? args.asOf : NaN;
-          if (!Number.isFinite(asOf)) {
+          const asOf = parseOptionalFiniteNumber(args.asOf, { name: 'asOf' }, failMcpValidation);
+          if (asOf == null) {
             throw new McpValidationError('Missing or invalid field: asOf');
           }
           const state = await requestManager.getStateAt(asOf, {
@@ -1206,29 +1212,29 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
             sessionId: optionalString(args.sessionId, 'sessionId'),
             entityKind: args.entityKind as never,
             entityId: optionalString(args.entityId, 'entityId'),
-            startAt:
-              typeof args.startAt === 'number' && Number.isFinite(args.startAt)
-                ? args.startAt
-                : undefined,
-            endAt:
-              typeof args.endAt === 'number' && Number.isFinite(args.endAt)
-                ? args.endAt
-                : undefined,
+            startAt: parseOptionalFiniteNumber(args.startAt, { name: 'startAt' }, failMcpValidation),
+            endAt: parseOptionalFiniteNumber(args.endAt, { name: 'endAt' }, failMcpValidation),
             limit: parseLimit(args.limit),
             cursor: parseOptionalTemporalId(args.cursor, 'cursor'),
           });
           return jsonResult(serializeTimelineResult(timeline));
         }
         case 'memory_diff_state': {
-          const from = typeof args.from === 'number' ? args.from : NaN;
-          const to = typeof args.to === 'number' ? args.to : NaN;
-          if (!Number.isFinite(from) || !Number.isFinite(to)) {
+          const from = parseOptionalFiniteNumber(args.from, { name: 'from' }, failMcpValidation);
+          const to = parseOptionalFiniteNumber(args.to, { name: 'to' }, failMcpValidation);
+          const maxEvents = parseOptionalFiniteInteger(
+            args.maxEvents,
+            { name: 'maxEvents', min: 1, max: MAX_DIFF_MAX_EVENTS },
+            failMcpValidation,
+          );
+          if (from == null || to == null) {
             throw new McpValidationError('Missing or invalid fields: from/to');
           }
           const diff = await requestManager.diffState(from, to, {
             sessionId: optionalString(args.sessionId, 'sessionId'),
             entityKind: args.entityKind as never,
             entityId: optionalString(args.entityId, 'entityId'),
+            maxEvents: maxEvents ?? DEFAULT_DIFF_MAX_EVENTS,
           });
           return jsonResult(diff);
         }
@@ -1237,14 +1243,8 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
             sessionId: optionalString(args.sessionId, 'sessionId'),
             entityKind: args.entityKind as never,
             entityId: optionalString(args.entityId, 'entityId'),
-            startAt:
-              typeof args.startAt === 'number' && Number.isFinite(args.startAt)
-                ? args.startAt
-                : undefined,
-            endAt:
-              typeof args.endAt === 'number' && Number.isFinite(args.endAt)
-                ? args.endAt
-                : undefined,
+            startAt: parseOptionalFiniteNumber(args.startAt, { name: 'startAt' }, failMcpValidation),
+            endAt: parseOptionalFiniteNumber(args.endAt, { name: 'endAt' }, failMcpValidation),
             limit: parseLimit(args.limit),
             cursor: parseOptionalTemporalId(args.cursor, 'cursor'),
           });
@@ -1342,8 +1342,11 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
                 ? requireEnum(args.visibility_class, MEMORY_VISIBILITY_CLASSES, 'visibility_class')
                 : undefined,
           }, {
-            expectedVersion:
-              typeof args.expectedVersion === 'number' ? args.expectedVersion : undefined,
+            expectedVersion: parseOptionalFiniteInteger(
+              args.expectedVersion,
+              { name: 'expectedVersion', min: 0 },
+              failMcpValidation,
+            ),
           });
           return jsonResult({ workItem: item });
         }
@@ -1353,8 +1356,11 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           const claim = await requestManager.claimWorkItem({
             workItemId: Number(args.workItemId),
             actor,
-            leaseSeconds:
-              typeof args.leaseSeconds === 'number' ? args.leaseSeconds : undefined,
+            leaseSeconds: parseOptionalFiniteInteger(
+              args.leaseSeconds,
+              { name: 'leaseSeconds', min: 1 },
+              failMcpValidation,
+            ),
           });
           return jsonResult({ claim: serializeWorkClaim(claim) });
         }
@@ -1364,7 +1370,11 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           const claim = await requestManager.renewWorkClaim(
             Number(args.claimId),
             actor,
-            typeof args.leaseSeconds === 'number' ? args.leaseSeconds : undefined,
+            parseOptionalFiniteInteger(
+              args.leaseSeconds,
+              { name: 'leaseSeconds', min: 1 },
+              failMcpValidation,
+            ),
           );
           return jsonResult({ claim: claim ? serializeWorkClaim(claim) : null });
         }
@@ -1394,6 +1404,12 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
             toActor,
             summary: requireString(args.summary, 'summary'),
             contextBundleRef: optionalString(args.contextBundleRef, 'contextBundleRef') ?? null,
+            expiresAt:
+              parseOptionalFiniteInteger(
+                args.expiresAt,
+                { name: 'expiresAt', min: 0 },
+                failMcpValidation,
+              ) ?? null,
           });
           return jsonResult({ handoff: serializeHandoffRecord(handoff) });
         }
@@ -1529,7 +1545,11 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
             query: requireString(args.query, 'query'),
             types: Array.isArray(args.types) ? args.types as CognitiveMemoryType[] : undefined,
             limit: parseLimit(args.limit),
-            minimumTrustScore: typeof args.minimumTrustScore === 'number' ? args.minimumTrustScore : undefined,
+            minimumTrustScore: parseOptionalFiniteNumber(
+              args.minimumTrustScore,
+              { name: 'minimumTrustScore', min: 0, max: 1 },
+              failMcpValidation,
+            ),
             activeOnly: args.activeOnly != null ? Boolean(args.activeOnly) : undefined,
           });
           return jsonResult(cognitiveResult);
@@ -1542,7 +1562,11 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
             sections: Array.isArray(args.sections)
               ? args.sections.map((s) => requireEnum(s, ['identity', 'preferences', 'communication', 'constraints', 'workflows'], 'sections')) as ProfileSection[]
               : undefined,
-            minimumTrustScore: typeof args.minimumTrustScore === 'number' ? args.minimumTrustScore : undefined,
+            minimumTrustScore: parseOptionalFiniteNumber(
+              args.minimumTrustScore,
+              { name: 'minimumTrustScore', min: 0, max: 1 },
+              failMcpValidation,
+            ),
             includeProvisional: args.includeProvisional != null ? Boolean(args.includeProvisional) : undefined,
             includeDisputed: args.includeDisputed != null ? Boolean(args.includeDisputed) : undefined,
           });

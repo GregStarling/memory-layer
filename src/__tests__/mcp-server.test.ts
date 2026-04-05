@@ -1,11 +1,18 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import { rmSync } from 'node:fs';
 import { createMcpServerHandler } from '../server/mcp-server.js';
+import { createSQLiteAdapter } from '../adapters/sqlite/index.js';
 
 describe('MCP server handler', () => {
   let handler: ReturnType<typeof createMcpServerHandler>;
+  let cleanupDbPath: string | null = null;
 
   afterEach(async () => {
     if (handler) await handler.close();
+    if (cleanupDbPath) {
+      rmSync(cleanupDbPath, { force: true });
+      cleanupDbPath = null;
+    }
   });
 
   it('lists all expected tools', () => {
@@ -522,6 +529,55 @@ describe('MCP server handler', () => {
     expect(result.content[0].text).toContain('sessionId');
   });
 
+  it('memory_snapshot captures the latest event watermark', async () => {
+    cleanupDbPath = `/tmp/memory-layer-mcp-watermark-${Date.now()}-${Math.random()}.sqlite`;
+    handler = createMcpServerHandler({ dbPath: cleanupDbPath });
+    const adapter = createSQLiteAdapter(cleanupDbPath);
+
+    await handler.callTool('memory_store_exchange', {
+      userContent: 'First event',
+      assistantContent: 'Second event',
+    });
+
+    const latestCursor = adapter.getTemporalWatermark('temporal')?.last_event_id ?? null;
+    const snapshot = await handler.callTool('memory_snapshot', {
+      action: 'capture',
+      sessionId: 'session-watermark',
+    });
+    adapter.close();
+
+    expect(JSON.parse(snapshot.content[0].text).snapshot.watermarkEventId).toBe(latestCursor);
+  });
+
+  it('rejects oversized MCP diff ranges at the default transport cap', async () => {
+    cleanupDbPath = `/tmp/memory-layer-mcp-diff-${Date.now()}-${Math.random()}.sqlite`;
+    handler = createMcpServerHandler({ dbPath: cleanupDbPath });
+    const adapter = createSQLiteAdapter(cleanupDbPath);
+
+    for (let index = 0; index < 5001; index += 1) {
+      adapter.insertTurn({
+        tenant_id: 'default',
+        system_id: 'default',
+        workspace_id: '',
+        collaboration_id: '',
+        scope_id: 'default',
+        session_id: 'session-1',
+        actor: 'user',
+        role: 'user',
+        content: `turn-${index}`,
+      });
+    }
+    adapter.close();
+
+    const result = await handler.callTool('memory_diff_state', {
+      from: 0,
+      to: Math.floor(Date.now() / 1000) + 1,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('maximum of 5000');
+  });
+
   it('returns error for unknown tools', async () => {
     handler = createMcpServerHandler();
 
@@ -549,5 +605,54 @@ describe('MCP server handler', () => {
       scopeLevel: 'planet',
     } as never);
     expect(badScopeLevel.isError).toBe(true);
+
+    const badStateAt = await handler.callTool('memory_get_state_at', {
+      asOf: 'NaN',
+    } as never);
+    expect(badStateAt.isError).toBe(true);
+
+    const badTimelineCursor = await handler.callTool('memory_get_timeline', {
+      cursor: 'abc',
+    } as never);
+    expect(badTimelineCursor.isError).toBe(true);
+
+    const badDiff = await handler.callTool('memory_diff_state', {
+      from: 'Infinity',
+      to: 1,
+    } as never);
+    expect(badDiff.isError).toBe(true);
+
+    const badExpectedVersion = await handler.callTool('memory_update_work_item', {
+      id: 1,
+      expectedVersion: 'NaN',
+    } as never);
+    expect(badExpectedVersion.isError).toBe(true);
+
+    const badLease = await handler.callTool('memory_claim_work_item', {
+      workItemId: 1,
+      actor: { actor_kind: 'agent', actor_id: 'planner' },
+      leaseSeconds: 'Infinity',
+    } as never);
+    expect(badLease.isError).toBe(true);
+
+    const badExpiresAt = await handler.callTool('memory_handoff_work_item', {
+      workItemId: 1,
+      fromActor: { actor_kind: 'agent', actor_id: 'planner' },
+      toActor: { actor_kind: 'human', actor_id: 'operator' },
+      summary: 'Take over',
+      expiresAt: 'Infinity',
+    } as never);
+    expect(badExpiresAt.isError).toBe(true);
+
+    const badCognitiveTrust = await handler.callTool('memory_search_cognitive', {
+      query: 'test',
+      minimumTrustScore: 'Infinity',
+    } as never);
+    expect(badCognitiveTrust.isError).toBe(true);
+
+    const badProfileTrust = await handler.callTool('memory_get_profile', {
+      minimumTrustScore: 'NaN',
+    } as never);
+    expect(badProfileTrust.isError).toBe(true);
   });
 });

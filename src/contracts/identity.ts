@@ -58,6 +58,33 @@ export function scopeValues(scope: MemoryScope): [string, string, string, string
   ];
 }
 
+export function matchesScope(leftScope: MemoryScope, rightScope: MemoryScope): boolean {
+  const left = normalizeScope(leftScope);
+  const right = normalizeScope(rightScope);
+  return (
+    left.tenant_id === right.tenant_id &&
+    left.system_id === right.system_id &&
+    left.workspace_id === right.workspace_id &&
+    left.collaboration_id === right.collaboration_id &&
+    left.scope_id === right.scope_id
+  );
+}
+
+export function matchesScopeLevel(
+  itemScope: MemoryScope,
+  targetScope: MemoryScope,
+  level: ScopeLevel,
+): boolean {
+  const item = normalizeScope(itemScope);
+  const target = normalizeScope(targetScope);
+  if (item.tenant_id !== target.tenant_id) return false;
+  if (level === 'tenant') return true;
+  if (level === 'workspace') return item.workspace_id === target.workspace_id;
+  if (item.system_id !== target.system_id) return false;
+  if (level === 'system') return true;
+  return matchesScope(item, target);
+}
+
 export function widenScope(scope: MemoryScope, level: ScopeLevel): ScopeQuery {
   return {
     scope: normalizeScope(scope),
