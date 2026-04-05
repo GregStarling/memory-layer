@@ -43,6 +43,7 @@ import {
 import { emitMemoryEvent } from './telemetry.js';
 import { assessCandidateTrust, buildKnowledgeConflict } from './trust.js';
 import { getNativeSyncAdapter } from '../adapters/sync-to-async.js';
+import { autoDetectAssociations } from './associations.js';
 
 export interface CompactionResult {
   workingMemory: WorkingMemory;
@@ -1118,6 +1119,20 @@ export async function extractKnowledge(
             (strongestRelation.relation === 'conflict' && policy.conflictStrategy === 'supersede'))
         ) {
           await adapter.supersedeKnowledgeMemory(strongestRelation.related.id, knowledge.id);
+          try {
+            await adapter.insertAssociation({
+              ...normalizedScope,
+              source_kind: 'knowledge',
+              source_id: knowledge.id,
+              target_kind: 'knowledge',
+              target_id: strongestRelation.related.id,
+              association_type: 'supersedes',
+              confidence: 1,
+              auto_generated: true,
+            });
+          } catch {
+            // Unique constraint — association already exists
+          }
         }
 
         await adapter.insertKnowledgeMemoryAudit({
@@ -1213,6 +1228,20 @@ export async function extractKnowledge(
             (strongestRelation.relation === 'conflict' && policy.conflictStrategy === 'supersede'))
         ) {
           syncAdapter.supersedeKnowledgeMemory(strongestRelation.related.id, knowledge.id);
+          try {
+            syncAdapter.insertAssociation({
+              ...normalizedScope,
+              source_kind: 'knowledge',
+              source_id: knowledge.id,
+              target_kind: 'knowledge',
+              target_id: strongestRelation.related.id,
+              association_type: 'supersedes',
+              confidence: 1,
+              auto_generated: true,
+            });
+          } catch {
+            // Unique constraint — association already exists
+          }
         }
 
         syncAdapter.insertKnowledgeMemoryAudit({
@@ -1260,6 +1289,9 @@ export async function extractKnowledge(
       normalized: normalizeKnowledgeMemory(createdFact),
     });
     created.push(createdFact);
+
+    // Auto-detect associations between the new fact and all known knowledge (including batch-created)
+    await autoDetectAssociations(adapter, normalizedScope, createdFact, [...activeKnowledge, ...created.slice(0, -1)]);
   }
 
   emitMemoryEvent('extraction', normalizedScope, options, Date.now() - startedAt, {

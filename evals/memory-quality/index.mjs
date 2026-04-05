@@ -8,6 +8,7 @@ import { runFidelityEvals } from './fidelity.mjs';
 import { runAssociationEvals } from './associations.mjs';
 import { runPlaybookEvals } from './playbooks.mjs';
 import { runProfileEvals } from './profiles.mjs';
+import { runSnapshotEvals } from './snapshots.mjs';
 import { runFalseMemoryEvals } from './false-memory.mjs';
 import { runLongHorizonEvals } from './long-horizon.mjs';
 import { runPlatformQualityEval } from '../platform-quality/index.mjs';
@@ -35,6 +36,7 @@ export async function runMemoryQualityEvals(options = {}) {
     runProfileEvals({ diagnostic }),
     runPlaybookEvals({ diagnostic }),
     runAssociationEvals({ diagnostic }),
+    runSnapshotEvals({ diagnostic }),
   ]);
   const merged = mergeScenarioOutputs(outputs);
   const result = {

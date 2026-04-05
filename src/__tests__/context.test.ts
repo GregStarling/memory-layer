@@ -164,6 +164,53 @@ describe('buildMemoryContext', () => {
     expect(context.activeTurns[0]?.content).toBe('early turn');
   });
 
+  it('filters future and already-resolved work items from historical context', async () => {
+    const scope = makeScope();
+    seedTurns(adapter, scope, 1);
+
+    const historicalObjective = adapter.insertWorkItem({
+      ...scope,
+      session_id: 'session-1',
+      kind: 'objective',
+      title: 'Ship the rollback flow',
+      status: 'open',
+      created_at: 100,
+    });
+    const historicalBlocker = adapter.insertWorkItem({
+      ...scope,
+      session_id: 'session-1',
+      kind: 'unresolved_work',
+      title: 'Audit rollback alarms',
+      status: 'open',
+      created_at: 110,
+    });
+    adapter.updateWorkItemStatus(historicalObjective.id, 'done');
+    adapter.updateWorkItemStatus(historicalBlocker.id, 'done');
+
+    adapter.insertWorkItem({
+      ...scope,
+      session_id: 'session-1',
+      kind: 'unresolved_work',
+      title: 'Already resolved before snapshot',
+      status: 'done',
+      created_at: 120,
+    });
+    adapter.insertWorkItem({
+      ...scope,
+      session_id: 'session-1',
+      kind: 'unresolved_work',
+      title: 'Future blocker',
+      status: 'blocked',
+      created_at: 200,
+    });
+
+    const context = await buildMemoryContext(asyncAdapter, scope, { asOf: 150 });
+    expect(context.activeObjectives.map((item) => item.title)).toContain('Ship the rollback flow');
+    expect(context.unresolvedWork).toContain('Audit rollback alarms');
+    expect(context.unresolvedWork).not.toContain('Already resolved before snapshot');
+    expect(context.unresolvedWork).not.toContain('Future blocker');
+  });
+
   it('returns empty context gracefully', async () => {
     const context = await buildMemoryContext(asyncAdapter, makeScope());
     expect(context.activeTurns).toEqual([]);

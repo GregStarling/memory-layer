@@ -18,11 +18,18 @@ import {
   REFLECT_SYNTHESIS_SYSTEM_PROMPT,
   formatTurnsForSummarization,
 } from '../summarizers/prompts.js';
+import { emitMemoryEvent, type TelemetryOptions } from './telemetry.js';
 
 export interface EpisodicDeps {
   adapter: AsyncStorageAdapter;
   scope: MemoryScope;
   client: StructuredGenerationClient;
+  /**
+   * Optional telemetry hook. When provided, episodic operations emit
+   * observability events for rejected LLM source references so operators
+   * can correlate model-side drift over time.
+   */
+  telemetry?: TelemetryOptions;
 }
 
 interface SessionGroup {
@@ -56,6 +63,20 @@ function groupBySession(
   }
 
   return Array.from(sessionMap.values());
+}
+
+/**
+ * Return true if a unix-seconds timestamp falls within the inclusive
+ * [start_at, end_at] window. Missing bounds mean open-ended on that side.
+ */
+function inTimeRange(
+  createdAt: number,
+  range: { start_at?: number; end_at?: number } | undefined,
+): boolean {
+  if (!range) return true;
+  if (range.start_at != null && createdAt < range.start_at) return false;
+  if (range.end_at != null && createdAt > range.end_at) return false;
+  return true;
 }
 
 function buildSourceRefs(
@@ -104,8 +125,95 @@ function extractJsonPayload(text: string): string {
   throw new Error('Episodic recall: response did not contain JSON');
 }
 
-function parseRecap(text: string, sources: EpisodeSourceReference[]): EpisodeRecap {
+interface SourceValidationResult {
+  sources: EpisodeSourceReference[];
+  /** Number of LLM-supplied refs dropped as unknown/hallucinated/malformed. */
+  rejectedCount: number;
+  /**
+   * True when the LLM supplied an array but zero entries matched advertised
+   * sources, so we fell back to server-derived sources. Signals stronger
+   * drift than partial rejection.
+   */
+  fellBackToServerSources: boolean;
+}
+
+/**
+ * Validate LLM-supplied source references against the set of sources
+ * actually provided to the model. Returns only the matching entries;
+ * unknown/hallucinated refs are dropped. If the validated set is empty,
+ * returns the server-derived sources so callers always see a grounded list.
+ */
+function validateLlmSources(
+  rawSources: unknown,
+  advertised: EpisodeSourceReference[],
+): SourceValidationResult {
+  if (!Array.isArray(rawSources)) {
+    return { sources: advertised, rejectedCount: 0, fellBackToServerSources: false };
+  }
+
+  const allowed = new Map<string, EpisodeSourceReference>();
+  for (const s of advertised) {
+    allowed.set(`${s.type}:${s.id}`, s);
+  }
+
+  const validated: EpisodeSourceReference[] = [];
+  const seen = new Set<string>();
+  let rejectedCount = 0;
+  for (const candidate of rawSources) {
+    if (!candidate || typeof candidate !== 'object') { rejectedCount++; continue; }
+    const c = candidate as { type?: unknown; id?: unknown; excerpt?: unknown };
+    const type =
+      c.type === 'working_memory' ? 'working_memory' : c.type === 'knowledge' ? 'knowledge' : c.type === 'turn' ? 'turn' : null;
+    if (!type) { rejectedCount++; continue; }
+    if (typeof c.id !== 'number' || !Number.isInteger(c.id) || Number.isNaN(c.id)) { rejectedCount++; continue; }
+    const key = `${type}:${c.id}`;
+    if (!allowed.has(key)) { rejectedCount++; continue; }
+    if (seen.has(key)) { rejectedCount++; continue; }
+    seen.add(key);
+    // Prefer the server-side excerpt (ground truth) over the model's.
+    const grounded = allowed.get(key)!;
+    validated.push({
+      type: grounded.type,
+      id: grounded.id,
+      excerpt: grounded.excerpt,
+    });
+  }
+
+  if (validated.length === 0) {
+    return { sources: advertised, rejectedCount, fellBackToServerSources: true };
+  }
+  return { sources: validated, rejectedCount, fellBackToServerSources: false };
+}
+
+/**
+ * Emit an observability signal when LLM source validation rejected any refs.
+ * Operators can use this to correlate source hallucination rates across
+ * models and alert on sudden regressions.
+ */
+function emitSourceValidationEvent(
+  deps: EpisodicDeps,
+  stage: 'recap' | 'reflect',
+  result: SourceValidationResult,
+  advertisedCount: number,
+): void {
+  if (result.rejectedCount === 0 && !result.fellBackToServerSources) return;
+  emitMemoryEvent('manager', deps.scope, deps.telemetry, 0, {
+    action: 'episodic_source_validation',
+    stage,
+    rejectedCount: result.rejectedCount,
+    advertisedCount,
+    fellBackToServerSources: result.fellBackToServerSources,
+  });
+}
+
+function parseRecap(
+  deps: EpisodicDeps,
+  text: string,
+  sources: EpisodeSourceReference[],
+): EpisodeRecap {
   const raw = JSON.parse(extractJsonPayload(text));
+  const validation = validateLlmSources(raw.sources, sources);
+  emitSourceValidationEvent(deps, 'recap', validation, sources.length);
   return {
     objective: String(raw.objective ?? ''),
     actions: Array.isArray(raw.actions) ? raw.actions.map(String) : [],
@@ -113,13 +221,7 @@ function parseRecap(text: string, sources: EpisodeSourceReference[]): EpisodeRec
     artifacts: Array.isArray(raw.artifacts) ? raw.artifacts.map(String) : [],
     unresolvedItems: Array.isArray(raw.unresolvedItems) ? raw.unresolvedItems.map(String) : [],
     sourceType: raw.sourceType === 'declarative' ? 'declarative' : raw.sourceType === 'mixed' ? 'mixed' : 'episodic',
-    sources: Array.isArray(raw.sources)
-      ? raw.sources.map((s: any) => ({
-          type: s.type === 'working_memory' ? 'working_memory' : s.type === 'knowledge' ? 'knowledge' : 'turn',
-          id: Number(s.id),
-          excerpt: s.excerpt != null ? String(s.excerpt) : null,
-        }))
-      : sources,
+    sources: validation.sources,
   };
 }
 
@@ -131,27 +233,65 @@ export async function searchEpisodes(
   const detailLevel = options.detailLevel ?? 'overview';
   const limit = options.limit ?? 10;
 
-  const turnHits = await adapter.searchTurns(scope, options.query, { limit: limit * 5 });
+  // Search turns by query, then filter by the requested time window if any.
+  // The underlying adapter FTS API has no time bound, so the filter is
+  // applied post-query. The query is the primary relevance signal; the time
+  // window only narrows the result set it applies to.
+  const rawTurnHits = await adapter.searchTurns(scope, options.query, { limit: limit * 5 });
+  const turnHits = options.timeRange
+    ? rawTurnHits.filter((h) => inTimeRange(h.item.created_at, options.timeRange))
+    : rawTurnHits;
 
-  // Scope working memory to sessions found in turn hits to avoid leaking unrelated sessions
+  // Gather working memory — scope to sessions with query-matching turn hits.
   const hitSessionIds = new Set(turnHits.map((h) => h.item.session_id));
-  let wmList: WorkingMemory[];
+  const wmPromises = Array.from(hitSessionIds).map(
+    (sid) => adapter.getWorkingMemoryBySession(sid, scope),
+  );
+  let wmList: WorkingMemory[] = (await Promise.all(wmPromises)).flat();
+
+  // Additionally pull compacted sessions whose working-memory SUMMARY matches
+  // the query. When a timeRange is set, restrict the candidate pool to the
+  // window via getWorkingMemoryByTimeRange; otherwise scan active WM. In both
+  // paths we still require a query match so unrelated sessions in the window
+  // do not leak through.
+  const queryLower = options.query.toLowerCase();
+  const candidateWm = options.timeRange
+    ? await adapter.getWorkingMemoryByTimeRange(scope, options.timeRange)
+    : await adapter.getActiveWorkingMemory(scope);
+  for (const wm of candidateWm) {
+    if (!hitSessionIds.has(wm.session_id) && wm.summary.toLowerCase().includes(queryLower)) {
+      hitSessionIds.add(wm.session_id);
+      wmList.push(wm);
+    }
+  }
+
+  // Ensure every WM we hand to the summarizer is within the window when set.
   if (options.timeRange) {
-    const allWm = await adapter.getWorkingMemoryByTimeRange(scope, options.timeRange);
-    wmList = allWm.filter((wm) => hitSessionIds.has(wm.session_id));
-  } else {
-    const wmPromises = Array.from(hitSessionIds).map(
-      (sid) => adapter.getActiveWorkingMemory(scope, sid),
-    );
-    wmList = (await Promise.all(wmPromises)).flat();
+    wmList = wmList.filter((wm) => inTimeRange(wm.created_at, options.timeRange));
   }
 
   const groups = groupBySession(turnHits, wmList);
   const summaries: EpisodeSummary[] = [];
 
   for (const group of groups.slice(0, limit)) {
+    // Partially compacted sessions have both archived and active turns;
+    // summarizing from only one drops earlier context. Always merge both
+    // sets (deduped by turn id) so recaps cover the full session history.
+    let turns = group.turns;
+    if (group.workingMemories.length > 0) {
+      const minStart = Math.min(...group.workingMemories.map((wm) => wm.turn_id_start));
+      const maxEnd = Math.max(...group.workingMemories.map((wm) => wm.turn_id_end));
+      const archived = await adapter.getArchivedTurnRange(group.sessionId, minStart, maxEnd, scope);
+      if (archived.length > 0) {
+        const byId = new Map<number, Turn>();
+        for (const t of archived) byId.set(t.id, t);
+        for (const t of turns) byId.set(t.id, t);
+        turns = Array.from(byId.values()).sort((a, b) => a.id - b.id);
+      }
+    }
+
     const summary = await summarizeEpisode(deps, {
-      turns: group.turns,
+      turns,
       workingMemories: group.workingMemories,
       sessionId: group.sessionId,
       detailLevel,
@@ -199,7 +339,7 @@ export async function summarizeEpisode(
     expectedFormat: 'object',
   });
 
-  const recap = parseRecap(responseText, sources);
+  const recap = parseRecap(deps, responseText, sources);
 
   const turnIds = turns.map((t) => t.id);
   const start = turnIds.length > 0 ? Math.min(...turnIds) : 0;
@@ -230,19 +370,36 @@ export async function reflect(
   let hasDeclarative = false;
 
   if (includeEpisodic) {
-    const turnHits = await adapter.searchTurns(scope, options.query, { limit: limit * 5 });
+    const rawTurnHits = await adapter.searchTurns(scope, options.query, { limit: limit * 5 });
+    const turnHits = options.timeRange
+      ? rawTurnHits.filter((h) => inTimeRange(h.item.created_at, options.timeRange))
+      : rawTurnHits;
 
-    // Scope working memory to sessions found in turn hits to avoid leaking unrelated sessions
+    // Start WM set scoped to sessions with query-matching turn hits.
     const hitSessionIds = new Set(turnHits.map((h) => h.item.session_id));
-    let wmList: WorkingMemory[];
+    const wmPromises = Array.from(hitSessionIds).map(
+      (sid) => adapter.getWorkingMemoryBySession(sid, scope),
+    );
+    let wmList: WorkingMemory[] = (await Promise.all(wmPromises)).flat();
+
+    // Also pull compacted sessions whose WM SUMMARY matches the query.
+    // When a timeRange is set, restrict the candidate pool to the window;
+    // otherwise scan active WM. In both paths we still require a query
+    // match so unrelated sessions do not leak into the reflection.
+    const queryLower = options.query.toLowerCase();
+    const candidateWm = options.timeRange
+      ? await adapter.getWorkingMemoryByTimeRange(scope, options.timeRange)
+      : await adapter.getActiveWorkingMemory(scope);
+    for (const wm of candidateWm) {
+      if (!hitSessionIds.has(wm.session_id) && wm.summary.toLowerCase().includes(queryLower)) {
+        hitSessionIds.add(wm.session_id);
+        wmList.push(wm);
+      }
+    }
+
+    // Keep only WM inside the window when time-bounded.
     if (options.timeRange) {
-      const allWm = await adapter.getWorkingMemoryByTimeRange(scope, options.timeRange);
-      wmList = allWm.filter((wm) => hitSessionIds.has(wm.session_id));
-    } else {
-      const wmPromises = Array.from(hitSessionIds).map(
-        (sid) => adapter.getActiveWorkingMemory(scope, sid),
-      );
-      wmList = (await Promise.all(wmPromises)).flat();
+      wmList = wmList.filter((wm) => inTimeRange(wm.created_at, options.timeRange));
     }
 
     if (turnHits.length > 0 || wmList.length > 0) {
@@ -250,8 +407,10 @@ export async function reflect(
       const turns = turnHits.map((h) => h.item);
       allSources.push(...buildSourceRefs(turns, wmList));
 
-      contextParts.push('Episodic memory (conversation turns):');
-      contextParts.push(formatTurnsForSummarization(turns));
+      if (turns.length > 0) {
+        contextParts.push('Episodic memory (conversation turns):');
+        contextParts.push(formatTurnsForSummarization(turns));
+      }
 
       if (wmList.length > 0) {
         contextParts.push('\nWorking memory summaries:');
@@ -313,17 +472,13 @@ export async function reflect(
   });
 
   const raw = JSON.parse(extractJsonPayload(responseText));
+  const validation = validateLlmSources(raw.sources, allSources);
+  emitSourceValidationEvent(deps, 'reflect', validation, allSources.length);
 
   return {
     synthesis: String(raw.synthesis ?? ''),
     sourceType,
-    sources: Array.isArray(raw.sources)
-      ? raw.sources.map((s: any) => ({
-          type: s.type === 'working_memory' ? 'working_memory' : s.type === 'knowledge' ? 'knowledge' : 'turn',
-          id: Number(s.id),
-          excerpt: s.excerpt != null ? String(s.excerpt) : null,
-        }))
-      : allSources,
+    sources: validation.sources,
     episodes,
     detailLevel,
   };

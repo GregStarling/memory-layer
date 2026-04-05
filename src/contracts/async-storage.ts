@@ -1,5 +1,7 @@
 import type { MemoryScope, ScopeLevel } from './identity.js';
 import type {
+  Association,
+  AssociationTargetKind,
   CompactionLog,
   ContextMonitor,
   ContextMonitorUpsert,
@@ -7,16 +9,21 @@ import type {
   KnowledgeEvidence,
   KnowledgeMemory,
   KnowledgeMemoryAudit,
+  NewAssociation,
   NewCompactionLog,
   NewKnowledgeCandidate,
   NewKnowledgeEvidence,
   NewKnowledgeMemory,
   NewKnowledgeMemoryAudit,
+  NewPlaybook,
+  NewPlaybookRevision,
   NewWorkItem,
   NewTurn,
   NewWorkingMemory,
   PaginationOptions,
   PaginatedResult,
+  Playbook,
+  PlaybookRevision,
   SearchOptions,
   SearchResult,
   TimeRange,
@@ -148,6 +155,38 @@ export interface AsyncStorageAdapter {
   insertCompactionLog(input: NewCompactionLog): Promise<CompactionLog>;
   getCompactionLogById(id: number): Promise<CompactionLog | null>;
   getRecentCompactionLogs(scope: MemoryScope, limit?: number): Promise<CompactionLog[]>;
+
+  insertPlaybook(input: NewPlaybook): Promise<Playbook>;
+  getPlaybookById(id: number): Promise<Playbook | null>;
+  getActivePlaybooks(scope: MemoryScope): Promise<Playbook[]>;
+  searchPlaybooks(
+    scope: MemoryScope,
+    query: string,
+    options?: SearchOptions,
+  ): Promise<SearchResult<Playbook>[]>;
+  updatePlaybook(
+    id: number,
+    patch: {
+      title?: string;
+      description?: string;
+      instructions?: string;
+      references?: string[];
+      templates?: string[];
+      scripts?: string[];
+      assets?: string[];
+      tags?: string[];
+      status?: Playbook['status'];
+    },
+  ): Promise<Playbook | null>;
+  recordPlaybookUse(id: number): Promise<void>;
+  insertPlaybookRevision(input: NewPlaybookRevision): Promise<PlaybookRevision>;
+  getPlaybookRevisions(playbookId: number): Promise<PlaybookRevision[]>;
+
+  insertAssociation(input: NewAssociation): Promise<Association>;
+  getAssociationById(id: number): Promise<Association | null>;
+  getAssociationsFrom(kind: AssociationTargetKind, id: number, scope: MemoryScope): Promise<Association[]>;
+  getAssociationsTo(kind: AssociationTargetKind, id: number, scope: MemoryScope): Promise<Association[]>;
+  deleteAssociation(id: number): Promise<void>;
 
   transaction<T>(fn: () => Promise<T>): Promise<T>;
   close(): Promise<void>;

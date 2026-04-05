@@ -7,6 +7,7 @@ import type Database from 'better-sqlite3';
 import type { EmbeddingAdapter } from '../../contracts/embedding.js';
 import { normalizeScope, scopeValues, type ScopeLevel } from '../../contracts/identity.js';
 import type { StorageAdapter } from '../../contracts/storage.js';
+import { UniqueConstraintError } from '../../contracts/storage.js';
 import type {
   Association,
   AssociationTargetKind,
@@ -1385,20 +1386,44 @@ function createAdapterFromDatabase(
     insertAssociation(input: NewAssociation): Association {
       const scope = normalizeScope(input);
       const now = nowSeconds();
-      const result = db
-        .prepare(
-          `INSERT INTO associations
-            (tenant_id, system_id, workspace_id, collaboration_id, scope_id,
-             source_kind, source_id, target_kind, target_id, association_type, confidence, auto_generated, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          scope.tenant_id, scope.system_id, scope.workspace_id, scope.collaboration_id, scope.scope_id,
-          input.source_kind, input.source_id, input.target_kind, input.target_id,
-          input.association_type, input.confidence ?? 0.5, input.auto_generated ? 1 : 0,
-          input.created_at ?? now,
-        );
+      let result: Database.RunResult;
+      try {
+        result = db
+          .prepare(
+            `INSERT INTO associations
+              (tenant_id, system_id, workspace_id, collaboration_id, scope_id,
+               source_kind, source_id, target_kind, target_id, association_type, confidence, auto_generated, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            scope.tenant_id, scope.system_id, scope.workspace_id, scope.collaboration_id, scope.scope_id,
+            input.source_kind, input.source_id, input.target_kind, input.target_id,
+            input.association_type, input.confidence ?? 0.5, input.auto_generated ? 1 : 0,
+            input.created_at ?? now,
+          );
+      } catch (err) {
+        if (
+          err &&
+          typeof err === 'object' &&
+          (err as { code?: string }).code === 'SQLITE_CONSTRAINT_UNIQUE'
+        ) {
+          throw new UniqueConstraintError(
+            `Association already exists: ${input.source_kind}:${input.source_id} -> ${input.target_kind}:${input.target_id} (${input.association_type})`,
+            err,
+          );
+        }
+        throw err;
+      }
       const row = db.prepare('SELECT * FROM associations WHERE id = ?').get(Number(result.lastInsertRowid)) as any;
+      return {
+        ...row,
+        collaboration_id: row.collaboration_id ?? row.workspace_id,
+        auto_generated: row.auto_generated === 1,
+      };
+    },
+    getAssociationById(id: number): Association | null {
+      const row = db.prepare('SELECT * FROM associations WHERE id = ?').get(id) as any;
+      if (!row) return null;
       return {
         ...row,
         collaboration_id: row.collaboration_id ?? row.workspace_id,

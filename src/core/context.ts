@@ -176,6 +176,25 @@ function deriveUnresolvedWork(
   return [...unresolved];
 }
 
+function isWorkItemActiveAt(item: WorkItem, asOf: number): boolean {
+  return item.created_at <= asOf && !(item.status === 'done' && item.updated_at <= asOf);
+}
+
+async function getContextWorkItems(
+  adapter: AsyncStorageAdapter,
+  scope: MemoryScope,
+  asOf?: number,
+): Promise<WorkItem[]> {
+  if (asOf == null) {
+    return adapter.getActiveWorkItems(scope);
+  }
+
+  const workItems = await adapter.getWorkItemsByTimeRange(scope, { end_at: asOf });
+  return workItems
+    .filter((item) => isWorkItemActiveAt(item, asOf))
+    .sort((a, b) => b.updated_at - a.updated_at || b.created_at - a.created_at || b.id - a.id);
+}
+
 function computeContextTokenEstimate(
   activeTurns: Turn[],
   workingMemory: WorkingMemory | null,
@@ -367,9 +386,8 @@ export async function buildMemoryContext(
   if (asOf != null) {
     activeTurns = activeTurns.filter((turn) => turn.created_at <= asOf);
   }
-  const activeObjectives = (await adapter.getActiveWorkItems(normalizedScope)).filter(
-    (item) => item.kind === 'objective',
-  );
+  const contextWorkItems = await getContextWorkItems(adapter, normalizedScope, asOf);
+  const activeObjectives = contextWorkItems.filter((item) => item.kind === 'objective');
   const workingMemoryCandidates = await adapter.getActiveWorkingMemory(
     normalizedScope,
     options?.sessionId,
@@ -521,7 +539,7 @@ export async function buildMemoryContext(
     ).knowledgeSelectionReasons,
   ];
 
-  const relevantPlaybooks: Playbook[] = options?.relevanceQuery
+  let relevantPlaybooks: Playbook[] = options?.relevanceQuery
     ? (await adapter.searchPlaybooks(normalizedScope, options.relevanceQuery, { limit: 3, activeOnly: true }))
         .map((hit) => hit.item)
     : [];
@@ -609,6 +627,24 @@ export async function buildMemoryContext(
     tokenEstimate = recomputeTokens();
   }
 
+  // Trim playbooks (procedural guidance) before associated knowledge or core
+  // relevant knowledge. A few large playbooks can otherwise push the context
+  // over budget after every other lower-priority category has been trimmed.
+  // Drop the largest playbook first so we shed bytes aggressively rather
+  // than dropping smaller playbooks that may still be useful alongside a
+  // single outsized offender.
+  while (tokenEstimate > policy.tokenBudget && relevantPlaybooks.length > 0) {
+    const sizes = relevantPlaybooks.map((pb) => tokenEstimator(
+      `${pb.title}\n${pb.description}\n${pb.instructions}`,
+    ));
+    let worstIdx = 0;
+    for (let i = 1; i < sizes.length; i++) {
+      if (sizes[i] > sizes[worstIdx]) worstIdx = i;
+    }
+    relevantPlaybooks = relevantPlaybooks.filter((_, i) => i !== worstIdx);
+    tokenEstimate = recomputeTokens();
+  }
+
   // Trim associated knowledge before core relevant knowledge
   while (tokenEstimate > policy.tokenBudget && trimmedAssociated.length > 0) {
     trimmedAssociated = trimmedAssociated.slice(0, -1);
@@ -636,12 +672,11 @@ export async function buildMemoryContext(
 
   const currentObjective = deriveCurrentObjective(workingMemory, activeTurns);
   const activeState = deriveActiveState(workingMemory, activeTurns);
-  const allWorkItems = await adapter.getActiveWorkItems(normalizedScope);
   const unresolvedWork = deriveUnresolvedWork(
     workingMemory,
     activeTurns,
     relevantKnowledge,
-    allWorkItems,
+    contextWorkItems,
   );
 
   emitMemoryEvent('context_assembly', normalizedScope, options, Date.now() - startedAt, {

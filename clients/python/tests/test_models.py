@@ -1,5 +1,6 @@
 from memory_layer_client.models import (
     ChangeListResponse,
+    ContextResponse,
     KnowledgeInspectionResponse,
     KnowledgeListResponse,
     MemoryScope,
@@ -41,3 +42,28 @@ def test_inspection_models_parse_expected_payloads() -> None:
     assert changes.changes[0]["fact"] == "shared"
     assert reverification.demoted_knowledge_ids == [3]
     assert assessment.state == "trusted"
+
+
+def test_context_response_normalizes_unresolved_work_strings_and_legacy_objects() -> None:
+    context = ContextResponse.from_dict(
+        {
+            "currentObjective": "Ship rollout",
+            "activeTurnCount": 1,
+            "workingMemory": None,
+            "relevantKnowledge": [],
+            "activeObjectives": [],
+            "unresolvedWork": [
+                "Document rollback checklist",
+                {"title": "Confirm staging smoke tests"},
+                {"title": ""},
+                {"detail": "ignored"},
+                123,
+            ],
+            "tokenEstimate": 12,
+        }
+    )
+
+    assert context.unresolved_work == [
+        "Document rollback checklist",
+        "Confirm staging smoke tests",
+    ]

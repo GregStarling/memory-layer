@@ -34,6 +34,7 @@ import { createOpenAISummarizer } from '../summarizers/openai.js';
 import { createClaudeExtractor, createOpenAIExtractor } from '../summarizers/extractor.js';
 import type { Summarizer } from './orchestrator.js';
 import { emitMemoryEvent } from './telemetry.js';
+import { detectWorkspace } from './workspace-detect.js';
 
 type QuickAdapterOption = 'sqlite' | 'memory' | StorageAdapter;
 type QuickSummarizerOption = 'claude' | 'openai' | 'extractive' | Summarizer;
@@ -82,6 +83,9 @@ export interface CreateMemoryOptions {
   crossScopeLevel?: MemoryManagerConfig['crossScopeLevel'];
   failurePolicy?: MemoryManagerConfig['failurePolicy'];
   tokenEstimator?: TokenEstimator;
+  autoDetectWorkspace?: boolean;
+  /** Structured generation client for episodic recall, playbooks, and reflect. */
+  structuredClient?: StructuredGenerationClient;
 }
 
 export interface CreateMemoryAsyncOptions extends CreateMemoryOptions {
@@ -364,7 +368,13 @@ export function createMemoryWithAsyncAdapter(options: CreateMemoryAsyncOptions):
 function createMemoryInternal(
   options: CreateMemoryOptions & { asyncAdapter?: AsyncStorageAdapter },
 ): MemoryManager {
-  const scope = resolveScope(options.scope);
+  let scope = resolveScope(options.scope);
+  if (options.autoDetectWorkspace && !scope.workspace_id) {
+    const detectedId = detectWorkspace();
+    if (detectedId) {
+      scope = { ...scope, workspace_id: detectedId };
+    }
+  }
   const preset = resolveMemoryManagerPreset(options.preset);
   const qualityMode = resolveQualityMode(options);
   const qualityConfig = QUALITY_MODE_CONFIG[qualityMode];
@@ -424,6 +434,7 @@ function createMemoryInternal(
     },
     failurePolicy: options.failurePolicy,
     tokenEstimator: options.tokenEstimator,
+    structuredClient: options.structuredClient ?? options.summarizerOptions?.client,
   });
 
   emitMemoryEvent(

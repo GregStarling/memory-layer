@@ -22,7 +22,7 @@ def test_runtime_helper_prepares_prompt_and_commits_exchange(httpx_mock) -> None
             "workingMemory": {"summary": "We are preparing a rollback plan."},
             "relevantKnowledge": [{"fact": "Deployments must remain blue-green."}],
             "activeObjectives": [],
-            "unresolvedWork": [{"title": "Document the rollback checklist"}],
+            "unresolvedWork": ["Document the rollback checklist"],
             "tokenEstimate": 42,
         },
     )
@@ -40,5 +40,6 @@ def test_runtime_helper_prepares_prompt_and_commits_exchange(httpx_mock) -> None
         )
 
     assert "Ship the rollback plan" in result.prepared.prompt
+    assert "Document the rollback checklist" in result.prepared.prompt
     assert result.exchange.user_turn_id == 1
     assert "Using memory" in result.response_text

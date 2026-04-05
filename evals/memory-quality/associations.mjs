@@ -200,11 +200,16 @@ async function evalRetrievalBoost(adapter, asyncAdapter, scope) {
   // associatedKnowledge should exist as a field (backwards compatible)
   const hasField = Array.isArray(context.associatedKnowledge);
 
-  // If relevant knowledge was found, associated should be populated
-  // (depends on whether the search found the staging facts)
+  // If relevant knowledge was found, associated knowledge should be populated
+  // (may be 0 if all associated items are already in relevantKnowledge or filtered by scope/state)
   const relevantFound = context.relevantKnowledge.length > 0;
   const associatedPopulated = relevantFound
-    ? context.associatedKnowledge.length >= 0 // may be 0 if all associations already in relevantKnowledge
+    ? context.associatedKnowledge.length >= 0
+    : true;
+  // Stronger check: at least one associated item OR relevant contains the linked items
+  const associationCoverage = relevantFound
+    ? context.associatedKnowledge.length > 0 ||
+      context.relevantKnowledge.length >= 2 // associated items may have been promoted to relevant
     : true;
 
   // Associated knowledge should not duplicate items already in relevantKnowledge
@@ -216,7 +221,7 @@ async function evalRetrievalBoost(adapter, asyncAdapter, scope) {
     (k) => k.knowledge_state !== 'retired',
   );
 
-  const checks = [hasField, associatedPopulated, noDuplicates, allActive];
+  const checks = [hasField, associatedPopulated, associationCoverage, noDuplicates, allActive];
   const score = ratio(checks.filter(Boolean).length, checks.length);
 
   return {

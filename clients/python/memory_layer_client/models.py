@@ -6,6 +6,22 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 
+def _normalize_unresolved_work(payload: Any) -> list[str]:
+    if not isinstance(payload, list):
+        return []
+
+    normalized: list[str] = []
+    for item in payload:
+        if isinstance(item, str):
+            normalized.append(item)
+            continue
+        if isinstance(item, dict):
+            title = item.get("title")
+            if isinstance(title, str) and title:
+                normalized.append(title)
+    return normalized
+
+
 @dataclass(slots=True)
 class MemoryScope:
     tenant_id: str
@@ -90,7 +106,7 @@ class ContextResponse:
     working_memory: Optional[dict[str, Any]]
     relevant_knowledge: list[dict[str, Any]]
     active_objectives: list[dict[str, Any]]
-    unresolved_work: list[dict[str, Any]]
+    unresolved_work: list[str]
     token_estimate: int
 
     @classmethod
@@ -101,7 +117,7 @@ class ContextResponse:
             working_memory=payload.get("workingMemory"),
             relevant_knowledge=list(payload.get("relevantKnowledge", [])),
             active_objectives=list(payload.get("activeObjectives", [])),
-            unresolved_work=list(payload.get("unresolvedWork", [])),
+            unresolved_work=_normalize_unresolved_work(payload.get("unresolvedWork")),
             token_estimate=int(payload["tokenEstimate"]),
         )
 
@@ -291,6 +307,360 @@ class ReadyResponse:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ReadyResponse":
         return cls(ok=bool(payload["ok"]), scopes=int(payload["scopes"]))
+
+
+@dataclass(slots=True)
+class EpisodeSourceReference:
+    type: str
+    id: int
+    excerpt: Optional[str]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "EpisodeSourceReference":
+        return cls(
+            type=str(payload["type"]),
+            id=int(payload["id"]),
+            excerpt=payload.get("excerpt"),
+        )
+
+
+@dataclass(slots=True)
+class EpisodeRecap:
+    objective: str
+    actions: list[str]
+    outcomes: list[str]
+    artifacts: list[str]
+    unresolved_items: list[str]
+    source_type: str
+    sources: list[EpisodeSourceReference]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "EpisodeRecap":
+        return cls(
+            objective=str(payload["objective"]),
+            actions=[str(a) for a in payload.get("actions", [])],
+            outcomes=[str(o) for o in payload.get("outcomes", [])],
+            artifacts=[str(r) for r in payload.get("artifacts", [])],
+            unresolved_items=[str(u) for u in payload.get("unresolvedItems", [])],
+            source_type=str(payload["sourceType"]),
+            sources=[EpisodeSourceReference.from_dict(s) for s in payload.get("sources", [])],
+        )
+
+
+@dataclass(slots=True)
+class EpisodeSummary:
+    session_id: str
+    recap: EpisodeRecap
+    detail_level: str
+    turn_range: dict[str, int]
+    created_at: int
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "EpisodeSummary":
+        return cls(
+            session_id=str(payload["sessionId"]),
+            recap=EpisodeRecap.from_dict(payload["recap"]),
+            detail_level=str(payload["detailLevel"]),
+            turn_range=dict(payload.get("turnRange", {})),
+            created_at=int(payload["createdAt"]),
+        )
+
+
+@dataclass(slots=True)
+class ReflectResult:
+    synthesis: str
+    source_type: str
+    sources: list[EpisodeSourceReference]
+    episodes: list[EpisodeSummary]
+    detail_level: str
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ReflectResult":
+        return cls(
+            synthesis=str(payload["synthesis"]),
+            source_type=str(payload["sourceType"]),
+            sources=[EpisodeSourceReference.from_dict(s) for s in payload.get("sources", [])],
+            episodes=[EpisodeSummary.from_dict(e) for e in payload.get("episodes", [])],
+            detail_level=str(payload["detailLevel"]),
+        )
+
+
+@dataclass(slots=True)
+class CognitiveMemoryItem:
+    id: int
+    type: str
+    fact: str
+    created_at: int
+    last_accessed_at: int
+    metadata: dict[str, Any]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "CognitiveMemoryItem":
+        return cls(
+            id=int(payload["id"]),
+            type=str(payload["type"]),
+            fact=str(payload["fact"]),
+            created_at=int(payload["createdAt"]),
+            last_accessed_at=int(payload["lastAccessedAt"]),
+            metadata=dict(payload.get("metadata", {})),
+        )
+
+
+@dataclass(slots=True)
+class CognitiveSearchHit:
+    item: CognitiveMemoryItem
+    rank: float
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "CognitiveSearchHit":
+        return cls(
+            item=CognitiveMemoryItem.from_dict(payload["item"]),
+            rank=payload["rank"],
+        )
+
+
+@dataclass(slots=True)
+class CognitiveSearchResult:
+    by_type: dict[str, list[CognitiveSearchHit]]
+    all: list[CognitiveSearchHit]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "CognitiveSearchResult":
+        by_type = {}
+        for key, hits in payload.get("byType", {}).items():
+            by_type[key] = [CognitiveSearchHit.from_dict(h) for h in hits]
+        return cls(
+            by_type=by_type,
+            all=[CognitiveSearchHit.from_dict(h) for h in payload.get("all", [])],
+        )
+
+
+@dataclass(slots=True)
+class EpisodeSearchResponse:
+    episodes: list[EpisodeSummary]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "EpisodeSearchResponse":
+        return cls(
+            episodes=[EpisodeSummary.from_dict(e) for e in payload.get("episodes", [])],
+        )
+
+
+@dataclass(slots=True)
+class ProfileEntry:
+    knowledge_id: int
+    fact: str
+    trust_score: float
+    knowledge_state: str
+    confidence: str
+    last_confirmed_at: Optional[int]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ProfileEntry":
+        return cls(
+            knowledge_id=int(payload["knowledgeId"]),
+            fact=str(payload["fact"]),
+            trust_score=float(payload["trustScore"]),
+            knowledge_state=str(payload["knowledgeState"]),
+            confidence=str(payload["confidence"]),
+            last_confirmed_at=payload.get("lastConfirmedAt"),
+        )
+
+
+@dataclass(slots=True)
+class Profile:
+    view: str
+    sections: dict[str, list[ProfileEntry]]
+    generated_at: int
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "Profile":
+        sections: dict[str, list[ProfileEntry]] = {}
+        for key, entries in payload.get("sections", {}).items():
+            sections[key] = [ProfileEntry.from_dict(e) for e in entries]
+        return cls(
+            view=str(payload["view"]),
+            sections=sections,
+            generated_at=int(payload["generatedAt"]),
+        )
+
+
+@dataclass(slots=True)
+class PlaybookRevision:
+    id: int
+    playbook_id: int
+    instructions: str
+    revision_reason: str
+    source_session_id: Optional[str]
+    created_at: int
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "PlaybookRevision":
+        return cls(
+            id=int(payload["id"]),
+            playbook_id=int(payload["playbook_id"]),
+            instructions=str(payload["instructions"]),
+            revision_reason=str(payload["revision_reason"]),
+            source_session_id=payload.get("source_session_id"),
+            created_at=int(payload["created_at"]),
+        )
+
+
+@dataclass(slots=True)
+class Playbook:
+    id: int
+    title: str
+    description: str
+    instructions: str
+    references: list[str]
+    templates: list[str]
+    scripts: list[str]
+    assets: list[str]
+    tags: list[str]
+    status: str
+    source_session_id: Optional[str]
+    source_working_memory_id: Optional[int]
+    revision_count: int
+    use_count: int
+    last_used_at: Optional[int]
+    created_at: int
+    updated_at: int
+    schema_version: int
+    # Scope fields — required so consumers can trust that a playbook record
+    # carries provenance and tenancy metadata instead of only shallow fields.
+    tenant_id: str
+    system_id: str
+    workspace_id: str
+    collaboration_id: str
+    scope_id: str
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "Playbook":
+        return cls(
+            id=int(payload["id"]),
+            title=str(payload["title"]),
+            description=str(payload["description"]),
+            instructions=str(payload["instructions"]),
+            references=[str(r) for r in payload.get("references", [])],
+            templates=[str(t) for t in payload.get("templates", [])],
+            scripts=[str(s) for s in payload.get("scripts", [])],
+            assets=[str(a) for a in payload.get("assets", [])],
+            tags=[str(t) for t in payload.get("tags", [])],
+            status=str(payload["status"]),
+            source_session_id=payload.get("source_session_id"),
+            source_working_memory_id=payload.get("source_working_memory_id"),
+            revision_count=int(payload.get("revision_count", 0)),
+            use_count=int(payload.get("use_count", 0)),
+            last_used_at=payload.get("last_used_at"),
+            created_at=int(payload["created_at"]),
+            updated_at=int(payload["updated_at"]),
+            schema_version=int(payload.get("schema_version", 1)),
+            tenant_id=str(payload.get("tenant_id", "")),
+            system_id=str(payload.get("system_id", "")),
+            workspace_id=str(payload.get("workspace_id", "")),
+            collaboration_id=str(payload.get("collaboration_id", "")),
+            scope_id=str(payload.get("scope_id", "")),
+        )
+
+
+@dataclass(slots=True)
+class PlaybookSearchHit:
+    """A playbook returned from a ranked search, with its relevance rank."""
+
+    playbook: Playbook
+    rank: float
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "PlaybookSearchHit":
+        return cls(
+            playbook=Playbook.from_dict(payload),
+            rank=float(payload.get("rank", 0.0)),
+        )
+
+
+@dataclass(slots=True)
+class RevisePlaybookResult:
+    playbook: Playbook
+    revision: PlaybookRevision
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "RevisePlaybookResult":
+        return cls(
+            playbook=Playbook.from_dict(payload["playbook"]),
+            revision=PlaybookRevision.from_dict(payload["revision"]),
+        )
+
+
+@dataclass(slots=True)
+class Association:
+    id: int
+    source_kind: str
+    source_id: int
+    target_kind: str
+    target_id: int
+    association_type: str
+    confidence: float
+    auto_generated: bool
+    created_at: int
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "Association":
+        return cls(
+            id=int(payload["id"]),
+            source_kind=str(payload["source_kind"]),
+            source_id=int(payload["source_id"]),
+            target_kind=str(payload["target_kind"]),
+            target_id=int(payload["target_id"]),
+            association_type=str(payload["association_type"]),
+            confidence=float(payload.get("confidence", 0)),
+            auto_generated=bool(payload.get("auto_generated", False)),
+            created_at=int(payload["created_at"]),
+        )
+
+
+@dataclass(slots=True)
+class AssociationNode:
+    kind: str
+    id: int
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "AssociationNode":
+        return cls(
+            kind=str(payload["kind"]),
+            id=int(payload["id"]),
+        )
+
+
+@dataclass(slots=True)
+class AssociationGraph:
+    nodes: list[AssociationNode]
+    edges: list[Association]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "AssociationGraph":
+        return cls(
+            nodes=[AssociationNode.from_dict(n) for n in payload.get("nodes", [])],
+            edges=[Association.from_dict(e) for e in payload.get("edges", [])],
+        )
+
+
+@dataclass(slots=True)
+class SessionSnapshot:
+    snapshot_id: str
+    session_id: str
+    bootstrap: dict[str, Any]
+    context: dict[str, Any]
+    frozen_at: int
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "SessionSnapshot":
+        return cls(
+            snapshot_id=str(payload["snapshotId"]),
+            session_id=str(payload.get("sessionId", "")),
+            bootstrap=dict(payload.get("bootstrap", {})),
+            context=dict(payload.get("context", {})),
+            frozen_at=int(payload["frozenAt"]),
+        )
 
 
 @dataclass(slots=True)

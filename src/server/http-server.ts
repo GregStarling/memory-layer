@@ -7,8 +7,18 @@ import type { MemoryManager } from '../core/manager.js';
 import { normalizeScope, type MemoryScope, type ScopeLevel } from '../contracts/identity.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type { EmbeddingAdapter } from '../contracts/embedding.js';
-import type { MemoryEvent, MemoryEventType } from '../contracts/observability.js';
-import type { FactType, FactConfidence, EpisodeDetailLevel, AssociationTargetKind, AssociationType } from '../contracts/types.js';
+import {
+  MEMORY_EVENT_TYPES,
+  type MemoryEvent,
+  type MemoryEventType,
+} from '../contracts/observability.js';
+import type {
+  FactType,
+  FactConfidence,
+  EpisodeDetailLevel,
+  AssociationTargetKind,
+  AssociationType,
+} from '../contracts/types.js';
 import { EPISODE_DETAIL_LEVELS, PLAYBOOK_STATUSES, ASSOCIATION_TYPES, ASSOCIATION_TARGET_KINDS } from '../contracts/types.js';
 import type { CognitiveMemoryType } from '../contracts/cognitive.js';
 import type { ProfileSection, ProfileView } from '../contracts/profile.js';
@@ -176,6 +186,14 @@ function parseLimit(value: string | undefined): number | undefined {
   return parsed;
 }
 
+function parseOptionalNonNegativeInteger(value: unknown, name: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new HttpRequestError(400, `Invalid field: ${name} (must be a non-negative integer)`);
+  }
+  return value;
+}
+
 function parseScopeLevel(
   value: unknown,
   name: string,
@@ -208,22 +226,12 @@ function resolvePartialScope(
 
 function parseEventTypes(value: string | undefined): Set<MemoryEventType> | undefined {
   if (!value) return undefined;
-  const allowed: MemoryEventType[] = [
-    'manager',
-    'search',
-    'compaction',
-    'extraction',
-    'promotion',
-    'knowledge_change',
-    'context_assembly',
-    'semantic_search',
-  ];
   return new Set(
     value
       .split(',')
       .map((entry) => entry.trim())
       .filter(Boolean)
-      .map((entry) => requireEnum(entry, allowed, 'event_types')),
+      .map((entry) => requireEnum(entry, MEMORY_EVENT_TYPES, 'event_types')),
   );
 }
 
@@ -275,6 +283,20 @@ function resolveRequestScope(
   return fallbackScope ?? 'default';
 }
 
+function materializeScope(scopeInput: string | MemoryScope): MemoryScope {
+  return typeof scopeInput === 'string'
+    ? {
+        tenant_id: 'default',
+        system_id: 'default',
+        scope_id: scopeInput,
+      }
+    : scopeInput;
+}
+
+function cloneSnapshotValue<T>(value: T): T {
+  return structuredClone(value);
+}
+
 function matchesEventScope(event: MemoryEvent, scope: MemoryScope, level: ScopeLevel): boolean {
   const left = normalizeScope(event.scope);
   const right = normalizeScope(scope);
@@ -320,6 +342,37 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
   const enableCors = config.cors ?? true;
   const bodyLimitBytes = config.bodyLimitBytes ?? 1_048_576;
   const managers = new Map<string, MemoryManager>();
+  // Managers keyed by (scope, sessionId) for snapshot endpoints that must
+  // honor the URL-path session instead of the scope's bound default session.
+  const sessionManagers = new Map<string, MemoryManager>();
+  const SESSION_SNAPSHOT_LIMIT = 1000;
+  // Insertion-ordered LRU: Map preserves insertion order; we delete+re-set on
+  // access to refresh recency and evict the oldest when the cap is exceeded.
+  type SessionSnapshotCacheEntry = {
+    snapshotId: string;
+    bootstrap: unknown;
+    context: unknown;
+    frozenAt: number;
+  };
+  const sessionSnapshots = new Map<string, SessionSnapshotCacheEntry>();
+  function touchSnapshot(key: string, snapshot: SessionSnapshotCacheEntry): void {
+    const cachedSnapshot = cloneSnapshotValue(snapshot);
+    sessionSnapshots.delete(key);
+    sessionSnapshots.set(key, cachedSnapshot);
+    while (sessionSnapshots.size > SESSION_SNAPSHOT_LIMIT) {
+      const oldest = sessionSnapshots.keys().next().value;
+      if (oldest === undefined) break;
+      sessionSnapshots.delete(oldest);
+    }
+  }
+  function readSnapshot(key: string): SessionSnapshotCacheEntry | undefined {
+    const snapshot = sessionSnapshots.get(key);
+    if (!snapshot) return undefined;
+    // Refresh LRU recency
+    sessionSnapshots.delete(key);
+    sessionSnapshots.set(key, snapshot);
+    return cloneSnapshotValue(snapshot);
+  }
   const databaseUrl = config.databaseUrl ?? process.env.MEMORY_DATABASE_URL;
 
   const adapterResources: {
@@ -412,6 +465,46 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
     const manager = createHostedManager(scopeInput);
     managers.set(key, manager);
+    return manager;
+  }
+
+  function scopeKeyFor(scopeInput: string | MemoryScope): string {
+    return typeof scopeInput === 'string'
+      ? `scope:${scopeInput}`
+      : JSON.stringify(normalizeScope(scopeInput));
+  }
+
+  /**
+   * Get a manager bound to a specific sessionId under the given scope.
+   * Snapshot endpoints use this so POST/GET/REFRESH against different URL
+   * :sessionId values read from the correct session, not the scope's default.
+   */
+  function getSessionManager(scopeInput: string | MemoryScope, sessionId: string): MemoryManager {
+    const key = `${scopeKeyFor(scopeInput)}|session:${sessionId}`;
+    const existing = sessionManagers.get(key);
+    if (existing) return existing;
+
+    const baseOptions: CreateMemoryOptions = {
+      adapter: 'sqlite',
+      path: config.dbPath ?? ':memory:',
+      scope: scopeInput,
+      sessionId,
+      summarizer: config.summarizer ?? 'extractive',
+      extractor: config.extractor ?? 'regex',
+      preset: config.preset,
+      redactText: config.redactText,
+      qualityMode: config.qualityMode,
+      qualityTier: config.qualityTier,
+      crossScopeLevel: config.crossScopeLevel,
+      autoDetectWorkspace: config.autoDetectWorkspace,
+      structuredClient: config.structuredClient,
+    };
+    const manager = createMemoryWithAsyncAdapter({
+      ...baseOptions,
+      asyncAdapter: adapterResources.asyncAdapter,
+      embeddingAdapter: adapterResources.embeddingAdapter,
+    });
+    sessionManagers.set(key, manager);
     return manager;
   }
 
@@ -808,7 +901,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const scope = resolveRequestScope(config.scope, req, query);
         sseClients.add({
           response: res,
-          scope: typeof scope === 'string' ? undefined : scope,
+          scope: materializeScope(scope),
           scopeLevel: parseScopeLevel(query.scope_level, 'scope_level') ?? 'scope',
           eventTypes: parseEventTypes(query.event_types),
         });
@@ -871,6 +964,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           : undefined;
         const includeDeclarative = body.includeDeclarative != null ? Boolean(body.includeDeclarative) : undefined;
         const includeEpisodic = body.includeEpisodic != null ? Boolean(body.includeEpisodic) : undefined;
+        const reflectLimit = parseOptionalNonNegativeInteger(body.limit, 'limit');
         const timeRange = isRecord(body.timeRange)
           ? {
               start_at: typeof body.timeRange.start_at === 'number' ? body.timeRange.start_at : undefined,
@@ -882,6 +976,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           detailLevel,
           includeDeclarative,
           includeEpisodic,
+          limit: reflectLimit,
           timeRange,
         });
         writeJson(res, 200, result);
@@ -933,11 +1028,13 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           writeError(res, 400, 'Invalid min_trust parameter');
           return;
         }
+        const includeProvisional = query.includeProvisional === 'true' ? true : undefined;
         const includeDisputed = query.includeDisputed === 'true' ? true : undefined;
         const profile = await requestManager.getProfile({
           view,
           sections,
           minimumTrustScore: minTrust,
+          includeProvisional,
           includeDisputed,
         });
         writeJson(res, 200, { profile });
@@ -1060,13 +1157,26 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       if (path === '/v1/associations' && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
         const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const sourceId = Number.isInteger(body.source_id) && (body.source_id as number) > 0
+          ? (body.source_id as number)
+          : (() => { throw new HttpRequestError(400, 'Missing or invalid field: source_id (must be positive integer)'); })();
+        const targetId = Number.isInteger(body.target_id) && (body.target_id as number) > 0
+          ? (body.target_id as number)
+          : (() => { throw new HttpRequestError(400, 'Missing or invalid field: target_id (must be positive integer)'); })();
+        let confidence: number | undefined;
+        if (body.confidence !== undefined && body.confidence !== null) {
+          if (typeof body.confidence !== 'number' || Number.isNaN(body.confidence) || body.confidence < 0 || body.confidence > 1) {
+            throw new HttpRequestError(400, 'Invalid field: confidence (must be a number in [0, 1])');
+          }
+          confidence = body.confidence;
+        }
         const association = await requestManager.addAssociation({
           source_kind: requireEnum(body.source_kind, ASSOCIATION_TARGET_KINDS, 'source_kind'),
-          source_id: typeof body.source_id === 'number' ? body.source_id : (() => { throw new HttpRequestError(400, 'Missing or invalid field: source_id'); })(),
+          source_id: sourceId,
           target_kind: requireEnum(body.target_kind, ASSOCIATION_TARGET_KINDS, 'target_kind'),
-          target_id: typeof body.target_id === 'number' ? body.target_id : (() => { throw new HttpRequestError(400, 'Missing or invalid field: target_id'); })(),
+          target_id: targetId,
           association_type: requireEnum(body.association_type, ASSOCIATION_TYPES, 'association_type'),
-          confidence: typeof body.confidence === 'number' ? body.confidence : undefined,
+          confidence,
           auto_generated: typeof body.auto_generated === 'boolean' ? body.auto_generated : undefined,
         });
         writeJson(res, 201, { association });
@@ -1089,9 +1199,11 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const body = await readBody(req, bodyLimitBytes);
         const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
         const kind = requireEnum(body.kind, ASSOCIATION_TARGET_KINDS, 'kind');
-        const id = typeof body.id === 'number' ? body.id : (() => { throw new HttpRequestError(400, 'Missing or invalid field: id'); })();
-        const maxDepth = typeof body.maxDepth === 'number' ? body.maxDepth : undefined;
-        const maxNodes = typeof body.maxNodes === 'number' ? body.maxNodes : undefined;
+        const id = Number.isInteger(body.id) && (body.id as number) > 0
+          ? (body.id as number)
+          : (() => { throw new HttpRequestError(400, 'Missing or invalid field: id (must be positive integer)'); })();
+        const maxDepth = parseOptionalNonNegativeInteger(body.maxDepth, 'maxDepth');
+        const maxNodes = parseOptionalNonNegativeInteger(body.maxNodes, 'maxNodes');
         const graph = await requestManager.traverseAssociations(kind, id, { maxDepth, maxNodes });
         writeJson(res, 200, graph);
         return;
@@ -1103,6 +1215,70 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
         await requestManager.removeAssociation(Number(assocDeleteMatch[1]));
         writeJson(res, 200, { deleted: true });
+        return;
+      }
+
+      // POST /v1/sessions/:sessionId/snapshot — capture a frozen snapshot
+      const snapshotCaptureMatch = path.match(/^\/v1\/sessions\/([^/]+)\/snapshot$/);
+      if (snapshotCaptureMatch && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const sessionId = decodeURIComponent(snapshotCaptureMatch[1]);
+        const scopeInput = resolveRequestScope(config.scope, req, query, body);
+        // Use session-aware manager so getContext/getSessionBootstrap read
+        // the session named in the URL, not the scope's bound default.
+        const requestManager = getSessionManager(scopeInput, sessionId);
+        const scopeKey = scopeKeyFor(scopeInput);
+        const relevanceQuery = typeof body.relevanceQuery === 'string' ? body.relevanceQuery : undefined;
+        const [bootstrap, context] = await Promise.all([
+          requestManager.getSessionBootstrap(relevanceQuery),
+          requestManager.getContext(relevanceQuery),
+        ]);
+        const snapshot = {
+          snapshotId: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+          bootstrap,
+          context,
+          frozenAt: Math.floor(Date.now() / 1000),
+        };
+        touchSnapshot(`${scopeKey}:${sessionId}`, snapshot);
+        writeJson(res, 201, { snapshot: { ...snapshot, sessionId } });
+        return;
+      }
+
+      // GET /v1/sessions/:sessionId/snapshot — fetch cached snapshot
+      if (snapshotCaptureMatch && req.method === 'GET') {
+        const sessionId = decodeURIComponent(snapshotCaptureMatch[1]);
+        const scopeInput = resolveRequestScope(config.scope, req, query);
+        const scopeKey = scopeKeyFor(scopeInput);
+        const snapshot = readSnapshot(`${scopeKey}:${sessionId}`);
+        if (!snapshot) {
+          writeError(res, 404, 'Snapshot not found');
+          return;
+        }
+        writeJson(res, 200, { snapshot: { ...snapshot, sessionId } });
+        return;
+      }
+
+      // POST /v1/sessions/:sessionId/refresh — re-capture and replace
+      const snapshotRefreshMatch = path.match(/^\/v1\/sessions\/([^/]+)\/refresh$/);
+      if (snapshotRefreshMatch && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const sessionId = decodeURIComponent(snapshotRefreshMatch[1]);
+        const scopeInput = resolveRequestScope(config.scope, req, query, body);
+        const requestManager = getSessionManager(scopeInput, sessionId);
+        const scopeKey = scopeKeyFor(scopeInput);
+        const relevanceQuery = typeof body.relevanceQuery === 'string' ? body.relevanceQuery : undefined;
+        const [bootstrap, context] = await Promise.all([
+          requestManager.getSessionBootstrap(relevanceQuery),
+          requestManager.getContext(relevanceQuery),
+        ]);
+        const snapshot = {
+          snapshotId: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+          bootstrap,
+          context,
+          frozenAt: Math.floor(Date.now() / 1000),
+        };
+        touchSnapshot(`${scopeKey}:${sessionId}`, snapshot);
+        writeJson(res, 200, { snapshot: { ...snapshot, sessionId } });
         return;
       }
 
@@ -1140,6 +1316,11 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
             await cachedManager.close();
           }
           managers.clear();
+          for (const cachedManager of sessionManagers.values()) {
+            await cachedManager.close();
+          }
+          sessionManagers.clear();
+          sessionSnapshots.clear();
           await adapterResources.close();
         },
       });

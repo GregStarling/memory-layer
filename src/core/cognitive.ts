@@ -121,7 +121,7 @@ export async function searchCognitive(
 
   // Episodic: search turns and map to cognitive items
   if (requestedTypes.includes('episodic')) {
-    const turnHits = await adapter.searchTurns(scope, options.query, { limit });
+    const turnHits = await adapter.searchTurns(scope, options.query, { limit, activeOnly });
     for (const hit of turnHits) {
       const turn = hit.item;
       all.push({

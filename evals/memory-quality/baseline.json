@@ -28,6 +28,9 @@
     "playbookRevisionContinuity": 1,
     "associationAutoDetection": 1,
     "associationTraversalBounds": 1,
-    "associationRetrievalBoost": 1
+    "associationRetrievalBoost": 1,
+    "snapshotStability": 1,
+    "snapshotLiveWrites": 1,
+    "snapshotRefresh": 1
   }
 }

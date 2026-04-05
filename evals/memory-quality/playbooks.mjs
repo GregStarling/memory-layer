@@ -1,5 +1,6 @@
 import { createSQLiteAdapter } from '../../dist/adapters/sqlite/index.js';
 import { wrapSyncAdapter } from '../../dist/adapters/sync-to-async.js';
+import { revisePlaybook } from '../../dist/core/playbook.js';
 import { assertScenario, ratio, tagEvalOutput } from './shared.mjs';
 
 function nowSec() {
@@ -113,45 +114,55 @@ async function evalRevisionContinuity(adapter, asyncAdapter, scope) {
     return { metric: 0, passed: false, error: 'Deploy playbook not found' };
   }
 
+  const originalInstructions = deployPlaybook.instructions;
+
   // Record a use first
   await asyncAdapter.recordPlaybookUse(deployPlaybook.id);
   const afterUse = await asyncAdapter.getPlaybookById(deployPlaybook.id);
   const useRecorded = afterUse && afterUse.use_count === 1;
 
-  // Revise the playbook
+  // Revise using the real revisePlaybook flow (not raw insertPlaybookRevision)
   const newInstructions = '1. Run tests locally\n2. Push to staging branch\n3. Verify health checks\n4. Run integration tests\n5. Notify team on Slack';
-  const revision = await asyncAdapter.insertPlaybookRevision({
-    ...scope,
-    playbook_id: deployPlaybook.id,
-    instructions: newInstructions,
-    revision_reason: 'Added Slack notification step',
-    source_session_id: 'session-deploy-2',
-  });
+  const result = await revisePlaybook(
+    asyncAdapter,
+    scope,
+    deployPlaybook.id,
+    newInstructions,
+    'Added Slack notification step',
+    'session-deploy-2',
+  );
 
-  // Verify revision was created
-  const revisionValid =
-    revision.playbook_id === deployPlaybook.id &&
-    revision.instructions.includes('Slack') &&
-    revision.revision_reason === 'Added Slack notification step' &&
-    revision.source_session_id === 'session-deploy-2';
+  // Verify revision preserved the OLD instructions
+  const revisionPreservedOld =
+    result.revision.instructions === originalInstructions;
 
-  // Fetch revision history
+  // Verify the playbook was updated with NEW instructions
+  const playbookUpdated =
+    result.playbook.instructions === newInstructions;
+
+  // Verify revision metadata
+  const revisionMetadataValid =
+    result.revision.playbook_id === deployPlaybook.id &&
+    result.revision.revision_reason === 'Added Slack notification step' &&
+    result.revision.source_session_id === 'session-deploy-2';
+
+  // Fetch revision history and verify
   const revisions = await asyncAdapter.getPlaybookRevisions(deployPlaybook.id);
   const hasRevisionHistory = revisions.length >= 1;
-  const revisionsOrdered = revisions.length >= 1 && revisions[0].id === revision.id;
 
-  // Verify the playbook getById still works
+  // Verify the playbook getById returns updated version
   const fetched = await asyncAdapter.getPlaybookById(deployPlaybook.id);
-  const fetchedValid = fetched && fetched.id === deployPlaybook.id;
+  const fetchedHasNewInstructions = fetched && fetched.instructions === newInstructions;
 
-  const checks = [useRecorded, revisionValid, hasRevisionHistory, revisionsOrdered, fetchedValid];
+  const checks = [useRecorded, revisionPreservedOld, playbookUpdated, revisionMetadataValid, hasRevisionHistory, fetchedHasNewInstructions];
   const score = ratio(checks.filter(Boolean).length, checks.length);
 
   return {
     metric: score,
     passed: score >= 0.9,
     useCount: afterUse?.use_count,
-    revisionId: revision.id,
+    revisionPreservedOld,
+    playbookUpdated,
     revisionCount: revisions.length,
   };
 }
@@ -198,7 +209,10 @@ export async function runPlaybookEvals(_options = {}) {
           },
           playbookRevisionContinuity: {
             stage: 'revise_playbook',
-            revisionId: revision.revisionId,
+            useCount: revision.useCount,
+            revisionCount: revision.revisionCount,
+            revisionPreservedOld: revision.revisionPreservedOld,
+            playbookUpdated: revision.playbookUpdated,
           },
         },
       },

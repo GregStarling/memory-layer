@@ -1,5 +1,6 @@
 import type { MemoryScope } from '../contracts/identity.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
+import { UniqueConstraintError } from '../contracts/storage.js';
 import type {
   Association,
   AssociationTargetKind,
@@ -29,14 +30,23 @@ export async function traverseAssociations(
   startId: number,
   options: TraversalOptions = {},
 ): Promise<AssociationGraph> {
-  const maxDepth = options.maxDepth ?? 2;
-  const maxNodes = options.maxNodes ?? 20;
+  if (!Number.isInteger(startId) || startId <= 0) {
+    throw new Error(`traverseAssociations: startId must be a positive integer, got ${startId}`);
+  }
+  const maxDepth = normalizeTraversalBound(options.maxDepth, 2, 'maxDepth');
+  const maxNodes = normalizeTraversalBound(options.maxNodes, 20, 'maxNodes');
 
   const visitedKey = (kind: AssociationTargetKind, id: number) => `${kind}:${id}`;
   const visited = new Set<string>();
   const nodes: AssociationNode[] = [];
   const edges: Association[] = [];
   const edgeIds = new Set<number>();
+
+  // Cap includes the start node. If maxNodes is 0 (or effectively unusable),
+  // return an empty graph rather than silently allowing a single-node result.
+  if (maxNodes < 1) {
+    return { nodes, edges };
+  }
 
   const queue: Array<{ kind: AssociationTargetKind; id: number; depth: number }> = [
     { kind: startKind, id: startId, depth: 0 },
@@ -82,6 +92,20 @@ export async function traverseAssociations(
   }
 
   return { nodes, edges };
+}
+
+function normalizeTraversalBound(
+  value: number | undefined,
+  defaultValue: number,
+  name: string,
+): number {
+  if (value === undefined) return defaultValue;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new Error(
+      `traverseAssociations: ${name} must be a non-negative integer, got ${value}`,
+    );
+  }
+  return value;
 }
 
 function tokenize(text: string): Set<string> {
@@ -186,10 +210,37 @@ export async function autoDetectAssociations(
         auto_generated: true,
       });
       created.push(association);
-    } catch {
+    } catch (err) {
+      if (!isUniqueConstraintError(err)) {
+        throw err;
+      }
       // Unique constraint violation — association already exists, skip
     }
   }
 
   return created;
+}
+
+/**
+ * Detect whether an adapter error represents a duplicate-edge unique
+ * constraint violation.
+ *
+ * All bundled adapters throw the structured `UniqueConstraintError` class.
+ * The code/message fallbacks below exist only for defence-in-depth against
+ * third-party or older adapter implementations that have not adopted the
+ * typed error yet.
+ */
+function isUniqueConstraintError(err: unknown): boolean {
+  if (err instanceof UniqueConstraintError) return true;
+  if (!err || typeof err !== 'object') return false;
+  const anyErr = err as { code?: string; message?: string; kind?: string };
+  if (anyErr.kind === 'UniqueConstraintError') return true;
+  // Postgres: 23505 unique_violation
+  if (anyErr.code === '23505') return true;
+  // better-sqlite3: SQLITE_CONSTRAINT_UNIQUE
+  if (anyErr.code === 'SQLITE_CONSTRAINT_UNIQUE') return true;
+  const message = typeof anyErr.message === 'string' ? anyErr.message : '';
+  if (message.includes('Association already exists')) return true;
+  if (message.toLowerCase().includes('unique constraint')) return true;
+  return false;
 }

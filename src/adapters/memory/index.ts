@@ -1,5 +1,6 @@
 import { normalizeScope, type MemoryScope, type ScopeLevel } from '../../contracts/identity.js';
 import type { StorageAdapter } from '../../contracts/storage.js';
+import { UniqueConstraintError } from '../../contracts/storage.js';
 import type {
   Association,
   CompactionLog,
@@ -908,7 +909,9 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
           a.association_type === input.association_type,
       );
       if (existing) {
-        throw new Error('Association already exists');
+        throw new UniqueConstraintError(
+          `Association already exists: ${input.source_kind}:${input.source_id} -> ${input.target_kind}:${input.target_id} (${input.association_type})`,
+        );
       }
       const record: Association = {
         ...scope,
@@ -924,6 +927,9 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       };
       state.associations.push(record);
       return record;
+    },
+    getAssociationById(id: number): Association | null {
+      return state.associations.find((a) => a.id === id) ?? null;
     },
     getAssociationsFrom(kind, id, scope): Association[] {
       return state.associations.filter(

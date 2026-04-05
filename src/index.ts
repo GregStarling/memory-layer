@@ -142,8 +142,12 @@ export type {
   NewPlaybook,
   PlaybookRevision,
   NewPlaybookRevision,
+  AssociationType,
+  AssociationTargetKind,
+  Association,
+  NewAssociation,
 } from './contracts/types.js';
-export { EPISODE_DETAIL_LEVELS } from './contracts/types.js';
+export { EPISODE_DETAIL_LEVELS, ASSOCIATION_TYPES, ASSOCIATION_TARGET_KINDS } from './contracts/types.js';
 export type {
   CompactionAction,
   DriftSignalType,
@@ -169,6 +173,8 @@ export type {
   BeforeModelCallResult,
   AfterModelCallInput,
   RuntimeWorkItemSuggestion,
+  SessionSnapshot,
+  SnapshotRuntimeOptions,
 } from './core/runtime.js';
 export type {
   CompactionResult,
@@ -220,6 +226,8 @@ export {
 export { searchEpisodes, summarizeEpisode, reflect } from './core/episodic.js';
 export type { EpisodicDeps } from './core/episodic.js';
 export { searchCognitive } from './core/cognitive.js';
+export { traverseAssociations, autoDetectAssociations } from './core/associations.js';
+export type { AssociationNode, AssociationGraph, TraversalOptions } from './core/associations.js';
 export type {
   ProfileView,
   ProfileSection,

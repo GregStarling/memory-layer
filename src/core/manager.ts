@@ -234,6 +234,87 @@ function manualKnowledgeClassForFactType(factType: FactType): KnowledgeMemory['k
   }
 }
 
+/**
+ * Resolve an association endpoint (source or target) and verify it exists
+ * and belongs to the caller's normalized scope. Throws a descriptive error
+ * if the node is missing or cross-scope. This is the sole authority on
+ * association ID validity; HTTP/MCP layers should NOT rely on their own
+ * type checks for scope safety.
+ */
+async function assertAssociationEndpointInScope(
+  adapter: AsyncStorageAdapter,
+  norm: ReturnType<typeof normalizeScope>,
+  kind: AssociationTargetKind,
+  id: number,
+  role: 'source' | 'target',
+): Promise<void> {
+  const scopedMatch = (record: {
+    tenant_id: string;
+    system_id: string;
+    workspace_id: string;
+    collaboration_id: string;
+    scope_id: string;
+  }) =>
+    record.tenant_id === norm.tenant_id &&
+    record.system_id === norm.system_id &&
+    record.workspace_id === norm.workspace_id &&
+    record.collaboration_id === norm.collaboration_id &&
+    record.scope_id === norm.scope_id;
+
+  if (kind === 'knowledge') {
+    const km = await adapter.getKnowledgeMemoryById(id);
+    if (!km) {
+      throw new Error(`addAssociation: ${role} knowledge ${id} does not exist`);
+    }
+    if (!scopedMatch(km)) {
+      throw new Error(`addAssociation: ${role} knowledge ${id} is not in the current scope`);
+    }
+    return;
+  }
+  if (kind === 'playbook') {
+    const pb = await adapter.getPlaybookById(id);
+    if (!pb) {
+      throw new Error(`addAssociation: ${role} playbook ${id} does not exist`);
+    }
+    if (!scopedMatch(pb)) {
+      throw new Error(`addAssociation: ${role} playbook ${id} is not in the current scope`);
+    }
+    return;
+  }
+  if (kind === 'working_memory') {
+    const wm = await adapter.getWorkingMemoryById(id);
+    if (!wm) {
+      throw new Error(`addAssociation: ${role} working_memory ${id} does not exist`);
+    }
+    if (!scopedMatch(wm)) {
+      throw new Error(`addAssociation: ${role} working_memory ${id} is not in the current scope`);
+    }
+    return;
+  }
+  if (kind === 'work_item') {
+    const items = await adapter.getActiveWorkItems(norm);
+    const match = items.find((item) => item.id === id);
+    if (!match) {
+      throw new Error(`addAssociation: ${role} work_item ${id} does not exist in the current scope`);
+    }
+    return;
+  }
+  // Exhaustiveness: AssociationTargetKind has no other members.
+  throw new Error(`addAssociation: unknown ${role} kind '${kind as string}'`);
+}
+
+/**
+ * Merge archived and active turns by id, preserving order by turn id.
+ * Partially compacted sessions have both sets; summarizing from only one
+ * drops context, so callers should always pass the union through this.
+ */
+function mergeTurnsById(archived: Turn[], active: Turn[]): Turn[] {
+  const byId = new Map<number, Turn>();
+  for (const t of archived) byId.set(t.id, t);
+  for (const t of active) byId.set(t.id, t);
+  return Array.from(byId.values()).sort((a, b) => a.id - b.id);
+}
+
 function knowledgeMatchesScope(knowledge: KnowledgeMemory, scope: MemoryScope): boolean {
   const normalized = normalizeScope(scope);
   return (
@@ -522,9 +603,12 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
   async function getContextInternal(relevanceQuery?: string, asOf?: number): Promise<MemoryContext> {
     const activeTurns = await asyncAdapter.getActiveTurns(config.scope, config.sessionId);
+    const relevantTurns = asOf == null
+      ? activeTurns
+      : activeTurns.filter((turn) => turn.created_at <= asOf);
     const queryVector = await buildQueryVector(
       relevanceQuery ??
-        activeTurns
+        relevantTurns
           .slice(-4)
           .map((turn) => turn.content)
           .join('\n'),
@@ -1031,7 +1115,12 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         throw new Error('searchEpisodes requires a structuredClient in MemoryManagerConfig');
       }
       return searchEpisodes(
-        { adapter: asyncAdapter, scope: config.scope, client: config.structuredClient },
+        {
+          adapter: asyncAdapter,
+          scope: config.scope,
+          client: config.structuredClient,
+          telemetry: { logger: config.logger, onEvent },
+        },
         options,
       );
     },
@@ -1041,18 +1130,27 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         throw new Error('summarizeEpisode requires a structuredClient in MemoryManagerConfig');
       }
       const detailLevel = options?.detailLevel ?? 'overview';
-      // Fetch both active and all session working memories to include post-compaction data
+      // Fetch both active and all session working memories. Partially
+      // compacted sessions have BOTH archived history (covered by working
+      // memory turn ranges) and active turns; a recap built from only the
+      // active fragment silently drops earlier context, so we always merge
+      // archived + active and dedupe by turn id.
       const activeTurns = await asyncAdapter.getActiveTurns(config.scope, sessionId);
       const allSessionWm = await asyncAdapter.getWorkingMemoryBySession(sessionId, config.scope);
-      // If active turns are empty (compacted), retrieve archived turns from working memory turn ranges
-      let turns = activeTurns;
-      if (turns.length === 0 && allSessionWm.length > 0) {
+      let archivedTurns: Turn[] = [];
+      if (allSessionWm.length > 0) {
         const minStart = Math.min(...allSessionWm.map((wm) => wm.turn_id_start));
         const maxEnd = Math.max(...allSessionWm.map((wm) => wm.turn_id_end));
-        turns = await asyncAdapter.getArchivedTurnRange(sessionId, minStart, maxEnd, config.scope);
+        archivedTurns = await asyncAdapter.getArchivedTurnRange(sessionId, minStart, maxEnd, config.scope);
       }
+      const turns = mergeTurnsById(archivedTurns, activeTurns);
       return summarizeEpisode(
-        { adapter: asyncAdapter, scope: config.scope, client: config.structuredClient },
+        {
+          adapter: asyncAdapter,
+          scope: config.scope,
+          client: config.structuredClient,
+          telemetry: { logger: config.logger, onEvent },
+        },
         { turns, workingMemories: allSessionWm, sessionId, detailLevel, client: config.structuredClient },
       );
     },
@@ -1062,7 +1160,12 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         throw new Error('reflect requires a structuredClient in MemoryManagerConfig');
       }
       return reflect(
-        { adapter: asyncAdapter, scope: config.scope, client: config.structuredClient },
+        {
+          adapter: asyncAdapter,
+          scope: config.scope,
+          client: config.structuredClient,
+          telemetry: { logger: config.logger, onEvent },
+        },
         options,
       );
     },
@@ -1152,9 +1255,41 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     },
 
     async addAssociation(input) {
+      // Validate source/target IDs are positive integers. Callers (HTTP/MCP)
+      // only check typeof number, so this is the authoritative guard.
+      if (!Number.isInteger(input.source_id) || input.source_id <= 0) {
+        throw new Error(`addAssociation: source_id must be a positive integer, got ${input.source_id}`);
+      }
+      if (!Number.isInteger(input.target_id) || input.target_id <= 0) {
+        throw new Error(`addAssociation: target_id must be a positive integer, got ${input.target_id}`);
+      }
+      if (input.source_kind === input.target_kind && input.source_id === input.target_id) {
+        throw new Error('addAssociation: self-referential associations are not allowed');
+      }
+      // Validate confidence is in [0, 1] when provided.
+      if (input.confidence !== undefined) {
+        if (
+          typeof input.confidence !== 'number' ||
+          Number.isNaN(input.confidence) ||
+          input.confidence < 0 ||
+          input.confidence > 1
+        ) {
+          throw new Error(`addAssociation: confidence must be a number in [0, 1], got ${input.confidence}`);
+        }
+      }
+      // Resolve source and target: both must exist and belong to the caller's
+      // scope. Without this, callers can create orphaned or cross-scope edges,
+      // polluting the graph and weakening isolation guarantees.
+      const norm = normalizeScope(config.scope);
+      await assertAssociationEndpointInScope(
+        asyncAdapter, norm, input.source_kind, input.source_id, 'source',
+      );
+      await assertAssociationEndpointInScope(
+        asyncAdapter, norm, input.target_kind, input.target_id, 'target',
+      );
       return asyncAdapter.insertAssociation({
         ...input,
-        ...normalizeScope(config.scope),
+        ...norm,
       });
     },
 
@@ -1172,35 +1307,25 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
     async removeAssociation(id) {
       // Scope safety: verify the association belongs to the current scope by
-      // scanning across all target kinds, not just knowledge.
-      const norm = normalizeScope(config.scope);
-      const kinds: AssociationTargetKind[] = ['knowledge', 'playbook', 'working_memory', 'work_item'];
-      let found = false;
-      for (const kind of kinds) {
-        if (found) break;
-        // Collect all source IDs for this kind in-scope
-        let ids: number[] = [];
-        if (kind === 'knowledge') {
-          ids = (await asyncAdapter.getActiveKnowledgeMemory(norm)).map((k) => k.id);
-        } else if (kind === 'playbook') {
-          ids = (await asyncAdapter.getActivePlaybooks(norm)).map((p) => p.id);
-        } else if (kind === 'working_memory') {
-          ids = (await asyncAdapter.getActiveWorkingMemory(norm)).map((w) => w.id);
-        } else if (kind === 'work_item') {
-          ids = (await asyncAdapter.getActiveWorkItems(norm)).map((w) => w.id);
-        }
-        for (const nodeId of ids) {
-          const [from, to] = await Promise.all([
-            asyncAdapter.getAssociationsFrom(kind, nodeId, norm),
-            asyncAdapter.getAssociationsTo(kind, nodeId, norm),
-          ]);
-          if (from.some((a) => a.id === id) || to.some((a) => a.id === id)) {
-            found = true;
-            break;
-          }
-        }
+      // checking the association row's own scope columns. Scanning through
+      // active knowledge/playbooks/WM/work items would incorrectly reject
+      // associations attached to archived/expired/orphaned nodes, leaving
+      // stale edges permanently in the graph.
+      if (!Number.isInteger(id) || id <= 0) {
+        throw new Error(`removeAssociation: id must be a positive integer, got ${id}`);
       }
-      if (!found) {
+      const association = await asyncAdapter.getAssociationById(id);
+      if (!association) {
+        throw new Error(`Association ${id} not found`);
+      }
+      const norm = normalizeScope(config.scope);
+      if (
+        association.tenant_id !== norm.tenant_id ||
+        association.system_id !== norm.system_id ||
+        association.workspace_id !== norm.workspace_id ||
+        association.collaboration_id !== norm.collaboration_id ||
+        association.scope_id !== norm.scope_id
+      ) {
         throw new Error(`Association ${id} not found in the current scope`);
       }
       await asyncAdapter.deleteAssociation(id);

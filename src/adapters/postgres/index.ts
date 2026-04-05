@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 import type { AsyncStorageAdapter } from '../../contracts/async-storage.js';
+import { UniqueConstraintError } from '../../contracts/storage.js';
 import type {
   EmbeddingAdapter,
   EmbeddingVector,
@@ -569,17 +570,18 @@ export function createPostgresAdapter(
     },
 
     async searchTurns(scope, queryText, searchOptions) {
+      // scopeParams occupies $1..$5. queryText binds at $6 and limit at $7.
       const params = scopeParams(scope);
       const limit = searchOptions?.limit ?? 10;
       params.push(queryText, limit);
       const activeClause = searchOptions?.activeOnly ? ` AND status = 'active'` : '';
       const { rows } = await pool.query(
-        `SELECT *, ts_rank(search_vector, plainto_tsquery('english', $5)) AS rank
+        `SELECT *, ts_rank(search_vector, plainto_tsquery('english', $6)) AS rank
          FROM turns
          WHERE ${scopeWhere()} ${activeClause}
-           AND search_vector @@ plainto_tsquery('english', $5)
+           AND search_vector @@ plainto_tsquery('english', $6)
          ORDER BY rank DESC
-         LIMIT $6`,
+         LIMIT $7`,
         params,
       );
       return rows.map((row) => ({
@@ -704,7 +706,7 @@ export function createPostgresAdapter(
          input.last_confirmed_at ?? null, input.confirmation_count ?? 0,
          input.source_system_id ?? n.system_id, input.source_scope_id ?? n.scope_id,
          input.source_collaboration_id ?? n.collaboration_id,
-         input.source_working_memory_id ?? null, input.source_turn_ids ?? [],
+         input.source_working_memory_id ?? null, JSON.stringify(input.source_turn_ids ?? []),
          input.successful_use_count ?? 0, input.failed_use_count ?? 0,
          input.disputed_at ?? null, input.dispute_reason ?? null, input.contradiction_score ?? 0,
          input.superseded_at ?? null, input.retired_at ?? null, now()],
@@ -920,17 +922,18 @@ export function createPostgresAdapter(
     },
 
     async searchKnowledge(scope, queryText, searchOptions) {
+      // scopeParams occupies $1..$5. queryText binds at $6 and limit at $7.
       const params = scopeParams(scope);
       const limit = searchOptions?.limit ?? 10;
       const activeClause = searchOptions?.activeOnly ? ' AND superseded_by_id IS NULL AND retired_at IS NULL' : '';
       params.push(queryText, limit);
       const { rows } = await pool.query(
-        `SELECT *, ts_rank(search_vector, plainto_tsquery('english', $5)) AS rank
+        `SELECT *, ts_rank(search_vector, plainto_tsquery('english', $6)) AS rank
          FROM knowledge_memory
          WHERE ${scopeWhere()} ${activeClause}
-           AND search_vector @@ plainto_tsquery('english', $5)
+           AND search_vector @@ plainto_tsquery('english', $6)
          ORDER BY rank DESC
-         LIMIT $6`,
+         LIMIT $7`,
         params,
       );
       return rows
@@ -1261,17 +1264,33 @@ export function createPostgresAdapter(
 
     async insertAssociation(input) {
       const n = normalizeScope(input);
-      const { rows } = await pool.query(
-        `INSERT INTO associations
-          (tenant_id, system_id, workspace_id, collaboration_id, scope_id,
-           source_kind, source_id, target_kind, target_id, association_type, confidence, auto_generated, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-         RETURNING *`,
-        [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id,
-         input.source_kind, input.source_id, input.target_kind, input.target_id,
-         input.association_type, input.confidence ?? 0.5, input.auto_generated ?? false,
-         input.created_at ?? now()],
-      );
+      try {
+        const { rows } = await pool.query(
+          `INSERT INTO associations
+            (tenant_id, system_id, workspace_id, collaboration_id, scope_id,
+             source_kind, source_id, target_kind, target_id, association_type, confidence, auto_generated, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+           RETURNING *`,
+          [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id,
+           input.source_kind, input.source_id, input.target_kind, input.target_id,
+           input.association_type, input.confidence ?? 0.5, input.auto_generated ?? false,
+           input.created_at ?? now()],
+        );
+        return mapAssociation(rows[0]);
+      } catch (err) {
+        // Postgres unique_violation is SQLSTATE 23505.
+        if (err && typeof err === 'object' && (err as { code?: string }).code === '23505') {
+          throw new UniqueConstraintError(
+            `Association already exists: ${input.source_kind}:${input.source_id} -> ${input.target_kind}:${input.target_id} (${input.association_type})`,
+            err,
+          );
+        }
+        throw err;
+      }
+    },
+    async getAssociationById(id) {
+      const { rows } = await pool.query('SELECT * FROM associations WHERE id = $1', [id]);
+      if (rows.length === 0) return null;
       return mapAssociation(rows[0]);
     },
     async getAssociationsFrom(kind, id, scope) {

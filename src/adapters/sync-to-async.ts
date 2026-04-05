@@ -106,6 +106,22 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
     getRecentCompactionLogs: (scope, limit) =>
       Promise.resolve(adapter.getRecentCompactionLogs(scope, limit)),
 
+    insertPlaybook: (input) => Promise.resolve(adapter.insertPlaybook(input)),
+    getPlaybookById: (id) => Promise.resolve(adapter.getPlaybookById(id)),
+    getActivePlaybooks: (scope) => Promise.resolve(adapter.getActivePlaybooks(scope)),
+    searchPlaybooks: (scope, query, options) =>
+      Promise.resolve(adapter.searchPlaybooks(scope, query, options)),
+    updatePlaybook: (id, patch) => Promise.resolve(adapter.updatePlaybook(id, patch)),
+    recordPlaybookUse: (id) => Promise.resolve(adapter.recordPlaybookUse(id)),
+    insertPlaybookRevision: (input) => Promise.resolve(adapter.insertPlaybookRevision(input)),
+    getPlaybookRevisions: (playbookId) => Promise.resolve(adapter.getPlaybookRevisions(playbookId)),
+
+    insertAssociation: (input) => Promise.resolve(adapter.insertAssociation(input)),
+    getAssociationById: (id) => Promise.resolve(adapter.getAssociationById(id)),
+    getAssociationsFrom: (kind, id, scope) => Promise.resolve(adapter.getAssociationsFrom(kind, id, scope)),
+    getAssociationsTo: (kind, id, scope) => Promise.resolve(adapter.getAssociationsTo(kind, id, scope)),
+    deleteAssociation: (id) => Promise.resolve(adapter.deleteAssociation(id)),
+
     async transaction<T>(fn: () => Promise<T>): Promise<T> {
       // Since all underlying operations are synchronous and JavaScript is
       // single-threaded, the await chains in fn() resolve as microtasks

@@ -22,5 +22,11 @@ unreleased work before its first public release.
 
 ## Unreleased
 
+### Breaking
+
+- **`getProfile` / `memory_get_profile` / `GET /v1/profile` now default to trusted knowledge only.** Provisional-state knowledge was previously included by default; callers must now opt in with `includeProvisional: true` (or `?includeProvisional=true`) to see it. The tool description has always said profiles are built from trusted knowledge, so this fixes the default to match the contract — but any caller that was relying on provisional leakage will see fewer entries. Disputed entries continue to require `includeDisputed: true`.
+
+### Fixed
+
 - Added retrieval, context assembly, observability, summarizer/extractor helpers, knowledge growth, policy controls, semantic search, hybrid ranking, and a `MemoryManager` facade.
 - Added examples, eval scripts, benchmark scripts, CI, package hardening, and release validation checks.

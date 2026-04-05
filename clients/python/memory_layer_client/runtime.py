@@ -29,9 +29,7 @@ def format_prompt(prepared: PreparedMemoryTurn) -> str:
             sections.append("Relevant knowledge:\n" + "\n".join(knowledge_lines))
 
     if context.unresolved_work:
-        work_lines = [
-            f"- {item.get('title', '')}" for item in context.unresolved_work if item.get("title")
-        ]
+        work_lines = [f"- {item}" for item in context.unresolved_work if item]
         if work_lines:
             sections.append("Open work:\n" + "\n".join(work_lines))
 

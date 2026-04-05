@@ -61,6 +61,17 @@ export type CompactionState =
 export type WorkItemKind = 'objective' | 'unresolved_work' | 'constraint';
 export type WorkItemStatus = 'open' | 'in_progress' | 'blocked' | 'done';
 export type EpisodeDetailLevel = 'abstract' | 'overview' | 'full';
+export type PlaybookStatus = 'draft' | 'active' | 'deprecated' | 'archived';
+export type AssociationType =
+  | 'related_to'
+  | 'supports'
+  | 'contradicts'
+  | 'supersedes'
+  | 'depends_on'
+  | 'solves'
+  | 'applies_to'
+  | 'derived_from';
+export type AssociationTargetKind = 'knowledge' | 'playbook' | 'working_memory' | 'work_item';
 
 export const TURN_ROLES: readonly TurnRole[] = ['user', 'assistant', 'system'];
 export const COMPACTION_TRIGGERS: readonly CompactionTrigger[] = [
@@ -159,6 +170,28 @@ export const EPISODE_DETAIL_LEVELS: readonly EpisodeDetailLevel[] = [
   'abstract',
   'overview',
   'full',
+];
+export const PLAYBOOK_STATUSES: readonly PlaybookStatus[] = [
+  'draft',
+  'active',
+  'deprecated',
+  'archived',
+];
+export const ASSOCIATION_TYPES: readonly AssociationType[] = [
+  'related_to',
+  'supports',
+  'contradicts',
+  'supersedes',
+  'depends_on',
+  'solves',
+  'applies_to',
+  'derived_from',
+];
+export const ASSOCIATION_TARGET_KINDS: readonly AssociationTargetKind[] = [
+  'knowledge',
+  'playbook',
+  'working_memory',
+  'work_item',
 ];
 
 export interface Turn extends NormalizedMemoryScope {
@@ -580,4 +613,80 @@ export interface ReflectResult {
   sources: EpisodeSourceReference[];
   episodes: EpisodeSummary[];
   detailLevel: EpisodeDetailLevel;
+}
+
+export interface Playbook extends NormalizedMemoryScope {
+  id: number;
+  title: string;
+  description: string;
+  instructions: string;
+  references: string[];
+  templates: string[];
+  scripts: string[];
+  assets: string[];
+  tags: string[];
+  status: PlaybookStatus;
+  source_session_id: string | null;
+  source_working_memory_id: number | null;
+  revision_count: number;
+  last_used_at: number | null;
+  use_count: number;
+  created_at: number;
+  updated_at: number;
+  schema_version: number;
+}
+
+export interface NewPlaybook extends MemoryScope {
+  title: string;
+  description: string;
+  instructions: string;
+  references?: string[];
+  templates?: string[];
+  scripts?: string[];
+  assets?: string[];
+  tags?: string[];
+  status?: PlaybookStatus;
+  source_session_id?: string | null;
+  source_working_memory_id?: number | null;
+  created_at?: number;
+}
+
+export interface PlaybookRevision extends NormalizedMemoryScope {
+  id: number;
+  playbook_id: number;
+  instructions: string;
+  revision_reason: string;
+  source_session_id: string | null;
+  created_at: number;
+}
+
+export interface NewPlaybookRevision extends MemoryScope {
+  playbook_id: number;
+  instructions: string;
+  revision_reason: string;
+  source_session_id?: string | null;
+  created_at?: number;
+}
+
+export interface Association extends NormalizedMemoryScope {
+  id: number;
+  source_kind: AssociationTargetKind;
+  source_id: number;
+  target_kind: AssociationTargetKind;
+  target_id: number;
+  association_type: AssociationType;
+  confidence: number;
+  auto_generated: boolean;
+  created_at: number;
+}
+
+export interface NewAssociation extends MemoryScope {
+  source_kind: AssociationTargetKind;
+  source_id: number;
+  target_kind: AssociationTargetKind;
+  target_id: number;
+  association_type: AssociationType;
+  confidence?: number;
+  auto_generated?: boolean;
+  created_at?: number;
 }

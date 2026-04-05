@@ -17,6 +17,80 @@ describe('HTTP server', () => {
     return `http://localhost:${port}`;
   }
 
+  async function waitFor(predicate: () => boolean, timeoutMs = 500): Promise<void> {
+    const startedAt = Date.now();
+    while (!predicate()) {
+      if (Date.now() - startedAt >= timeoutMs) {
+        throw new Error('Timed out waiting for condition');
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  async function openEventStream(url: string) {
+    const controller = new AbortController();
+    const response = await fetch(url, {
+      headers: { Accept: 'text/event-stream' },
+      signal: controller.signal,
+    });
+    expect(response.status).toBe(200);
+    expect(response.body).toBeTruthy();
+
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    const events: Array<Record<string, unknown>> = [];
+    let buffer = '';
+    let connectedResolve: (() => void) | null = null;
+    const connected = new Promise<void>((resolve) => {
+      connectedResolve = resolve;
+    });
+
+    const finished = (async () => {
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let boundary = buffer.indexOf('\n\n');
+          while (boundary !== -1) {
+            const chunk = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            boundary = buffer.indexOf('\n\n');
+
+            const data = chunk
+              .split('\n')
+              .filter((line) => line.startsWith('data:'))
+              .map((line) => line.slice(5).trim())
+              .join('\n');
+            if (!data) continue;
+
+            const event = JSON.parse(data) as Record<string, unknown>;
+            if (event.type === 'connected') {
+              connectedResolve?.();
+              connectedResolve = null;
+              continue;
+            }
+            events.push(event);
+          }
+        }
+      } catch (error) {
+        if (!(error instanceof DOMException && error.name === 'AbortError')) {
+          throw error;
+        }
+      }
+    })();
+
+    await connected;
+
+    return {
+      events,
+      close: async () => {
+        controller.abort();
+        await finished;
+      },
+    };
+  }
+
   it('stores and retrieves turns', async () => {
     const base = await setup(13101);
 
@@ -217,6 +291,52 @@ describe('HTTP server', () => {
     expect(scopeB.knowledge[0].fact).toContain('Scope B');
   });
 
+  it('keeps default-scope SSE subscriptions isolated and accepts capability filters', async () => {
+    const instance = await startHttpServer({
+      port: 13114,
+      dbPath: ':memory:',
+      scope: 'default',
+    });
+    cleanup = instance.close;
+
+    const stream = await openEventStream(
+      'http://localhost:13114/v1/events?event_types=knowledge_change,capability',
+    );
+
+    try {
+      await fetch('http://localhost:13114/v1/facts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fact: 'Default scope fact',
+          factType: 'reference',
+        }),
+      });
+      await fetch('http://localhost:13114/v1/facts', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-memory-tenant': 'acme',
+          'x-memory-system': 'assistant',
+          'x-memory-scope': 'other-scope',
+        },
+        body: JSON.stringify({
+          fact: 'Foreign scope fact',
+          factType: 'reference',
+        }),
+      });
+
+      await waitFor(() => stream.events.length >= 1);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      expect(stream.events).toHaveLength(1);
+      expect(stream.events[0]?.type).toBe('knowledge_change');
+      expect((stream.events[0]?.scope as { scope_id?: string }).scope_id).toBe('default');
+    } finally {
+      await stream.close();
+    }
+  });
+
   it('responds on health probes', async () => {
     const base = await setup(13107);
     expect((await fetch(`${base}/healthz`)).status).toBe(200);
@@ -291,6 +411,144 @@ describe('HTTP server', () => {
       }),
     });
     expect(res.status).toBe(413);
+  });
+
+  it('keeps cached HTTP snapshots stable after live state is touched', async () => {
+    const base = await setup(13115);
+
+    await fetch(`${base}/v1/facts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fact: 'Rollback checklist lives in docs/runbooks/rollback.md',
+        factType: 'reference',
+      }),
+    });
+
+    const captured = await fetch(`${base}/v1/sessions/review-session/snapshot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ relevanceQuery: 'rollback' }),
+    }).then((res) => res.json());
+    const capturedAccessCount = captured.snapshot.context.relevantKnowledge[0].access_count;
+
+    await fetch(`${base}/v1/context?query=rollback`);
+
+    const fetched = await fetch(`${base}/v1/sessions/review-session/snapshot`).then((res) => res.json());
+    expect(fetched.snapshot.context.relevantKnowledge[0].access_count).toBe(capturedAccessCount);
+  });
+
+  it('GET /v1/episodes requires query param', async () => {
+    const base = await setup(13120);
+    const res = await fetch(`${base}/v1/episodes`);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain('q');
+  });
+
+  it('GET /v1/episodes returns error without structuredClient', async () => {
+    const base = await setup(13121);
+    // Seed data so there are turns to find
+    await fetch(`${base}/v1/exchanges`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userContent: 'Deploy the API',
+        assistantContent: 'Deployed successfully.',
+      }),
+    });
+    const res = await fetch(`${base}/v1/episodes?q=deploy`);
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toContain('structuredClient');
+  });
+
+  it('POST /v1/episodes/summarize returns error without structuredClient', async () => {
+    const base = await setup(13122);
+    const res = await fetch(`${base}/v1/episodes/summarize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: 'sess-1' }),
+    });
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toContain('structuredClient');
+  });
+
+  it('POST /v1/reflect returns error without structuredClient', async () => {
+    const base = await setup(13123);
+    // Seed data so episodic path is triggered
+    await fetch(`${base}/v1/exchanges`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userContent: 'Test reflection',
+        assistantContent: 'Reflected.',
+      }),
+    });
+    const res = await fetch(`${base}/v1/reflect`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: 'test' }),
+    });
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toContain('structuredClient');
+  });
+
+  it('GET /v1/memory requires query param', async () => {
+    const base = await setup(13124);
+    const res = await fetch(`${base}/v1/memory`);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain('q');
+  });
+
+  it('GET /v1/memory returns cognitive search results', async () => {
+    const base = await setup(13125);
+    // Learn a fact so there's something to find
+    await fetch(`${base}/v1/facts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fact: 'User prefers dark mode',
+        factType: 'preference',
+      }),
+    });
+    const res = await fetch(`${base}/v1/memory?q=dark+mode`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.byType).toBeDefined();
+    expect(body.all).toBeDefined();
+    expect(body.all.length).toBeGreaterThan(0);
+    expect(body.all[0].item.type).toBe('semantic');
+  });
+
+  it('GET /v1/memory supports types filter', async () => {
+    const base = await setup(13126);
+    await fetch(`${base}/v1/facts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fact: 'Always run tests before merging',
+        factType: 'constraint',
+      }),
+    });
+    // Only search procedural — should not find a constraint fact
+    const res = await fetch(`${base}/v1/memory?q=tests&types=procedural`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.byType.procedural).toBeDefined();
+    // The constraint fact maps to semantic, not procedural
+    expect(body.byType.procedural.length).toBe(0);
+  });
+
+  it('GET /v1/episodes supports timeRange params', async () => {
+    const base = await setup(13127);
+    // Just verify the params are accepted (will error on structuredClient)
+    const res = await fetch(`${base}/v1/episodes?q=test&start_at=0&end_at=999999999`);
+    // Should be 500 (structuredClient) not 400 (bad params)
+    expect(res.status).toBe(500);
   });
 
   it('rejects malformed request validation inputs with 400s', async () => {

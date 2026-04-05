@@ -8,6 +8,7 @@ import {
   createMemoryMcpAdapter,
   createMemoryRuntime,
 } from '../dist/index.js';
+import { detectWorkspace, workspaceIdFromPath } from '../dist/core/workspace-detect.js';
 
 const enforce = process.argv.includes('--enforce');
 const evalsDir = path.dirname(fileURLToPath(import.meta.url));
@@ -331,6 +332,24 @@ async function runScenarios() {
     ),
     localReplay,
   ];
+
+  // workspace_auto_detect scenario
+  const detectedId = detectWorkspace();
+  const pathId = workspaceIdFromPath(process.cwd());
+  const workspaceAutoDetect = assertResult(
+    'workspace_auto_detect',
+    typeof detectedId === 'string' &&
+      detectedId.length === 16 &&
+      /^[0-9a-f]{16}$/.test(detectedId) &&
+      typeof pathId === 'string' &&
+      pathId.length === 16,
+    {
+      detectedId,
+      pathId,
+      isGitRepo: detectedId !== pathId,
+    },
+  );
+  results.push(workspaceAutoDetect);
 
   const passed = results.every((result) => result.passed);
   console.log(

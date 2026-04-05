@@ -1,5 +1,18 @@
 -- memory-layer PostgreSQL schema
--- Compatible with PostgreSQL 14+ with pgvector extension
+-- Compatible with PostgreSQL 14+ with pgvector extension.
+--
+-- This file is a FRESH install + FORWARD-ONLY idempotent migration.
+-- Every CREATE TABLE uses IF NOT EXISTS and every schema change after the
+-- initial v1 baseline uses ALTER TABLE ADD COLUMN IF NOT EXISTS so the
+-- same script is safe to run on empty and populated databases alike.
+--
+-- Schema version history (match src/adapters/sqlite/schema.ts):
+--   v1  initial turns/working_memory/knowledge_memory
+--   v9  cross-scope collaboration_id on every scoped table
+--   v10 working_memory.episode_recap
+--   v11 playbooks + playbook_revisions
+--   v12 associations + full knowledge_memory parity with SQLite
+-- Postgres tracks applied versions in schema_version.
 
 CREATE TABLE IF NOT EXISTS schema_version (
   version INTEGER PRIMARY KEY,
@@ -17,12 +30,18 @@ CREATE TABLE IF NOT EXISTS turns (
   actor TEXT NOT NULL DEFAULT 'user',
   role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
   content TEXT NOT NULL,
+  priority REAL NOT NULL DEFAULT 1.0,
   token_estimate INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
   archived_at INTEGER,
   compaction_log_id INTEGER,
+  schema_version INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
 );
+
+-- Forward-only: populated DBs created before v12 may lack priority/schema_version.
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS priority REAL NOT NULL DEFAULT 1.0;
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS schema_version INTEGER NOT NULL DEFAULT 1;
 
 CREATE INDEX IF NOT EXISTS idx_turns_scope ON turns (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns (session_id);
@@ -47,10 +66,14 @@ CREATE TABLE IF NOT EXISTS working_memory (
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'expired')),
   expires_at INTEGER,
   promoted_to_knowledge_id INTEGER,
+  episode_recap JSONB,
+  schema_version INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
 );
 
+-- v10 forward migration
 ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS episode_recap JSONB;
+ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS schema_version INTEGER NOT NULL DEFAULT 1;
 
 CREATE INDEX IF NOT EXISTS idx_wm_scope ON working_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
 CREATE INDEX IF NOT EXISTS idx_wm_session ON working_memory (session_id);
@@ -65,6 +88,8 @@ CREATE TABLE IF NOT EXISTS knowledge_memory (
   scope_id TEXT NOT NULL,
   fact TEXT NOT NULL,
   fact_type TEXT NOT NULL CHECK (fact_type IN ('preference', 'entity', 'decision', 'constraint', 'reference')),
+  knowledge_state TEXT NOT NULL DEFAULT 'trusted',
+  knowledge_class TEXT NOT NULL DEFAULT 'project_fact',
   fact_subject TEXT,
   fact_attribute TEXT,
   fact_value TEXT,
@@ -72,28 +97,95 @@ CREATE TABLE IF NOT EXISTS knowledge_memory (
   slot_key TEXT,
   is_negated BOOLEAN NOT NULL DEFAULT FALSE,
   source TEXT NOT NULL CHECK (source IN ('user_stated', 'promoted_from_working', 'manual')),
-  confidence TEXT NOT NULL DEFAULT 'medium' CHECK (confidence IN ('high', 'medium')),
+  confidence TEXT NOT NULL DEFAULT 'medium' CHECK (confidence IN ('high', 'medium', 'low')),
+  confidence_score REAL NOT NULL DEFAULT 0.5,
+  grounding_strength TEXT NOT NULL DEFAULT 'moderate',
+  evidence_count INTEGER NOT NULL DEFAULT 0,
+  trust_score REAL NOT NULL DEFAULT 0.7,
+  verification_status TEXT NOT NULL DEFAULT 'unverified',
+  verification_notes TEXT,
+  last_verified_at INTEGER,
+  next_reverification_at INTEGER,
+  last_confirmed_at INTEGER,
+  confirmation_count INTEGER NOT NULL DEFAULT 0,
   source_system_id TEXT,
   source_scope_id TEXT,
   source_collaboration_id TEXT,
   source_working_memory_id INTEGER,
+  source_turn_ids JSONB NOT NULL DEFAULT '[]',
+  successful_use_count INTEGER NOT NULL DEFAULT 0,
+  failed_use_count INTEGER NOT NULL DEFAULT 0,
+  disputed_at INTEGER,
+  dispute_reason TEXT,
+  contradiction_score REAL NOT NULL DEFAULT 0,
+  superseded_at INTEGER,
   superseded_by_id INTEGER,
   retired_at INTEGER,
-  access_count INTEGER NOT NULL DEFAULT 0,
+  access_count INTEGER NOT NULL DEFAULT 1,
+  schema_version INTEGER NOT NULL DEFAULT 1,
   last_accessed_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER),
   created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
 );
+
+-- Forward-only parity columns (v12). Populated DBs from earlier versions may
+-- be missing any of these; each is additive and nullable/defaulted so the
+-- migration is safe to re-run.
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS knowledge_state TEXT NOT NULL DEFAULT 'trusted';
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS knowledge_class TEXT NOT NULL DEFAULT 'project_fact';
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS confidence_score REAL NOT NULL DEFAULT 0.5;
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS grounding_strength TEXT NOT NULL DEFAULT 'moderate';
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS evidence_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS trust_score REAL NOT NULL DEFAULT 0.7;
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS verification_status TEXT NOT NULL DEFAULT 'unverified';
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS verification_notes TEXT;
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS last_verified_at INTEGER;
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS next_reverification_at INTEGER;
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS last_confirmed_at INTEGER;
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS confirmation_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS source_turn_ids JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS successful_use_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS failed_use_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS disputed_at INTEGER;
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS dispute_reason TEXT;
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS contradiction_score REAL NOT NULL DEFAULT 0;
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS superseded_at INTEGER;
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS last_accessed_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER);
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS access_count INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS schema_version INTEGER NOT NULL DEFAULT 1;
+
+DO $$
+DECLARE
+  constraint_name TEXT;
+BEGIN
+  FOR constraint_name IN
+    SELECT c.conname
+    FROM pg_constraint c
+    JOIN pg_class t ON t.oid = c.conrelid
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+    WHERE n.nspname = current_schema()
+      AND t.relname = 'knowledge_memory'
+      AND c.contype = 'c'
+      AND pg_get_constraintdef(c.oid) LIKE '%confidence IN (%'
+  LOOP
+    EXECUTE format('ALTER TABLE knowledge_memory DROP CONSTRAINT %I', constraint_name);
+  END LOOP;
+
+  ALTER TABLE knowledge_memory
+    ADD CONSTRAINT knowledge_memory_confidence_check
+    CHECK (confidence IN ('high', 'medium', 'low'));
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_km_scope ON knowledge_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
 CREATE INDEX IF NOT EXISTS idx_km_active ON knowledge_memory (superseded_by_id, retired_at);
 CREATE INDEX IF NOT EXISTS idx_km_fact_type ON knowledge_memory (fact_type);
 CREATE INDEX IF NOT EXISTS idx_km_slot_key ON knowledge_memory (slot_key);
+CREATE INDEX IF NOT EXISTS idx_km_reverify
+  ON knowledge_memory (knowledge_state, next_reverification_at, knowledge_class, trust_score DESC);
 
 -- Full-text search on knowledge_memory
 ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS search_vector TSVECTOR;
 CREATE INDEX IF NOT EXISTS idx_km_fts ON knowledge_memory USING GIN (search_vector);
 
--- Trigger to auto-update search_vector
 CREATE OR REPLACE FUNCTION knowledge_memory_search_trigger()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -114,7 +206,7 @@ CREATE TABLE IF NOT EXISTS knowledge_memory_audit (
   workspace_id TEXT NOT NULL DEFAULT '',
   collaboration_id TEXT NOT NULL DEFAULT '',
   scope_id TEXT NOT NULL,
-  working_memory_id INTEGER NOT NULL,
+  working_memory_id INTEGER,
   fact TEXT NOT NULL,
   fact_type TEXT NOT NULL,
   fact_subject TEXT,
@@ -124,7 +216,9 @@ CREATE TABLE IF NOT EXISTS knowledge_memory_audit (
   slot_key TEXT,
   is_negated BOOLEAN NOT NULL DEFAULT FALSE,
   confidence TEXT NOT NULL DEFAULT 'medium',
-  source_text TEXT NOT NULL,
+  confidence_score REAL NOT NULL DEFAULT 0.5,
+  verification_status TEXT NOT NULL DEFAULT 'unverified',
+  source_text TEXT,
   decision TEXT NOT NULL,
   detail TEXT,
   related_knowledge_id INTEGER,
@@ -132,7 +226,100 @@ CREATE TABLE IF NOT EXISTS knowledge_memory_audit (
   created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
 );
 
+ALTER TABLE knowledge_memory_audit ADD COLUMN IF NOT EXISTS confidence_score REAL NOT NULL DEFAULT 0.5;
+ALTER TABLE knowledge_memory_audit ADD COLUMN IF NOT EXISTS verification_status TEXT NOT NULL DEFAULT 'unverified';
+
 CREATE INDEX IF NOT EXISTS idx_kma_scope ON knowledge_memory_audit (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
+
+CREATE TABLE IF NOT EXISTS knowledge_candidate (
+  id SERIAL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  system_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL DEFAULT '',
+  collaboration_id TEXT NOT NULL DEFAULT '',
+  scope_id TEXT NOT NULL,
+  working_memory_id INTEGER NOT NULL REFERENCES working_memory(id) ON DELETE CASCADE,
+  fact TEXT NOT NULL,
+  fact_type TEXT NOT NULL,
+  knowledge_class TEXT NOT NULL,
+  normalized_fact TEXT NOT NULL,
+  slot_key TEXT,
+  confidence TEXT NOT NULL,
+  source_summary BOOLEAN NOT NULL DEFAULT FALSE,
+  source_turns BOOLEAN NOT NULL DEFAULT TRUE,
+  grounding_strength TEXT NOT NULL DEFAULT 'weak',
+  evidence_count INTEGER NOT NULL DEFAULT 0,
+  trust_score REAL NOT NULL DEFAULT 0,
+  state TEXT NOT NULL DEFAULT 'candidate',
+  promoted_knowledge_id INTEGER REFERENCES knowledge_memory(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
+);
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'knowledge_candidate'
+      AND column_name = 'source_summary'
+      AND data_type <> 'boolean'
+  ) THEN
+    ALTER TABLE knowledge_candidate
+      ALTER COLUMN source_summary DROP DEFAULT,
+      ALTER COLUMN source_summary TYPE BOOLEAN USING COALESCE(source_summary, 0) <> 0,
+      ALTER COLUMN source_summary SET DEFAULT FALSE;
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'knowledge_candidate'
+      AND column_name = 'source_turns'
+      AND data_type <> 'boolean'
+  ) THEN
+    ALTER TABLE knowledge_candidate
+      ALTER COLUMN source_turns DROP DEFAULT,
+      ALTER COLUMN source_turns TYPE BOOLEAN USING COALESCE(source_turns, 0) <> 0,
+      ALTER COLUMN source_turns SET DEFAULT TRUE;
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_kc_scope_state_created
+  ON knowledge_candidate (tenant_id, system_id, workspace_id, collaboration_id, scope_id, state, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS knowledge_evidence (
+  id SERIAL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  system_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL DEFAULT '',
+  collaboration_id TEXT NOT NULL DEFAULT '',
+  scope_id TEXT NOT NULL,
+  knowledge_memory_id INTEGER REFERENCES knowledge_memory(id) ON DELETE CASCADE,
+  knowledge_candidate_id INTEGER REFERENCES knowledge_candidate(id) ON DELETE CASCADE,
+  working_memory_id INTEGER REFERENCES working_memory(id) ON DELETE CASCADE,
+  turn_id INTEGER REFERENCES turns(id) ON DELETE CASCADE,
+  source_type TEXT NOT NULL,
+  support_polarity TEXT NOT NULL,
+  speaker_role TEXT,
+  actor TEXT,
+  excerpt TEXT NOT NULL,
+  start_offset INTEGER,
+  end_offset INTEGER,
+  is_explicit BOOLEAN NOT NULL DEFAULT FALSE,
+  explicitness_score REAL NOT NULL DEFAULT 0,
+  outcome TEXT,
+  created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ke_knowledge_memory
+  ON knowledge_evidence (knowledge_memory_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ke_candidate
+  ON knowledge_evidence (knowledge_candidate_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS work_items (
   id SERIAL PRIMARY KEY,
@@ -141,14 +328,17 @@ CREATE TABLE IF NOT EXISTS work_items (
   workspace_id TEXT NOT NULL DEFAULT '',
   collaboration_id TEXT NOT NULL DEFAULT '',
   scope_id TEXT NOT NULL,
-  session_id TEXT NOT NULL,
+  session_id TEXT,
   title TEXT NOT NULL,
   kind TEXT NOT NULL DEFAULT 'objective' CHECK (kind IN ('objective', 'unresolved_work', 'constraint')),
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'in_progress', 'blocked', 'done')),
   detail TEXT,
+  source_working_memory_id INTEGER,
   created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER),
   updated_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
 );
+
+ALTER TABLE work_items ADD COLUMN IF NOT EXISTS source_working_memory_id INTEGER;
 
 CREATE INDEX IF NOT EXISTS idx_wi_scope ON work_items (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
 
@@ -186,12 +376,15 @@ CREATE TABLE IF NOT EXISTS compaction_log (
   active_turn_count_after INTEGER NOT NULL DEFAULT 0,
   duration_ms INTEGER NOT NULL DEFAULT 0,
   model_call_made BOOLEAN NOT NULL DEFAULT FALSE,
+  error TEXT,
   created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
 );
 
+ALTER TABLE compaction_log ADD COLUMN IF NOT EXISTS error TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_cl_scope ON compaction_log (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
 
--- pgvector extension for semantic search (optional)
+-- pgvector extension for semantic search (optional).
 -- Run: CREATE EXTENSION IF NOT EXISTS vector;
 CREATE TABLE IF NOT EXISTS knowledge_embeddings (
   id SERIAL PRIMARY KEY,
@@ -206,7 +399,6 @@ CREATE TABLE IF NOT EXISTS knowledge_embeddings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_ke_scope ON knowledge_embeddings (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
--- For high-volume hosted retrieval, prefer ANN search via pgvector HNSW.
 CREATE INDEX IF NOT EXISTS idx_ke_embedding_hnsw
   ON knowledge_embeddings
   USING hnsw (embedding vector_cosine_ops);
@@ -228,6 +420,7 @@ CREATE TRIGGER trg_turns_search
   BEFORE INSERT OR UPDATE ON turns
   FOR EACH ROW EXECUTE FUNCTION turns_search_trigger();
 
+-- v11: playbooks + revisions
 CREATE TABLE IF NOT EXISTS playbooks (
   id SERIAL PRIMARY KEY,
   tenant_id TEXT NOT NULL,
@@ -263,7 +456,12 @@ CREATE INDEX IF NOT EXISTS idx_pb_fts ON playbooks USING GIN (search_vector);
 CREATE OR REPLACE FUNCTION playbooks_search_trigger()
 RETURNS TRIGGER AS $$
 BEGIN
-  NEW.search_vector := to_tsvector('english', COALESCE(NEW.title, '') || ' ' || COALESCE(NEW.description, '') || ' ' || COALESCE(NEW.instructions, ''));
+  NEW.search_vector := to_tsvector(
+    'english',
+    COALESCE(NEW.title, '') || ' ' ||
+    COALESCE(NEW.description, '') || ' ' ||
+    COALESCE(NEW.instructions, '')
+  );
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -289,4 +487,31 @@ CREATE TABLE IF NOT EXISTS playbook_revisions (
 
 CREATE INDEX IF NOT EXISTS idx_pbr_playbook ON playbook_revisions (playbook_id, created_at DESC);
 
-INSERT INTO schema_version (version) VALUES (1) ON CONFLICT DO NOTHING;
+-- v12: associations
+CREATE TABLE IF NOT EXISTS associations (
+  id SERIAL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  system_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL DEFAULT '',
+  collaboration_id TEXT NOT NULL DEFAULT '',
+  scope_id TEXT NOT NULL,
+  source_kind TEXT NOT NULL,
+  source_id INTEGER NOT NULL,
+  target_kind TEXT NOT NULL,
+  target_id INTEGER NOT NULL,
+  association_type TEXT NOT NULL,
+  confidence REAL NOT NULL DEFAULT 0.5,
+  auto_generated BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER),
+  UNIQUE (source_kind, source_id, target_kind, target_id, association_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_assoc_source ON associations (source_kind, source_id);
+CREATE INDEX IF NOT EXISTS idx_assoc_target ON associations (target_kind, target_id);
+CREATE INDEX IF NOT EXISTS idx_assoc_scope ON associations (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
+
+-- Record all applied schema versions so upgrades are visible and auditable.
+-- ON CONFLICT DO NOTHING keeps this idempotent across repeated applies.
+INSERT INTO schema_version (version) VALUES
+  (1), (9), (10), (11), (12)
+ON CONFLICT DO NOTHING;

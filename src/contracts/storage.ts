@@ -1,5 +1,22 @@
 import type { MemoryScope, ScopeLevel } from './identity.js';
+
+/**
+ * Thrown by storage adapters when an insert violates a unique constraint.
+ *
+ * Callers that expect duplicate-key collisions (e.g. autoDetectAssociations
+ * attempting to insert an already-present edge) should catch this exact
+ * class rather than sniffing error codes or messages across adapters.
+ */
+export class UniqueConstraintError extends Error {
+  readonly kind = 'UniqueConstraintError' as const;
+  constructor(message: string, readonly cause?: unknown) {
+    super(message);
+    this.name = 'UniqueConstraintError';
+  }
+}
 import type {
+  Association,
+  AssociationTargetKind,
   CompactionLog,
   ContextMonitor,
   ContextMonitorUpsert,
@@ -7,16 +24,21 @@ import type {
   KnowledgeEvidence,
   KnowledgeMemory,
   KnowledgeMemoryAudit,
+  NewAssociation,
   NewCompactionLog,
   NewKnowledgeCandidate,
   NewKnowledgeEvidence,
   NewKnowledgeMemory,
   NewKnowledgeMemoryAudit,
+  NewPlaybook,
+  NewPlaybookRevision,
   NewWorkItem,
   NewTurn,
   NewWorkingMemory,
   PaginationOptions,
   PaginatedResult,
+  Playbook,
+  PlaybookRevision,
   SearchOptions,
   SearchResult,
   TimeRange,
@@ -127,6 +149,34 @@ export interface StorageAdapter {
   insertCompactionLog(input: NewCompactionLog): CompactionLog;
   getCompactionLogById(id: number): CompactionLog | null;
   getRecentCompactionLogs(scope: MemoryScope, limit?: number): CompactionLog[];
+
+  insertPlaybook(input: NewPlaybook): Playbook;
+  getPlaybookById(id: number): Playbook | null;
+  getActivePlaybooks(scope: MemoryScope): Playbook[];
+  searchPlaybooks(scope: MemoryScope, query: string, options?: SearchOptions): SearchResult<Playbook>[];
+  updatePlaybook(
+    id: number,
+    patch: {
+      title?: string;
+      description?: string;
+      instructions?: string;
+      references?: string[];
+      templates?: string[];
+      scripts?: string[];
+      assets?: string[];
+      tags?: string[];
+      status?: Playbook['status'];
+    },
+  ): Playbook | null;
+  recordPlaybookUse(id: number): void;
+  insertPlaybookRevision(input: NewPlaybookRevision): PlaybookRevision;
+  getPlaybookRevisions(playbookId: number): PlaybookRevision[];
+
+  insertAssociation(input: NewAssociation): Association;
+  getAssociationById(id: number): Association | null;
+  getAssociationsFrom(kind: AssociationTargetKind, id: number, scope: MemoryScope): Association[];
+  getAssociationsTo(kind: AssociationTargetKind, id: number, scope: MemoryScope): Association[];
+  deleteAssociation(id: number): void;
 
   transaction<T>(fn: () => T): T;
   close(): void;

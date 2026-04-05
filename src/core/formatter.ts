@@ -1,4 +1,5 @@
-import type { KnowledgeMemory, WorkItem, WorkingMemory } from '../contracts/types.js';
+import type { KnowledgeMemory, Playbook, WorkItem, WorkingMemory } from '../contracts/types.js';
+import type { Profile, ProfileSection } from '../contracts/profile.js';
 import type { MemoryContext } from './context.js';
 
 export interface SessionBootstrap {
@@ -8,6 +9,7 @@ export interface SessionBootstrap {
   recentSummaries: WorkingMemory[];
   activeObjectives: WorkItem[];
   unresolvedWork: string[];
+  profile?: Profile | null;
 }
 
 export interface FormatOptions {
@@ -83,6 +85,29 @@ export function formatContextForPrompt(
       : ['- None']),
   ];
 
+  sections.push(
+    '',
+    formatHeading('Relevant Playbooks', options),
+    ...(context.relevantPlaybooks?.length
+      ? context.relevantPlaybooks.flatMap((pb) => [
+          `- ${pb.title} (${pb.status})${pb.description ? `: ${pb.description}` : ''}`,
+          ...(pb.instructions ? [`  Instructions: ${pb.instructions}`] : []),
+          ...(pb.references?.length ? [`  References: ${pb.references.join(', ')}`] : []),
+          ...(pb.scripts?.length ? [`  Scripts: ${pb.scripts.join(', ')}`] : []),
+        ])
+      : ['- None']),
+  );
+
+  if (context.associatedKnowledge?.length) {
+    sections.push(
+      '',
+      formatHeading('Related Knowledge (via associations)', options),
+      ...context.associatedKnowledge.map(
+        (k) => `- [${k.knowledge_class}] ${k.fact} (trust: ${k.trust_score.toFixed(2)})`,
+      ),
+    );
+  }
+
   if (options?.includeProvisionalKnowledge) {
     sections.push(
       '',
@@ -131,7 +156,47 @@ export function formatBootstrapForPrompt(
     ...(bootstrap.unresolvedWork.length > 0
       ? bootstrap.unresolvedWork.map((item) => `- ${item}`)
       : ['- None']),
+    ...formatProfileSection(bootstrap.profile, options),
   ].join('\n');
+}
+
+function formatProfileSection(
+  profile: Profile | null | undefined,
+  options?: FormatOptions,
+): string[] {
+  if (!profile) return [];
+
+  const sectionLabels: Record<ProfileSection, string> = {
+    identity: 'Identity',
+    preferences: 'Preferences',
+    communication: 'Communication',
+    constraints: 'Constraints',
+    workflows: 'Workflows',
+  };
+
+  const lines: string[] = ['', formatHeading('Profile', options)];
+
+  const sections: ProfileSection[] = ['identity', 'preferences', 'communication', 'constraints', 'workflows'];
+  let hasContent = false;
+
+  for (const section of sections) {
+    const entries = profile.sections[section];
+    if (entries.length === 0) continue;
+    hasContent = true;
+    lines.push(`  ${sectionLabels[section]}:`);
+    for (const entry of entries) {
+      const suffix = options?.includeTrustMetadata
+        ? ` [trust=${entry.trustScore.toFixed(2)}, state=${entry.knowledgeState}]`
+        : '';
+      lines.push(`  - ${entry.fact}${suffix}`);
+    }
+  }
+
+  if (!hasContent) {
+    lines.push('- None');
+  }
+
+  return lines;
 }
 
 export function formatContextAsMessages(

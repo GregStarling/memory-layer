@@ -1,4 +1,5 @@
 import type { TurnRole, WorkItem } from '../contracts/types.js';
+import type { Profile } from '../contracts/profile.js';
 import {
   formatBootstrapForPrompt,
   formatContextAsMessages,
@@ -22,6 +23,18 @@ export interface MemoryRuntimeOptions {
     userInput: string;
     assistantOutput: string;
   }) => RuntimeWorkItemSuggestion[] | Promise<RuntimeWorkItemSuggestion[]>;
+}
+
+export interface SessionSnapshot {
+  snapshotId: string;
+  bootstrap: SessionBootstrap;
+  context: MemoryContext;
+  frozenAt: number;
+  profile?: Profile | null;
+}
+
+export interface SnapshotRuntimeOptions extends MemoryRuntimeOptions {
+  snapshotMode?: boolean;
 }
 
 export interface BeforeModelCallInput {
@@ -49,6 +62,8 @@ export interface AfterModelCallInput {
 }
 
 export interface MemoryRuntime {
+  /** The underlying manager, exposed for advanced integrations (episodic tools, playbooks). */
+  manager: MemoryManager;
   startSession(relevanceQuery?: string, format?: FormatOptions): Promise<{
     bootstrap: SessionBootstrap;
     bootstrapPrompt: string;
@@ -72,6 +87,8 @@ export interface MemoryRuntime {
     exchange: Awaited<ReturnType<MemoryManager['processExchange']>>;
     trackedWorkItems: WorkItem[];
   }>;
+  refreshSnapshot(relevanceQuery?: string, format?: FormatOptions): Promise<SessionSnapshot | null>;
+  getSnapshot(): SessionSnapshot | null;
 }
 
 function resolveRuntimeInput(input: string | BeforeModelCallInput): BeforeModelCallInput {
@@ -82,10 +99,32 @@ function resolveRuntimeInput(input: string | BeforeModelCallInput): BeforeModelC
     : input;
 }
 
+/**
+ * Recursively deep-freeze a value so cached snapshots cannot be mutated
+ * by downstream callers. Arrays and plain objects are walked; primitives
+ * and already-frozen values are returned as-is.
+ */
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== 'object') return value;
+  if (Object.isFrozen(value)) return value;
+  Object.freeze(value);
+  for (const key of Object.keys(value as object)) {
+    deepFreeze((value as Record<string, unknown>)[key]);
+  }
+  return value;
+}
+
+function cloneSnapshotValue<T>(value: T): T {
+  return structuredClone(value);
+}
+
 export function createMemoryRuntime(
   manager: MemoryManager,
-  options: MemoryRuntimeOptions = {},
+  options: SnapshotRuntimeOptions = {},
 ): MemoryRuntime {
+  const snapshotMode = options.snapshotMode ?? false;
+  let cachedSnapshot: SessionSnapshot | null = null;
+
   async function getBootstrapPayload(relevanceQuery?: string, format?: FormatOptions) {
     const bootstrap = await manager.getSessionBootstrap(relevanceQuery);
     const bootstrapPrompt = formatBootstrapForPrompt(bootstrap, format ?? options.format);
@@ -95,12 +134,48 @@ export function createMemoryRuntime(
     };
   }
 
+  async function captureSnapshot(
+    relevanceQuery?: string,
+    format?: FormatOptions,
+  ): Promise<SessionSnapshot> {
+    const [bootstrapPayload, context] = await Promise.all([
+      getBootstrapPayload(relevanceQuery, format),
+      manager.getContext(relevanceQuery),
+    ]);
+    const snapshot: SessionSnapshot = {
+      snapshotId: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      bootstrap: bootstrapPayload.bootstrap,
+      context,
+      frozenAt: Math.floor(Date.now() / 1000),
+      profile: bootstrapPayload.bootstrap.profile ?? null,
+    };
+    // Deep-freeze so callers can't mutate the cached snapshot's bootstrap,
+    // context, or profile via returned references.
+    return deepFreeze(cloneSnapshotValue(snapshot));
+  }
+
   return {
+    manager,
+
     async startSession(relevanceQuery, format) {
+      if (snapshotMode) {
+        cachedSnapshot = await captureSnapshot(relevanceQuery, format);
+        return {
+          bootstrap: cachedSnapshot.bootstrap,
+          bootstrapPrompt: formatBootstrapForPrompt(cachedSnapshot.bootstrap, format ?? options.format),
+        };
+      }
       return getBootstrapPayload(relevanceQuery, format);
     },
 
     async resumeSession(relevanceQuery, format) {
+      if (snapshotMode) {
+        cachedSnapshot = await captureSnapshot(relevanceQuery, format);
+        return {
+          bootstrap: cachedSnapshot.bootstrap,
+          bootstrapPrompt: formatBootstrapForPrompt(cachedSnapshot.bootstrap, format ?? options.format),
+        };
+      }
       return getBootstrapPayload(relevanceQuery, format);
     },
 
@@ -118,6 +193,32 @@ export function createMemoryRuntime(
           resolved.format?.includeDisputedKnowledge ??
           options.format?.includeDisputedKnowledge,
       };
+
+      // Snapshot mode: return the frozen snapshot instead of refetching live state.
+      // Live writes (afterModelCall) still persist to durable storage; only the
+      // prompt-injected context is frozen for cache stability.
+      //
+      // If no snapshot has been captured yet (caller skipped startSession/
+      // resumeSession), seed it lazily on first use so subsequent calls remain
+      // stable.
+      if (snapshotMode) {
+        if (!cachedSnapshot) {
+          cachedSnapshot = await captureSnapshot(
+            resolved.relevanceQuery ?? resolved.input,
+            resolvedFormat,
+          );
+        }
+        const bootstrapPrompt = formatBootstrapForPrompt(cachedSnapshot.bootstrap, resolvedFormat);
+        const contextPrompt = formatContextForPrompt(cachedSnapshot.context, resolvedFormat);
+        return {
+          bootstrap: cachedSnapshot.bootstrap,
+          context: cachedSnapshot.context,
+          bootstrapPrompt,
+          prompt: [bootstrapPrompt, contextPrompt].join('\n\n'),
+          messages: formatContextAsMessages(cachedSnapshot.context, resolvedFormat),
+        };
+      }
+
       const [bootstrapPayload, context] = await Promise.all([
         getBootstrapPayload(resolved.relevanceQuery ?? resolved.input, resolvedFormat),
         resolved.asOf != null
@@ -174,6 +275,16 @@ export function createMemoryRuntime(
         exchange: after.exchange,
         trackedWorkItems: after.trackedWorkItems,
       };
+    },
+
+    async refreshSnapshot(relevanceQuery, format) {
+      if (!snapshotMode) return null;
+      cachedSnapshot = await captureSnapshot(relevanceQuery, format);
+      return cachedSnapshot;
+    },
+
+    getSnapshot() {
+      return cachedSnapshot;
     },
   };
 }

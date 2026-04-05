@@ -252,7 +252,7 @@ components:
         unresolvedWork:
           type: array
           items:
-            type: object
+            type: string
         tokenEstimate:
           type: integer
     SearchResponse:
@@ -973,6 +973,11 @@ paths:
           schema:
             type: number
           description: Minimum trust score filter
+        - name: includeProvisional
+          in: query
+          schema:
+            type: boolean
+          description: Include provisional knowledge entries (default false — profiles surface trusted knowledge by default)
         - name: includeDisputed
           in: query
           schema:

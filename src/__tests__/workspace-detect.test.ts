@@ -77,11 +77,11 @@ describe('workspace detection', () => {
       expect(id).toMatch(/^[0-9a-f]{16}$/);
     });
 
-    it('returns null gracefully for invalid directory', () => {
+    it('falls back to path hash for nonexistent directory', () => {
       const id = detectWorkspace('/nonexistent/path/that/does/not/exist');
       // Falls back to path hash — path hashing itself doesn't require the dir to exist
       // since it just hashes the resolved string
-      expect(typeof id).toBe('string');
+      expect(id).toMatch(/^[0-9a-f]{16}$/);
     });
   });
 });

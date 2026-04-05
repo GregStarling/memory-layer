@@ -5,6 +5,8 @@ import type {
   KnowledgeEvidence,
   KnowledgeMemory,
   KnowledgeMemoryAudit,
+  Playbook,
+  PlaybookRevision,
   Turn,
   WorkItem,
   WorkingMemory,
@@ -154,5 +156,32 @@ export function rowToCompactionLog(row: CompactionLogRow): CompactionLog {
   };
 }
 
-export type { CompactionLogRow, KnowledgeMemoryAuditRow, KnowledgeMemoryRow, WorkingMemoryRow };
+interface PlaybookRow extends Omit<Playbook, 'references' | 'templates' | 'scripts' | 'assets' | 'tags' | 'episode_recap'> {
+  references_json: string;
+  templates: string;
+  scripts: string;
+  assets: string;
+  tags: string;
+}
+
+export function rowToPlaybook(row: PlaybookRow): Playbook {
+  return {
+    ...row,
+    collaboration_id: row.collaboration_id ?? row.workspace_id,
+    references: parseJsonArray(row.references_json),
+    templates: parseJsonArray(row.templates),
+    scripts: parseJsonArray(row.scripts),
+    assets: parseJsonArray(row.assets),
+    tags: parseJsonArray(row.tags),
+  };
+}
+
+export function rowToPlaybookRevision(row: PlaybookRevision): PlaybookRevision {
+  return {
+    ...row,
+    collaboration_id: row.collaboration_id ?? row.workspace_id,
+  };
+}
+
+export type { CompactionLogRow, KnowledgeMemoryAuditRow, KnowledgeMemoryRow, PlaybookRow, WorkingMemoryRow };
 export type { KnowledgeCandidateRow, KnowledgeEvidenceRow };

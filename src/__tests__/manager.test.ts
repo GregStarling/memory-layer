@@ -95,6 +95,72 @@ describe('memory manager', () => {
     await manager.close();
   });
 
+  it('ignores future turns when deriving historical semantic context', async () => {
+    const scope = makeScope();
+    const manager = createMemoryManager({
+      adapter,
+      scope,
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      autoCompact: false,
+      embeddingAdapter: adapter.embeddings,
+      embeddingGenerator: async (texts) =>
+        texts.map((text) =>
+          text.includes('postgres')
+            ? new Float32Array([1, 0])
+            : text.includes('redis')
+              ? new Float32Array([0, 1])
+              : new Float32Array([0, 0]),
+        ),
+    });
+    const cutoff = Math.floor(Date.now() / 1000) + 1;
+
+    adapter.insertTurn({
+      ...scope,
+      session_id: 'session-1',
+      actor: 'user',
+      role: 'user',
+      content: 'Need the redis cache rollout notes',
+      created_at: cutoff - 10,
+    });
+    adapter.insertTurn({
+      ...scope,
+      session_id: 'session-1',
+      actor: 'assistant',
+      role: 'assistant',
+      content: 'Also keep the postgres migration handy',
+      created_at: cutoff + 10,
+    });
+
+    const redis = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'Redis cache rollout checklist',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+    const postgres = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'Postgres migration checklist',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+    adapter.embeddings.storeEmbedding(redis.id, new Float32Array([0, 1]));
+    adapter.embeddings.storeEmbedding(postgres.id, new Float32Array([1, 0]));
+
+    const context = await manager.getContextAt(cutoff);
+    expect(context.activeTurns.map((turn) => turn.content)).toEqual([
+      'Need the redis cache rollout notes',
+    ]);
+    expect(context.relevantKnowledge[0]?.id).toBe(redis.id);
+    await manager.close();
+  });
+
   it('returns hybrid search results', async () => {
     const manager = createMemoryManager({
       adapter,
@@ -673,6 +739,260 @@ describe('memory manager', () => {
       });
 
       await expect(manager.searchEpisodes({ query: 'test' })).rejects.toThrow('structuredClient');
+      await manager.close();
+    });
+  });
+
+  describe('playbook methods', () => {
+    it('createPlaybook inserts and returns a playbook', async () => {
+      const manager = createMemoryManager({
+        adapter,
+        scope: makeScope(),
+        sessionId: 'session-1',
+        summarizer: async () => ({
+          summary: 'summary',
+          key_entities: [],
+          topic_tags: [],
+        }),
+        autoCompact: false,
+      });
+
+      const playbook = await manager.createPlaybook({
+        title: 'Deploy procedure',
+        description: 'How to deploy to production',
+        instructions: '1. Build\n2. Test\n3. Push',
+      });
+
+      expect(playbook.id).toBeGreaterThan(0);
+      expect(playbook.title).toBe('Deploy procedure');
+      expect(playbook.instructions).toContain('Build');
+      await manager.close();
+    });
+
+    it('getPlaybook retrieves by id', async () => {
+      const manager = createMemoryManager({
+        adapter,
+        scope: makeScope(),
+        sessionId: 'session-1',
+        summarizer: async () => ({
+          summary: 'summary',
+          key_entities: [],
+          topic_tags: [],
+        }),
+        autoCompact: false,
+      });
+
+      const created = await manager.createPlaybook({
+        title: 'Test playbook',
+        description: 'For testing',
+        instructions: 'Run tests',
+      });
+
+      const retrieved = await manager.getPlaybook(created.id);
+      expect(retrieved).not.toBeNull();
+      expect(retrieved!.title).toBe('Test playbook');
+      await manager.close();
+    });
+
+    it('listPlaybooks returns active playbooks', async () => {
+      const manager = createMemoryManager({
+        adapter,
+        scope: makeScope(),
+        sessionId: 'session-1',
+        summarizer: async () => ({
+          summary: 'summary',
+          key_entities: [],
+          topic_tags: [],
+        }),
+        autoCompact: false,
+      });
+
+      await manager.createPlaybook({
+        title: 'Playbook A',
+        description: 'A',
+        instructions: 'A instructions',
+      });
+      await manager.createPlaybook({
+        title: 'Playbook B',
+        description: 'B',
+        instructions: 'B instructions',
+      });
+
+      const list = await manager.listPlaybooks();
+      expect(list.length).toBe(2);
+      await manager.close();
+    });
+
+    it('searchPlaybooks finds matching playbooks', async () => {
+      const manager = createMemoryManager({
+        adapter,
+        scope: makeScope(),
+        sessionId: 'session-1',
+        summarizer: async () => ({
+          summary: 'summary',
+          key_entities: [],
+          topic_tags: [],
+        }),
+        autoCompact: false,
+      });
+
+      await manager.createPlaybook({
+        title: 'Deploy to staging',
+        description: 'Staging deployment',
+        instructions: 'Run deploy script',
+      });
+      await manager.createPlaybook({
+        title: 'Run tests',
+        description: 'Testing',
+        instructions: 'npm test',
+      });
+
+      const results = await manager.searchPlaybooks('deploy');
+      expect(results.length).toBe(1);
+      expect(results[0].item.title).toContain('Deploy');
+      await manager.close();
+    });
+
+    it('revisePlaybook stores revision and updates instructions', async () => {
+      const manager = createMemoryManager({
+        adapter,
+        scope: makeScope(),
+        sessionId: 'session-1',
+        summarizer: async () => ({
+          summary: 'summary',
+          key_entities: [],
+          topic_tags: [],
+        }),
+        autoCompact: false,
+      });
+
+      const playbook = await manager.createPlaybook({
+        title: 'Revisable',
+        description: 'Will be revised',
+        instructions: 'Original instructions',
+      });
+
+      const result = await manager.revisePlaybook(
+        playbook.id,
+        'Updated instructions',
+        'Improved clarity',
+      );
+
+      expect(result.revision.instructions).toBe('Original instructions');
+      expect(result.playbook.instructions).toBe('Updated instructions');
+      await manager.close();
+    });
+
+    it('recordPlaybookUse increments use count', async () => {
+      const manager = createMemoryManager({
+        adapter,
+        scope: makeScope(),
+        sessionId: 'session-1',
+        summarizer: async () => ({
+          summary: 'summary',
+          key_entities: [],
+          topic_tags: [],
+        }),
+        autoCompact: false,
+      });
+
+      const playbook = await manager.createPlaybook({
+        title: 'Usable',
+        description: 'Track usage',
+        instructions: 'Do the thing',
+      });
+
+      await manager.recordPlaybookUse(playbook.id);
+      const updated = await manager.getPlaybook(playbook.id);
+      expect(updated!.use_count).toBe(1);
+      await manager.close();
+    });
+
+    it('getPlaybook returns null for playbook from different scope', async () => {
+      const scopeA = makeScope({ scope_id: 'scope-a' });
+      const scopeB = makeScope({ scope_id: 'scope-b' });
+
+      const managerA = createMemoryManager({
+        adapter,
+        scope: scopeA,
+        sessionId: 'session-1',
+        summarizer: async () => ({ summary: 's', key_entities: [], topic_tags: [] }),
+        autoCompact: false,
+      });
+
+      const playbook = await managerA.createPlaybook({
+        title: 'Scoped playbook',
+        description: 'Belongs to scope-a',
+        instructions: 'Do stuff',
+      });
+
+      const managerB = createMemoryManager({
+        adapter,
+        scope: scopeB,
+        sessionId: 'session-1',
+        summarizer: async () => ({ summary: 's', key_entities: [], topic_tags: [] }),
+        autoCompact: false,
+      });
+
+      const result = await managerB.getPlaybook(playbook.id);
+      expect(result).toBeNull();
+
+      await managerA.close();
+      await managerB.close();
+    });
+
+    it('recordPlaybookUse rejects cross-scope mutation', async () => {
+      const scopeA = makeScope({ scope_id: 'scope-a' });
+      const scopeB = makeScope({ scope_id: 'scope-b' });
+
+      const managerA = createMemoryManager({
+        adapter,
+        scope: scopeA,
+        sessionId: 'session-1',
+        summarizer: async () => ({ summary: 's', key_entities: [], topic_tags: [] }),
+        autoCompact: false,
+      });
+
+      const playbook = await managerA.createPlaybook({
+        title: 'Protected',
+        description: 'Cannot be used from other scope',
+        instructions: 'Secret',
+      });
+
+      const managerB = createMemoryManager({
+        adapter,
+        scope: scopeB,
+        sessionId: 'session-1',
+        summarizer: async () => ({ summary: 's', key_entities: [], topic_tags: [] }),
+        autoCompact: false,
+      });
+
+      await expect(managerB.recordPlaybookUse(playbook.id)).rejects.toThrow('does not belong');
+
+      await managerA.close();
+      await managerB.close();
+    });
+
+    it('createPlaybookFromTask throws without structuredClient', async () => {
+      const manager = createMemoryManager({
+        adapter,
+        scope: makeScope(),
+        sessionId: 'session-1',
+        summarizer: async () => ({
+          summary: 'summary',
+          key_entities: [],
+          topic_tags: [],
+        }),
+        autoCompact: false,
+      });
+
+      await expect(
+        manager.createPlaybookFromTask({
+          title: 'Test',
+          description: 'Test',
+          sessionId: 'sess-1',
+        }),
+      ).rejects.toThrow('structuredClient');
       await manager.close();
     });
   });

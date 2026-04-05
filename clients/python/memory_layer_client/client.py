@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator, Iterator
 from typing import Any, Optional
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -35,15 +35,27 @@ from .models import (
     EpisodeSearchResponse,
     EpisodeSummary,
     Playbook,
+    PlaybookSearchHit,
     Profile,
     ReflectResult,
     RevisePlaybookResult,
+    SessionSnapshot,
     TrustAssessmentResponse,
 )
 
 
 class MemoryLayerError(RuntimeError):
-    """Raised when the memory-layer service returns an error."""
+    """Raised when the memory-layer service returns an error.
+
+    Attributes:
+        status_code: HTTP status code returned by the service, or None if
+            the error occurred before a response was received (e.g. invalid
+            JSON, transport failure).
+    """
+
+    def __init__(self, message: str, status_code: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _merge_scope(
@@ -151,7 +163,8 @@ class MemoryClient:
         )
         if response.is_error:
             raise MemoryLayerError(
-                f"memory-layer API error {response.status_code}: {response.text}"
+                f"memory-layer API error {response.status_code}: {response.text}",
+                status_code=response.status_code,
             )
         payload = response.json()
         if not isinstance(payload, dict):
@@ -359,10 +372,16 @@ class MemoryClient:
         query: str,
         detail_level: Optional[str] = None,
         limit: Optional[int] = None,
+        time_range: Optional[dict[str, int]] = None,
         *,
         scope: Optional[MemoryScope] = None,
     ) -> EpisodeSearchResponse:
         params: dict[str, Any] = {"q": query, "detail": detail_level, "limit": limit}
+        if time_range is not None:
+            if "start_at" in time_range:
+                params["start_at"] = time_range["start_at"]
+            if "end_at" in time_range:
+                params["end_at"] = time_range["end_at"]
         if scope or self.default_scope:
             params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
         payload = self._request(
@@ -396,6 +415,7 @@ class MemoryClient:
         detail_level: Optional[str] = None,
         include_episodic: Optional[bool] = None,
         include_declarative: Optional[bool] = None,
+        limit: Optional[int] = None,
         time_range: Optional[dict[str, int]] = None,
         *,
         scope: Optional[MemoryScope] = None,
@@ -407,6 +427,8 @@ class MemoryClient:
             body["includeEpisodic"] = include_episodic
         if include_declarative is not None:
             body["includeDeclarative"] = include_declarative
+        if limit is not None:
+            body["limit"] = limit
         if time_range is not None:
             body["timeRange"] = time_range
         payload = self._request(
@@ -448,6 +470,7 @@ class MemoryClient:
         view: Optional[str] = None,
         sections: Optional[list[str]] = None,
         min_trust: Optional[float] = None,
+        include_provisional: Optional[bool] = None,
         include_disputed: Optional[bool] = None,
         *,
         scope: Optional[MemoryScope] = None,
@@ -456,6 +479,7 @@ class MemoryClient:
             "view": view,
             "sections": ",".join(sections) if sections else None,
             "min_trust": min_trust,
+            "includeProvisional": str(include_provisional).lower() if include_provisional is not None else None,
             "includeDisputed": str(include_disputed).lower() if include_disputed is not None else None,
         }
         if scope or self.default_scope:
@@ -524,7 +548,9 @@ class MemoryClient:
         limit: Optional[int] = None,
         *,
         scope: Optional[MemoryScope] = None,
-    ) -> list[Playbook]:
+    ) -> list[PlaybookSearchHit]:
+        """Search playbooks by query. Returns ranked hits preserving rank and
+        the full playbook payload including scope metadata."""
         params: dict[str, Any] = {"q": query, "limit": limit}
         if scope or self.default_scope:
             params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
@@ -533,14 +559,15 @@ class MemoryClient:
             _append_query_params("/v1/playbooks", params),
             headers=_scope_headers(scope, self.default_scope),
         )
-        return [Playbook.from_dict(p) for p in payload.get("playbooks", [])]
+        return [PlaybookSearchHit.from_dict(p) for p in payload.get("playbooks", [])]
 
     def get_playbook(
         self,
         playbook_id: int,
         *,
         scope: Optional[MemoryScope] = None,
-    ) -> Optional[Playbook]:
+    ) -> Playbook:
+        """Fetch a playbook by id. Raises MemoryLayerError on 404."""
         payload = self._request(
             "GET",
             f"/v1/playbooks/{playbook_id}",
@@ -591,6 +618,7 @@ class MemoryClient:
         description: str,
         session_id: str,
         tags: Optional[list[str]] = None,
+        source_working_memory_id: Optional[int] = None,
         *,
         scope: Optional[MemoryScope] = None,
     ) -> Playbook:
@@ -601,6 +629,8 @@ class MemoryClient:
         }
         if tags is not None:
             body["tags"] = tags
+        if source_working_memory_id is not None:
+            body["sourceWorkingMemoryId"] = source_working_memory_id
         if scope or self.default_scope:
             body["scope"] = (scope or self.default_scope).to_dict()  # type: ignore[union-attr]
         payload = self._request(
@@ -696,6 +726,63 @@ class MemoryClient:
             headers=_scope_headers(scope, self.default_scope),
         )
 
+    def capture_snapshot(
+        self,
+        session_id: str,
+        relevance_query: Optional[str] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> SessionSnapshot:
+        body: dict[str, Any] = {}
+        if relevance_query is not None:
+            body["relevanceQuery"] = relevance_query
+        encoded = quote(session_id, safe="")
+        payload = self._request(
+            "POST",
+            f"/v1/sessions/{encoded}/snapshot",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return SessionSnapshot.from_dict(payload["snapshot"])
+
+    def get_snapshot(
+        self,
+        session_id: str,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> Optional[SessionSnapshot]:
+        encoded = quote(session_id, safe="")
+        try:
+            payload = self._request(
+                "GET",
+                f"/v1/sessions/{encoded}/snapshot",
+                headers=_scope_headers(scope, self.default_scope),
+            )
+        except MemoryLayerError as err:
+            if err.status_code == 404:
+                return None
+            raise
+        return SessionSnapshot.from_dict(payload["snapshot"])
+
+    def refresh_snapshot(
+        self,
+        session_id: str,
+        relevance_query: Optional[str] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> SessionSnapshot:
+        body: dict[str, Any] = {}
+        if relevance_query is not None:
+            body["relevanceQuery"] = relevance_query
+        encoded = quote(session_id, safe="")
+        payload = self._request(
+            "POST",
+            f"/v1/sessions/{encoded}/refresh",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return SessionSnapshot.from_dict(payload["snapshot"])
+
     def stream_events(
         self,
         *,
@@ -708,7 +795,8 @@ class MemoryClient:
         with self._client.stream("GET", path, headers=headers) as response:
             if response.is_error:
                 raise MemoryLayerError(
-                    f"memory-layer API error {response.status_code}: {response.text}"
+                    f"memory-layer API error {response.status_code}: {response.text}",
+                    status_code=response.status_code,
                 )
             for line in response.iter_lines():
                 event = _parse_sse_payload(line)
@@ -906,7 +994,8 @@ class AsyncMemoryClient:
         )
         if response.is_error:
             raise MemoryLayerError(
-                f"memory-layer API error {response.status_code}: {response.text}"
+                f"memory-layer API error {response.status_code}: {response.text}",
+                status_code=response.status_code,
             )
         payload = response.json()
         if not isinstance(payload, dict):
@@ -1114,10 +1203,16 @@ class AsyncMemoryClient:
         query: str,
         detail_level: Optional[str] = None,
         limit: Optional[int] = None,
+        time_range: Optional[dict[str, int]] = None,
         *,
         scope: Optional[MemoryScope] = None,
     ) -> EpisodeSearchResponse:
         params: dict[str, Any] = {"q": query, "detail": detail_level, "limit": limit}
+        if time_range is not None:
+            if "start_at" in time_range:
+                params["start_at"] = time_range["start_at"]
+            if "end_at" in time_range:
+                params["end_at"] = time_range["end_at"]
         if scope or self.default_scope:
             params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
         payload = await self._request(
@@ -1151,6 +1246,7 @@ class AsyncMemoryClient:
         detail_level: Optional[str] = None,
         include_episodic: Optional[bool] = None,
         include_declarative: Optional[bool] = None,
+        limit: Optional[int] = None,
         time_range: Optional[dict[str, int]] = None,
         *,
         scope: Optional[MemoryScope] = None,
@@ -1162,6 +1258,8 @@ class AsyncMemoryClient:
             body["includeEpisodic"] = include_episodic
         if include_declarative is not None:
             body["includeDeclarative"] = include_declarative
+        if limit is not None:
+            body["limit"] = limit
         if time_range is not None:
             body["timeRange"] = time_range
         payload = await self._request(
@@ -1203,6 +1301,7 @@ class AsyncMemoryClient:
         view: Optional[str] = None,
         sections: Optional[list[str]] = None,
         min_trust: Optional[float] = None,
+        include_provisional: Optional[bool] = None,
         include_disputed: Optional[bool] = None,
         *,
         scope: Optional[MemoryScope] = None,
@@ -1211,6 +1310,7 @@ class AsyncMemoryClient:
             "view": view,
             "sections": ",".join(sections) if sections else None,
             "min_trust": min_trust,
+            "includeProvisional": str(include_provisional).lower() if include_provisional is not None else None,
             "includeDisputed": str(include_disputed).lower() if include_disputed is not None else None,
         }
         if scope or self.default_scope:
@@ -1279,7 +1379,9 @@ class AsyncMemoryClient:
         limit: Optional[int] = None,
         *,
         scope: Optional[MemoryScope] = None,
-    ) -> list[Playbook]:
+    ) -> list[PlaybookSearchHit]:
+        """Search playbooks by query. Returns ranked hits preserving rank and
+        the full playbook payload including scope metadata."""
         params: dict[str, Any] = {"q": query, "limit": limit}
         if scope or self.default_scope:
             params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
@@ -1288,14 +1390,15 @@ class AsyncMemoryClient:
             _append_query_params("/v1/playbooks", params),
             headers=_scope_headers(scope, self.default_scope),
         )
-        return [Playbook.from_dict(p) for p in payload.get("playbooks", [])]
+        return [PlaybookSearchHit.from_dict(p) for p in payload.get("playbooks", [])]
 
     async def get_playbook(
         self,
         playbook_id: int,
         *,
         scope: Optional[MemoryScope] = None,
-    ) -> Optional[Playbook]:
+    ) -> Playbook:
+        """Fetch a playbook by id. Raises MemoryLayerError on 404."""
         payload = await self._request(
             "GET",
             f"/v1/playbooks/{playbook_id}",
@@ -1346,6 +1449,7 @@ class AsyncMemoryClient:
         description: str,
         session_id: str,
         tags: Optional[list[str]] = None,
+        source_working_memory_id: Optional[int] = None,
         *,
         scope: Optional[MemoryScope] = None,
     ) -> Playbook:
@@ -1356,6 +1460,8 @@ class AsyncMemoryClient:
         }
         if tags is not None:
             body["tags"] = tags
+        if source_working_memory_id is not None:
+            body["sourceWorkingMemoryId"] = source_working_memory_id
         if scope or self.default_scope:
             body["scope"] = (scope or self.default_scope).to_dict()  # type: ignore[union-attr]
         payload = await self._request(
@@ -1451,6 +1557,63 @@ class AsyncMemoryClient:
             headers=_scope_headers(scope, self.default_scope),
         )
 
+    async def capture_snapshot(
+        self,
+        session_id: str,
+        relevance_query: Optional[str] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> SessionSnapshot:
+        body: dict[str, Any] = {}
+        if relevance_query is not None:
+            body["relevanceQuery"] = relevance_query
+        encoded = quote(session_id, safe="")
+        payload = await self._request(
+            "POST",
+            f"/v1/sessions/{encoded}/snapshot",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return SessionSnapshot.from_dict(payload["snapshot"])
+
+    async def get_snapshot(
+        self,
+        session_id: str,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> Optional[SessionSnapshot]:
+        encoded = quote(session_id, safe="")
+        try:
+            payload = await self._request(
+                "GET",
+                f"/v1/sessions/{encoded}/snapshot",
+                headers=_scope_headers(scope, self.default_scope),
+            )
+        except MemoryLayerError as err:
+            if err.status_code == 404:
+                return None
+            raise
+        return SessionSnapshot.from_dict(payload["snapshot"])
+
+    async def refresh_snapshot(
+        self,
+        session_id: str,
+        relevance_query: Optional[str] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> SessionSnapshot:
+        body: dict[str, Any] = {}
+        if relevance_query is not None:
+            body["relevanceQuery"] = relevance_query
+        encoded = quote(session_id, safe="")
+        payload = await self._request(
+            "POST",
+            f"/v1/sessions/{encoded}/refresh",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return SessionSnapshot.from_dict(payload["snapshot"])
+
     async def astream_events(
         self,
         *,
@@ -1463,7 +1626,8 @@ class AsyncMemoryClient:
         async with self._client.stream("GET", path, headers=headers) as response:
             if response.is_error:
                 raise MemoryLayerError(
-                    f"memory-layer API error {response.status_code}: {response.text}"
+                    f"memory-layer API error {response.status_code}: {response.text}",
+                    status_code=response.status_code,
                 )
             async for line in response.aiter_lines():
                 event = _parse_sse_payload(line)

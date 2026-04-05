@@ -14,16 +14,19 @@ export const noopLogger: Logger = {
   error() {},
 };
 
-export type MemoryEventType =
-  | 'capability'
-  | 'compaction'
-  | 'promotion'
-  | 'extraction'
-  | 'knowledge_change'
-  | 'search'
-  | 'context_assembly'
-  | 'semantic_search'
-  | 'manager';
+export const MEMORY_EVENT_TYPES = [
+  'capability',
+  'compaction',
+  'promotion',
+  'extraction',
+  'knowledge_change',
+  'search',
+  'context_assembly',
+  'semantic_search',
+  'manager',
+] as const;
+
+export type MemoryEventType = (typeof MEMORY_EVENT_TYPES)[number];
 
 export interface MemoryEvent {
   type: MemoryEventType;

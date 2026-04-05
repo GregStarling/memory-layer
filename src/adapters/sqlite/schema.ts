@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-export const CURRENT_SCHEMA_VERSION = 11;
+export const CURRENT_SCHEMA_VERSION = 12;
 
 export function createSQLiteSchema(database: Database.Database): void {
   database.pragma('journal_mode = WAL');
@@ -460,6 +460,28 @@ export function createSQLiteSchema(database: Database.Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_pbr_playbook ON playbook_revisions(playbook_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS associations (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id         TEXT    NOT NULL,
+      system_id         TEXT    NOT NULL,
+      workspace_id      TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id  TEXT    NOT NULL DEFAULT 'default',
+      scope_id          TEXT    NOT NULL,
+      source_kind       TEXT    NOT NULL,
+      source_id         INTEGER NOT NULL,
+      target_kind       TEXT    NOT NULL,
+      target_id         INTEGER NOT NULL,
+      association_type   TEXT    NOT NULL,
+      confidence        REAL    NOT NULL DEFAULT 0.5,
+      auto_generated    INTEGER NOT NULL DEFAULT 0,
+      created_at        INTEGER NOT NULL,
+      UNIQUE(source_kind, source_id, target_kind, target_id, association_type)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_assoc_source ON associations(source_kind, source_id);
+    CREATE INDEX IF NOT EXISTS idx_assoc_target ON associations(target_kind, target_id);
+    CREATE INDEX IF NOT EXISTS idx_assoc_scope ON associations(tenant_id, system_id, workspace_id, collaboration_id, scope_id);
   `);
 
   database
