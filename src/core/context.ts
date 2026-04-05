@@ -176,7 +176,7 @@ function matchesVisibility(
   }
 }
 
-function resolveVisibleKnowledge(
+export function resolveVisibleKnowledge(
   items: KnowledgeMemory[],
   scope: MemoryScope,
   view: ContextViewPolicy,
@@ -202,7 +202,7 @@ function resolveVisibleKnowledge(
   });
 }
 
-function resolveVisibleWorkItems(
+export function resolveVisibleWorkItems(
   items: WorkItem[],
   scope: MemoryScope,
   view: ContextViewPolicy,
@@ -228,7 +228,7 @@ function resolveVisibleWorkItems(
   });
 }
 
-function resolveVisiblePlaybooks(
+export function resolveVisiblePlaybooks(
   items: Playbook[],
   scope: MemoryScope,
   view: ContextViewPolicy,
@@ -254,7 +254,7 @@ function resolveVisiblePlaybooks(
   });
 }
 
-function resolveVisibleWorkClaims(
+export function resolveVisibleWorkClaims(
   items: WorkClaim[],
   scope: MemoryScope,
   view: ContextViewPolicy,
@@ -280,7 +280,7 @@ function resolveVisibleWorkClaims(
   });
 }
 
-function resolveVisibleHandoffs(
+export function resolveVisibleHandoffs(
   items: HandoffRecord[],
   scope: MemoryScope,
   view: ContextViewPolicy,
@@ -481,11 +481,58 @@ function deriveSessionState(
   };
 }
 
+export interface DerivedShortTermState {
+  workingMemory: WorkingMemory | null;
+  recentSummaries: WorkingMemory[];
+  activeObjectives: WorkItem[];
+  currentObjective: string | null;
+  activeState: string[];
+  unresolvedWork: string[];
+  sessionState: SessionState;
+}
+
+export function buildDerivedShortTermState(input: {
+  activeTurns: Turn[];
+  workingMemoryCandidates: WorkingMemory[];
+  contextWorkItems: WorkItem[];
+  relevantKnowledge?: KnowledgeMemory[];
+  maxRecentSummaries?: number;
+}): DerivedShortTermState {
+  const workingMemory = [...input.workingMemoryCandidates]
+    .sort((a, b) => b.id - a.id)[0] ?? null;
+  const recentSummaries = input.workingMemoryCandidates
+    .filter((summary) => summary.id !== workingMemory?.id)
+    .slice(0, input.maxRecentSummaries ?? DEFAULT_CONTEXT_POLICY.maxRecentSummaries);
+  const activeObjectives = input.contextWorkItems.filter((item) => item.kind === 'objective');
+  const currentObjective = deriveCurrentObjective(workingMemory, input.activeTurns);
+  return {
+    workingMemory,
+    recentSummaries,
+    activeObjectives,
+    currentObjective,
+    activeState: deriveActiveState(workingMemory, input.activeTurns),
+    unresolvedWork: deriveUnresolvedWork(
+      workingMemory,
+      input.activeTurns,
+      input.relevantKnowledge ?? [],
+      input.contextWorkItems,
+    ),
+    sessionState: deriveSessionState(
+      workingMemory,
+      input.activeTurns,
+      activeObjectives,
+      input.contextWorkItems,
+      recentSummaries,
+      currentObjective,
+    ),
+  };
+}
+
 function isWorkItemActiveAt(item: WorkItem, asOf: number): boolean {
   return item.created_at <= asOf && !(item.status === 'done' && item.updated_at <= asOf);
 }
 
-async function getContextWorkItems(
+export async function getContextWorkItems(
   adapter: AsyncStorageAdapter,
   scope: MemoryScope,
   asOf?: number,
@@ -714,18 +761,23 @@ export async function buildMemoryContext(
         view,
       )
     : await getContextWorkItems(adapter, normalizedScope, asOf, effectiveScopeLevel);
-  const activeObjectives = contextWorkItems.filter((item) => item.kind === 'objective');
   const workingMemoryCandidates = await adapter.getActiveWorkingMemory(
     normalizedScope,
     options?.sessionId,
   );
-  const workingMemory = [...workingMemoryCandidates]
-    .filter((item) => asOf == null || item.created_at <= asOf)
-    .sort((a, b) => b.id - a.id)[0] ?? null;
   const allWorkingMemory = workingMemoryCandidates.filter((item) => asOf == null || item.created_at <= asOf);
-  const recentSummaries = allWorkingMemory
-    .filter((summary) => summary.id !== workingMemory?.id)
-    .slice(0, policy.maxRecentSummaries);
+  const initialShortTermState = buildDerivedShortTermState({
+    activeTurns,
+    workingMemoryCandidates: allWorkingMemory,
+    contextWorkItems,
+    maxRecentSummaries: policy.maxRecentSummaries,
+  });
+  const {
+    activeObjectives,
+    currentObjective,
+    recentSummaries,
+    workingMemory,
+  } = initialShortTermState;
 
   const activeKnowledge = effectiveScopeLevel && effectiveScopeLevel !== 'scope'
     ? await adapter.getActiveKnowledgeCrossScope(normalizedScope, effectiveScopeLevel)
@@ -1124,22 +1176,18 @@ export async function buildMemoryContext(
         }
       : null;
 
-  const currentObjective = deriveCurrentObjective(workingMemory, activeTurns);
-  const activeState = deriveActiveState(workingMemory, activeTurns);
-  const unresolvedWork = deriveUnresolvedWork(
-    workingMemory,
+  const shortTermState = buildDerivedShortTermState({
     activeTurns,
+    workingMemoryCandidates: allWorkingMemory,
+    contextWorkItems,
     relevantKnowledge,
-    contextWorkItems,
-  );
-  const derivedSessionState = deriveSessionState(
-    workingMemory,
-    activeTurns,
-    activeObjectives,
-    contextWorkItems,
-    trimmedSummaries,
-    currentObjective,
-  );
+    maxRecentSummaries: policy.maxRecentSummaries,
+  });
+  const {
+    activeState,
+    sessionState: derivedSessionState,
+    unresolvedWork,
+  } = shortTermState;
   const projectedSessionState =
     asOf == null && options?.sessionId
       ? await adapter.getSessionState(normalizedScope, options.sessionId)

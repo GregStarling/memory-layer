@@ -904,7 +904,7 @@ export function createPostgresAdapter(
     const clauses = [`${scopeWhere()}`, `created_at >= $6`, `created_at <= $7`];
     let nextParam = 8;
     if (resolved.cursor != null && compareTemporalIds(resolved.cursor, '0') > 0) {
-      clauses.push(`event_id > $${nextParam}`);
+      clauses.push(`event_id > $${nextParam}::bigint`);
       params.push(resolved.cursor);
       nextParam += 1;
     }
@@ -949,7 +949,7 @@ export function createPostgresAdapter(
     const clauses = [`${wideScopeWhere(scope, level)}`, `created_at >= $${params.length - 1}`, `created_at <= $${params.length}`];
     let nextParam = params.length + 1;
     if (resolved.cursor != null && compareTemporalIds(resolved.cursor, '0') > 0) {
-      clauses.push(`event_id > $${nextParam}`);
+      clauses.push(`event_id > $${nextParam}::bigint`);
       params.push(resolved.cursor);
       nextParam += 1;
     }

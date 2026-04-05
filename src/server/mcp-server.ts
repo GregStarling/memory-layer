@@ -788,6 +788,7 @@ function serializeWorkClaim(claim: WorkClaim): Record<string, unknown> {
     expires_at: claim.expires_at,
     released_at: claim.released_at,
     release_reason: claim.release_reason,
+    source_event_id: claim.source_event_id,
     visibility_class: claim.visibility_class,
     version: claim.version,
   };
@@ -809,6 +810,7 @@ function serializeHandoffRecord(handoff: HandoffRecord): Record<string, unknown>
     canceled_at: handoff.canceled_at,
     expires_at: handoff.expires_at,
     decision_reason: handoff.decision_reason,
+    source_event_id: handoff.source_event_id,
     visibility_class: handoff.visibility_class,
     version: handoff.version,
   };

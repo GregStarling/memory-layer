@@ -557,6 +557,7 @@ class MaintenanceResponse:
     expired_working_memory: int
     retired_knowledge: int
     deleted_work_items: int
+    deleted_association_ids: list[int]
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "MaintenanceResponse":
@@ -564,6 +565,7 @@ class MaintenanceResponse:
             expired_working_memory=int(payload["expiredWorkingMemory"]),
             retired_knowledge=int(payload["retiredKnowledge"]),
             deleted_work_items=int(payload["deletedWorkItems"]),
+            deleted_association_ids=[int(item) for item in payload.get("deletedAssociationIds", [])],
         )
 
 

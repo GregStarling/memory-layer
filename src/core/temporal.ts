@@ -64,6 +64,29 @@ export interface ReplayedTemporalState {
   watermarkEventId: TemporalId | null;
 }
 
+export function normalizeWorkClaimAt(claim: WorkClaim, asOf: number): WorkClaim {
+  if (claim.status !== 'active' || claim.expires_at > asOf) {
+    return claim;
+  }
+  return {
+    ...claim,
+    status: 'expired',
+    released_at: claim.released_at ?? claim.expires_at,
+    release_reason: claim.release_reason ?? 'expired',
+  };
+}
+
+export function normalizeHandoffAt(handoff: HandoffRecord, asOf: number): HandoffRecord {
+  if (handoff.status !== 'pending' || handoff.expires_at == null || handoff.expires_at > asOf) {
+    return handoff;
+  }
+  return {
+    ...handoff,
+    status: 'expired',
+    decision_reason: handoff.decision_reason ?? 'expired',
+  };
+}
+
 function unsupported(name: string): never {
   throw new Error(`Temporal replay adapter does not support ${name}`);
 }
@@ -264,17 +287,33 @@ export function foldTemporalState(
   };
 }
 
+export function normalizeReplayedTemporalState(
+  state: ReplayedTemporalState,
+  asOf: number,
+): ReplayedTemporalState {
+  return {
+    ...state,
+    workClaims: state.workClaims
+      .map((claim) => normalizeWorkClaimAt(claim, asOf))
+      .sort((a, b) => a.claimed_at - b.claimed_at || a.id - b.id),
+    handoffs: state.handoffs
+      .map((handoff) => normalizeHandoffAt(handoff, asOf))
+      .sort((a, b) => a.created_at - b.created_at || a.id - b.id),
+  };
+}
+
 export function createTemporalReplayAdapter(
   state: ReplayedTemporalState,
   asOf: number,
 ): AsyncStorageAdapter {
-  const knowledgeById = new Map(state.knowledge.map((item) => [item.id, item]));
+  const replayState = normalizeReplayedTemporalState(state, asOf);
+  const knowledgeById = new Map(replayState.knowledge.map((item) => [item.id, item]));
   return {
     insertTurn: () => unsupported('insertTurn'),
     insertTurns: () => unsupported('insertTurns'),
-    getTurnById: async (id) => state.turns.find((turn) => turn.id === id) ?? null,
+    getTurnById: async (id) => replayState.turns.find((turn) => turn.id === id) ?? null,
     getActiveTurns: async (scope, sessionId) =>
-      state.turns.filter(
+      replayState.turns.filter(
         (turn) =>
           matchesScope(turn, scope) &&
           turn.archived_at == null &&
@@ -282,9 +321,11 @@ export function createTemporalReplayAdapter(
       ),
     getActiveTurnsPaginated: async () => unsupported('getActiveTurnsPaginated'),
     getTurnsByTimeRange: async (scope, range) =>
-      state.turns.filter((turn) => matchesScope(turn, scope) && inRange(turn.created_at, range)),
+      replayState.turns.filter(
+        (turn) => matchesScope(turn, scope) && inRange(turn.created_at, range),
+      ),
     searchTurns: async (scope, query, options) =>
-      state.turns
+      replayState.turns
         .filter((turn) => matchesScope(turn, scope) && (options?.activeOnly === false || turn.archived_at == null))
         .map((turn) => ({ item: turn, rank: scoreText(query, turn.content) }))
         .filter((entry) => entry.rank > 0)
@@ -292,7 +333,7 @@ export function createTemporalReplayAdapter(
         .slice(0, options?.limit ?? 10),
     archiveTurn: () => unsupported('archiveTurn'),
     getArchivedTurnRange: async (sessionId, startId, endId, scope) =>
-      state.turns.filter(
+      replayState.turns.filter(
         (turn) =>
           matchesScope(turn, scope) &&
           turn.session_id === sessionId &&
@@ -301,13 +342,14 @@ export function createTemporalReplayAdapter(
           turn.archived_at != null,
       ),
     insertWorkingMemory: () => unsupported('insertWorkingMemory'),
-    getWorkingMemoryById: async (id) => state.workingMemory.find((item) => item.id === id) ?? null,
+    getWorkingMemoryById: async (id) =>
+      replayState.workingMemory.find((item) => item.id === id) ?? null,
     getWorkingMemoryBySession: async (sessionId, scope) =>
-      state.workingMemory.filter(
+      replayState.workingMemory.filter(
         (item) => matchesScope(item, scope) && item.session_id === sessionId,
       ),
     getActiveWorkingMemory: async (scope, sessionId) =>
-      state.workingMemory.filter(
+      replayState.workingMemory.filter(
         (item) =>
           matchesScope(item, scope) &&
           (sessionId == null || item.session_id === sessionId) &&
@@ -316,7 +358,7 @@ export function createTemporalReplayAdapter(
     getLatestWorkingMemory: async (scope, sessionId) =>
       (
         await Promise.resolve(
-          state.workingMemory
+          replayState.workingMemory
             .filter(
               (item) =>
                 matchesScope(item, scope) &&
@@ -327,7 +369,7 @@ export function createTemporalReplayAdapter(
         )
       ),
     getWorkingMemoryByTimeRange: async (scope, range) =>
-      state.workingMemory.filter(
+      replayState.workingMemory.filter(
         (item) => matchesScope(item, scope) && inRange(item.created_at, range),
       ),
     expireWorkingMemory: () => unsupported('expireWorkingMemory'),
@@ -345,20 +387,20 @@ export function createTemporalReplayAdapter(
     promoteKnowledgeCandidate: () => unsupported('promoteKnowledgeCandidate'),
     getKnowledgeMemoryById: async (id) => knowledgeById.get(id) ?? null,
     getActiveKnowledgeMemory: async (scope) =>
-      state.knowledge.filter(
+      replayState.knowledge.filter(
         (item) =>
           matchesScope(item, scope) && item.superseded_by_id === null && item.retired_at === null,
       ),
     getActiveKnowledgeMemoryPaginated: async () => unsupported('getActiveKnowledgeMemoryPaginated'),
     getActiveKnowledgeCrossScope: async (scope, level) =>
-      state.knowledge.filter(
+      replayState.knowledge.filter(
         (item) =>
           matchesLevel(item, scope, level) &&
           item.superseded_by_id === null &&
           item.retired_at === null,
       ),
     getKnowledgeSince: async (scope, level, since) =>
-      state.knowledge.filter(
+      replayState.knowledge.filter(
         (item) =>
           matchesLevel(item, scope, level) &&
           item.created_at >= since &&
@@ -366,10 +408,12 @@ export function createTemporalReplayAdapter(
           item.retired_at === null,
       ),
     getKnowledgeByTimeRange: async (scope, range) =>
-      state.knowledge.filter((item) => matchesScope(item, scope) && inRange(item.created_at, range)),
+      replayState.knowledge.filter(
+        (item) => matchesScope(item, scope) && inRange(item.created_at, range),
+      ),
     searchKnowledge: async (scope, query, options) =>
       activeSearchKnowledge(
-        state.knowledge.filter((item) => matchesScope(item, scope)),
+        replayState.knowledge.filter((item) => matchesScope(item, scope)),
         options,
       )
         .map((item) => ({ item, rank: scoreText(query, item.fact) }))
@@ -378,7 +422,7 @@ export function createTemporalReplayAdapter(
         .slice(0, options?.limit ?? 10),
     searchKnowledgeCrossScope: async (scope, level, query, options) =>
       activeSearchKnowledge(
-        state.knowledge.filter((item) => matchesLevel(item, scope, level)),
+        replayState.knowledge.filter((item) => matchesLevel(item, scope, level)),
         options,
       )
         .map((item) => ({ item, rank: scoreText(query, item.fact) }))
@@ -394,15 +438,21 @@ export function createTemporalReplayAdapter(
     retireKnowledgeMemory: () => unsupported('retireKnowledgeMemory'),
     supersedeKnowledgeMemory: () => unsupported('supersedeKnowledgeMemory'),
     insertWorkItem: () => unsupported('insertWorkItem'),
-    getWorkItemById: async (id) => state.workItems.find((item) => item.id === id) ?? null,
+    getWorkItemById: async (id) => replayState.workItems.find((item) => item.id === id) ?? null,
     getActiveWorkItems: async (scope) =>
-      state.workItems.filter((item) => matchesScope(item, scope) && item.status !== 'done'),
+      replayState.workItems.filter((item) => matchesScope(item, scope) && item.status !== 'done'),
     getActiveWorkItemsCrossScope: async (scope, level) =>
-      state.workItems.filter((item) => matchesLevel(item, scope, level) && item.status !== 'done'),
+      replayState.workItems.filter(
+        (item) => matchesLevel(item, scope, level) && item.status !== 'done',
+      ),
     getWorkItemsByTimeRange: async (scope, range) =>
-      state.workItems.filter((item) => matchesScope(item, scope) && inRange(item.created_at, range)),
+      replayState.workItems.filter(
+        (item) => matchesScope(item, scope) && inRange(item.created_at, range),
+      ),
     getWorkItemsByTimeRangeCrossScope: async (scope, level, range) =>
-      state.workItems.filter((item) => matchesLevel(item, scope, level) && inRange(item.created_at, range)),
+      replayState.workItems.filter(
+        (item) => matchesLevel(item, scope, level) && inRange(item.created_at, range),
+      ),
     updateWorkItemStatus: () => unsupported('updateWorkItemStatus'),
     updateWorkItem: async () => unsupported('updateWorkItem'),
     deleteWorkItem: () => unsupported('deleteWorkItem'),
@@ -412,12 +462,14 @@ export function createTemporalReplayAdapter(
     releaseWorkClaim: async (_claimId: number, _actor: ActorRef, _reason?: string) =>
       unsupported('releaseWorkClaim'),
     getActiveWorkClaim: async (workItemId: number) =>
-      state.workClaims.find(
-        (claim) => claim.work_item_id === workItemId && claim.status === 'active' && claim.expires_at > asOf,
+      replayState.workClaims.find(
+        (claim) => claim.work_item_id === workItemId && claim.status === 'active',
       ) ?? null,
     listWorkClaims: async (scope, options?: WorkClaimQuery) =>
-      state.workClaims.filter((claim) => {
+      replayState.workClaims.filter((claim) => {
         if (!matchesScope(claim, scope)) return false;
+        if (!options?.includeExpired && claim.status === 'expired') return false;
+        if (!options?.includeReleased && claim.status === 'released') return false;
         if (options?.sessionId && claim.session_id !== options.sessionId) return false;
         if (options?.visibilityClass && claim.visibility_class !== options.visibilityClass) return false;
         if (options?.actor) {
@@ -429,8 +481,10 @@ export function createTemporalReplayAdapter(
         return true;
       }),
     listWorkClaimsCrossScope: async (scope, level, options?: WorkClaimQuery) =>
-      state.workClaims.filter((claim) => {
+      replayState.workClaims.filter((claim) => {
         if (!matchesLevel(claim, scope, level)) return false;
+        if (!options?.includeExpired && claim.status === 'expired') return false;
+        if (!options?.includeReleased && claim.status === 'released') return false;
         if (options?.sessionId && claim.session_id !== options.sessionId) return false;
         if (options?.visibilityClass && claim.visibility_class !== options.visibilityClass) return false;
         if (options?.actor) {
@@ -449,7 +503,7 @@ export function createTemporalReplayAdapter(
     cancelHandoff: async (_handoffId: number, _actor: ActorRef, _reason?: string) =>
       unsupported('cancelHandoff'),
     listHandoffs: async (scope, options) =>
-      state.handoffs.filter((handoff) => {
+      replayState.handoffs.filter((handoff) => {
         if (!matchesScope(handoff, scope)) return false;
         if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
         if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
@@ -465,7 +519,7 @@ export function createTemporalReplayAdapter(
         return inbound || outbound;
       }),
     listHandoffsCrossScope: async (scope, level, options) =>
-      state.handoffs.filter((handoff) => {
+      replayState.handoffs.filter((handoff) => {
         if (!matchesLevel(handoff, scope, level)) return false;
         if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
         if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
@@ -486,17 +540,17 @@ export function createTemporalReplayAdapter(
     getCompactionLogById: async () => null,
     getRecentCompactionLogs: async () => [],
     insertPlaybook: () => unsupported('insertPlaybook'),
-    getPlaybookById: async (id) => state.playbooks.find((item) => item.id === id) ?? null,
+    getPlaybookById: async (id) => replayState.playbooks.find((item) => item.id === id) ?? null,
     getActivePlaybooks: async (scope) =>
-      state.playbooks.filter(
+      replayState.playbooks.filter(
         (item) => matchesScope(item, scope) && (item.status === 'draft' || item.status === 'active'),
       ),
     getActivePlaybooksCrossScope: async (scope, level) =>
-      state.playbooks.filter(
+      replayState.playbooks.filter(
         (item) => matchesLevel(item, scope, level) && (item.status === 'draft' || item.status === 'active'),
       ),
     searchPlaybooks: async (scope, query, options) =>
-      state.playbooks
+      replayState.playbooks
         .filter(
           (item) =>
             matchesScope(item, scope) &&
@@ -510,7 +564,7 @@ export function createTemporalReplayAdapter(
         .sort((a, b) => b.rank - a.rank || b.item.updated_at - a.item.updated_at)
         .slice(0, options?.limit ?? 10),
     searchPlaybooksCrossScope: async (scope, level, query, options) =>
-      state.playbooks
+      replayState.playbooks
         .filter(
           (item) =>
             matchesLevel(item, scope, level) &&
@@ -528,19 +582,20 @@ export function createTemporalReplayAdapter(
     insertPlaybookRevision: () => unsupported('insertPlaybookRevision'),
     getPlaybookRevisions: async () => [],
     insertAssociation: () => unsupported('insertAssociation'),
-    getAssociationById: async (id) => state.associations.find((item) => item.id === id) ?? null,
+    getAssociationById: async (id) =>
+      replayState.associations.find((item) => item.id === id) ?? null,
     getAssociationsFrom: async (kind, id, scope) =>
-      state.associations.filter(
+      replayState.associations.filter(
         (item) =>
           matchesScope(item, scope) && item.source_kind === kind && item.source_id === id,
       ),
     getAssociationsTo: async (kind, id, scope) =>
-      state.associations.filter(
+      replayState.associations.filter(
         (item) =>
           matchesScope(item, scope) && item.target_kind === kind && item.target_id === id,
       ),
     listAssociations: async (scope) =>
-      state.associations.filter((item) => matchesScope(item, scope)),
+      replayState.associations.filter((item) => matchesScope(item, scope)),
     deleteAssociation: () => unsupported('deleteAssociation'),
     insertMemoryEvent: () => unsupported('insertMemoryEvent'),
     listMemoryEvents: async () => unsupported('listMemoryEvents'),
@@ -548,7 +603,7 @@ export function createTemporalReplayAdapter(
     getMemoryEventsByEntity: async () => unsupported('getMemoryEventsByEntity'),
     getMemoryEventsBySession: async () => unsupported('getMemoryEventsBySession'),
     getSessionState: async (scope, sessionId) =>
-      state.sessionStates.find(
+      replayState.sessionStates.find(
         (item) => matchesScope(item, scope) && item.session_id === sessionId,
       ) ?? null,
     upsertSessionState: async (input) => ({
@@ -564,11 +619,11 @@ export function createTemporalReplayAdapter(
       source_event_id:
         input.source_event_id != null
           ? normalizeTemporalId(input.source_event_id)
-          : state.watermarkEventId ?? null,
+          : replayState.watermarkEventId ?? null,
     }),
     getTemporalWatermark: async (): Promise<TemporalProjectionWatermark | null> => ({
       projection_name: 'temporal',
-      last_event_id: state.watermarkEventId ?? '0',
+      last_event_id: replayState.watermarkEventId ?? '0',
       updated_at: asOf,
       cutover_at: asOf,
       metadata: null,

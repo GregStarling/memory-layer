@@ -369,10 +369,10 @@ function createAdapterFromDatabase(
         input.correlation_id ?? null,
         createdAt,
       );
-    const eventId = Number(result.lastInsertRowid);
+    const eventId = normalizeTemporalId(result.lastInsertRowid as string | number | bigint);
     writeTemporalWatermark({
       projection_name: 'temporal',
-      last_event_id: String(eventId),
+      last_event_id: eventId,
       updated_at: createdAt,
       cutover_at: readTemporalWatermark('temporal')?.cutover_at ?? createdAt,
       metadata: readTemporalWatermark('temporal')?.metadata ?? null,
@@ -422,12 +422,12 @@ function createAdapterFromDatabase(
           input.correlation_id ?? null,
           createdAt,
         );
-        const eventId = Number(result.lastInsertRowid);
+        const eventId = normalizeTemporalId(result.lastInsertRowid as string | number | bigint);
         const row = read.get(eventId) as MemoryEventRow | undefined;
         if (row) {
           records.push(rowToMemoryEvent(row));
         }
-        lastEventId = String(eventId);
+        lastEventId = eventId;
         lastCreatedAt = createdAt;
       }
       if (lastEventId != null) {

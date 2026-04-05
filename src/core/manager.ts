@@ -58,8 +58,15 @@ import type {
   WorkingMemory,
 } from '../contracts/types.js';
 import {
+  buildDerivedShortTermState,
   buildMemoryContext,
+  getContextWorkItems,
   resolveContextScopeLevel,
+  resolveVisibleHandoffs,
+  resolveVisibleKnowledge,
+  resolveVisiblePlaybooks,
+  resolveVisibleWorkClaims,
+  resolveVisibleWorkItems,
   type MemoryContext,
 } from './context.js';
 import type { MemoryEventEmitter } from './events.js';
@@ -121,6 +128,9 @@ import {
   foldTemporalState,
   listAllMemoryEvents,
   listAllMemoryEventsCrossScope,
+  normalizeReplayedTemporalState,
+  normalizeHandoffAt,
+  normalizeWorkClaimAt,
 } from './temporal.js';
 
 export interface MemoryManagerConfig {
@@ -849,24 +859,150 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
   }
 
   async function refreshSessionStateProjection(): Promise<void> {
-    const sessionStateContext = await buildMemoryContext(asyncAdapter, config.scope, {
-      sessionId: config.sessionId,
-      crossScopeLevel: 'scope',
-      policy: {
-        ...(config.contextPolicy ?? {}),
-        touchSelectedKnowledge: false,
-      },
-      tokenEstimator,
-      logger: config.logger,
-      onEvent,
-    });
-    const watermark = await asyncAdapter.getTemporalWatermark('temporal');
-    await asyncAdapter.upsertSessionState({
-      ...normalizeScope(config.scope),
-      session_id: config.sessionId,
-      ...sessionStateContext.sessionState,
-      source_event_id: watermark?.last_event_id ?? null,
-    });
+    try {
+      const [activeTurns, workingMemoryCandidates, contextWorkItems, watermark] =
+        await Promise.all([
+          asyncAdapter.getActiveTurns(config.scope, config.sessionId),
+          asyncAdapter.getActiveWorkingMemory(config.scope, config.sessionId),
+          getContextWorkItems(asyncAdapter, config.scope, undefined, 'scope'),
+          asyncAdapter.getTemporalWatermark('temporal'),
+        ]);
+      const shortTermState = buildDerivedShortTermState({
+        activeTurns,
+        workingMemoryCandidates,
+        contextWorkItems,
+        maxRecentSummaries:
+          config.contextPolicy?.maxRecentSummaries ??
+          DEFAULT_CONTEXT_POLICY.maxRecentSummaries,
+      });
+      await asyncAdapter.upsertSessionState({
+        ...normalizeScope(config.scope),
+        session_id: config.sessionId,
+        ...shortTermState.sessionState,
+        source_event_id: watermark?.last_event_id ?? null,
+      });
+    } catch (error) {
+      config.logger?.warn?.('memory.session_state_projection_refresh_failed', {
+        error: String(error),
+        sessionId: config.sessionId,
+      });
+      emitMemoryEvent('manager', config.scope, { logger: config.logger, onEvent }, 0, {
+        action: 'session_state_projection_refresh_failed',
+        sessionId: config.sessionId,
+        error: String(error),
+      });
+    }
+  }
+
+  async function collectBestEffortTemporalState(
+    asOf: number,
+    options?: {
+      view?: ContextViewPolicy;
+      viewer?: ActorRef;
+      includeCoordinationState?: boolean;
+    },
+  ): Promise<{
+    turns: Turn[];
+    workingMemory: WorkingMemory[];
+    knowledge: KnowledgeMemory[];
+    workItems: WorkItem[];
+    workClaims: WorkClaim[];
+    handoffs: HandoffRecord[];
+    associations: Association[];
+    playbooks: Playbook[];
+  }> {
+    const view = options?.view;
+    const effectiveScopeLevel = resolveContextScopeLevel(config.crossScopeLevel, view);
+    const [
+      turns,
+      workingMemory,
+      knowledge,
+      contextWorkItems,
+      playbooks,
+      associations,
+      rawWorkClaims,
+      rawHandoffs,
+    ] = await Promise.all([
+      asyncAdapter.getTurnsByTimeRange(config.scope, { end_at: asOf }),
+      asyncAdapter.getWorkingMemoryByTimeRange(config.scope, { end_at: asOf }),
+      effectiveScopeLevel && effectiveScopeLevel !== 'scope'
+        ? asyncAdapter.getActiveKnowledgeCrossScope(config.scope, effectiveScopeLevel)
+        : asyncAdapter.getActiveKnowledgeMemory(config.scope),
+      getContextWorkItems(asyncAdapter, config.scope, asOf, effectiveScopeLevel),
+      effectiveScopeLevel && effectiveScopeLevel !== 'scope'
+        ? asyncAdapter.getActivePlaybooksCrossScope(config.scope, effectiveScopeLevel)
+        : asyncAdapter.getActivePlaybooks(config.scope),
+      asyncAdapter.listAssociations(config.scope),
+      effectiveScopeLevel && effectiveScopeLevel !== 'scope'
+        ? asyncAdapter.listWorkClaimsCrossScope(config.scope, effectiveScopeLevel, {
+            includeExpired: true,
+            includeReleased: true,
+          })
+        : asyncAdapter.listWorkClaims(config.scope, {
+            includeExpired: true,
+            includeReleased: true,
+          }),
+      effectiveScopeLevel && effectiveScopeLevel !== 'scope'
+        ? asyncAdapter.listHandoffsCrossScope(config.scope, effectiveScopeLevel)
+        : asyncAdapter.listHandoffs(config.scope),
+    ]);
+
+    const visibleKnowledge = (
+      view
+        ? resolveVisibleKnowledge(
+            knowledge.filter((item) => item.created_at <= asOf),
+            config.scope,
+            view,
+          )
+        : knowledge.filter((item) => item.created_at <= asOf)
+    ).sort((a, b) => a.created_at - b.created_at || a.id - b.id);
+    const visibleWorkItems = (
+      view ? resolveVisibleWorkItems(contextWorkItems, config.scope, view) : contextWorkItems
+    ).sort((a, b) => a.updated_at - b.updated_at || a.created_at - b.created_at || a.id - b.id);
+    const visiblePlaybooks = (
+      view
+        ? resolveVisiblePlaybooks(
+            playbooks.filter((item) => item.created_at <= asOf),
+            config.scope,
+            view,
+          )
+        : playbooks.filter((item) => item.created_at <= asOf)
+    ).sort((a, b) => a.updated_at - b.updated_at || a.created_at - b.created_at || a.id - b.id);
+    const visibleWorkClaims = (
+      view
+        ? resolveVisibleWorkClaims(
+            rawWorkClaims.map((claim) => normalizeWorkClaimAt(claim, asOf)),
+            config.scope,
+            view,
+          )
+        : rawWorkClaims.map((claim) => normalizeWorkClaimAt(claim, asOf))
+    ).sort((a, b) => a.claimed_at - b.claimed_at || a.id - b.id);
+    const visibleHandoffs = (
+      view
+        ? resolveVisibleHandoffs(
+            rawHandoffs.map((handoff) => normalizeHandoffAt(handoff, asOf)),
+            config.scope,
+            view,
+          )
+        : rawHandoffs.map((handoff) => normalizeHandoffAt(handoff, asOf))
+    ).sort((a, b) => a.created_at - b.created_at || a.id - b.id);
+
+    return {
+      turns: turns
+        .filter((turn) => turn.session_id === config.sessionId)
+        .sort((a, b) => a.created_at - b.created_at || a.id - b.id),
+      workingMemory: workingMemory
+        .filter((item) => item.session_id === config.sessionId)
+        .sort((a, b) => a.created_at - b.created_at || a.id - b.id),
+      knowledge: visibleKnowledge,
+      workItems: visibleWorkItems,
+      workClaims: visibleWorkClaims,
+      handoffs: visibleHandoffs,
+      associations: associations
+        .filter((association) => association.created_at <= asOf)
+        .sort((a, b) => a.created_at - b.created_at || a.id - b.id),
+      playbooks: visiblePlaybooks,
+    };
   }
 
   async function getTemporalCutoverAt(): Promise<number | null> {
@@ -892,6 +1028,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
   ): Promise<{
     context: MemoryContext;
     events: MemoryEventRecord[];
+    state: ReturnType<typeof normalizeReplayedTemporalState> | null;
     watermarkEventId: TemporalId | null;
     exact: boolean;
     cutoverAt: number | null;
@@ -901,6 +1038,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       return {
         context: await getContextInternal(relevanceQuery, asOf, options),
         events: [],
+        state: null,
         watermarkEventId: null,
         exact: false,
         cutoverAt,
@@ -918,20 +1056,20 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
             endAt: asOf,
             limit: 500,
           });
-    const replayed = foldTemporalState(events, { sessionId: config.sessionId });
+    const replayed = normalizeReplayedTemporalState(
+      foldTemporalState(events, { sessionId: config.sessionId }),
+      asOf,
+    );
     const replayAdapter = createTemporalReplayAdapter(replayed, asOf);
-    const inferredQuery =
-      relevanceQuery ??
-      replayed.turns
-        .slice(-4)
-        .map((turn) => turn.content)
-        .join('\n');
-    const queryVector = await buildQueryVector(inferredQuery);
+    const inferredRelevanceQuery = replayed.turns
+      .slice(-4)
+      .map((turn) => turn.content)
+      .join('\n')
+      .trim();
+    const resolvedRelevanceQuery = relevanceQuery ?? (inferredRelevanceQuery || undefined);
     const context = await buildMemoryContext(replayAdapter, config.scope, {
       sessionId: config.sessionId,
-      relevanceQuery,
-      queryVector,
-      embeddingAdapter: config.embeddingAdapter,
+      relevanceQuery: resolvedRelevanceQuery,
       crossScopeLevel: config.crossScopeLevel,
       policy: config.contextPolicy,
       tokenEstimator,
@@ -944,6 +1082,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     return {
       context,
       events,
+      state: replayed,
       watermarkEventId: replayed.watermarkEventId,
       exact: true,
       cutoverAt,
@@ -1158,35 +1297,8 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     async getStateAt(asOf, options) {
       const replay = await buildReplayedContext(asOf, options?.relevanceQuery, options);
       const replayed = replay.exact
-        ? foldTemporalState(replay.events, { sessionId: config.sessionId })
-        : {
-            turns: replay.context.activeTurns,
-            workingMemory: [
-              ...replay.context.recentSummaries,
-              ...(replay.context.workingMemory ? [replay.context.workingMemory] : []),
-            ].sort((a, b) => a.created_at - b.created_at || a.id - b.id),
-            knowledge: [
-              ...new Map(
-                [
-                  ...replay.context.trustedCoreMemory,
-                  ...replay.context.taskRelevantKnowledge,
-                  ...replay.context.provisionalKnowledge,
-                  ...replay.context.disputedKnowledge,
-                  ...replay.context.associatedKnowledge,
-                ].map((item) => [item.id, item]),
-              ).values(),
-            ],
-            workItems: replay.context.activeObjectives,
-            workClaims: replay.context.coordinationState?.ownedClaims ?? [],
-            handoffs: [
-              ...(replay.context.coordinationState?.pendingInboundHandoffs ?? []),
-              ...(replay.context.coordinationState?.pendingOutboundHandoffs ?? []),
-            ],
-            associations: [],
-            playbooks: replay.context.relevantPlaybooks ?? [],
-            sessionStates: [],
-            watermarkEventId: null,
-          };
+        ? replay.state!
+        : await collectBestEffortTemporalState(asOf, options);
       return {
         asOf,
         exact: replay.exact,
@@ -1220,7 +1332,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
     async diffState(from, to, options) {
       const cutoverAt = await getTemporalCutoverAt();
-      const timeline = await asyncAdapter.listMemoryEvents(config.scope, {
+      const events = await listAllMemoryEvents(asyncAdapter, config.scope, {
         sessionId: options?.sessionId,
         entityKind: options?.entityKind,
         entityId: options?.entityId,
@@ -1228,7 +1340,6 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         endAt: to,
         limit: 500,
       });
-      const events = timeline.events;
       const byEntityKind: Partial<Record<MemoryEventEntityKind, number>> = {};
       const byEventType: Partial<Record<MemoryEventRecord['event_type'], number>> = {};
       for (const event of events) {

@@ -120,4 +120,40 @@ describe('maintenance workflow', () => {
     expect(report.retiredKnowledgeIds).toContain(older.id);
     expect(adapter.getKnowledgeMemoryById(newer.id)?.retired_at).toBeNull();
   });
+
+  it('preserves lineage associations to retired knowledge that still exists', async () => {
+    const scope = makeScope();
+    const parent = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'Deploy with manual verification',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+    const replacement = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'Deploy with automated verification',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+    const association = adapter.insertAssociation({
+      ...scope,
+      source_kind: 'knowledge',
+      source_id: replacement.id,
+      target_kind: 'knowledge',
+      target_id: parent.id,
+      association_type: 'supersedes',
+      confidence: 0.9,
+    });
+    adapter.retireKnowledgeMemory(parent.id, Math.floor(Date.now() / 1000));
+
+    const report = await runMaintenance(asyncAdapter, scope, {
+      knowledgeStaleAfterSeconds: Number.MAX_SAFE_INTEGER,
+      maxActiveKnowledgeItems: 10,
+    });
+
+    expect(report.deletedAssociationIds).not.toContain(association.id);
+    expect(adapter.getAssociationById(association.id)).not.toBeNull();
+  });
 });

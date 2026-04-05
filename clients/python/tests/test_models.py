@@ -5,6 +5,7 @@ from memory_layer_client.models import (
     HandoffListResponse,
     KnowledgeInspectionResponse,
     KnowledgeListResponse,
+    MaintenanceResponse,
     MemoryEventRecord,
     MemoryScope,
     ReverificationResponse,
@@ -42,12 +43,21 @@ def test_inspection_models_parse_expected_payloads() -> None:
     assessment = TrustAssessmentResponse.from_dict(
         {"trust_score": 0.9, "state": "trusted", "decision": "confirm", "reasons": ["support"]}
     )
+    maintenance = MaintenanceResponse.from_dict(
+        {
+            "expiredWorkingMemory": 1,
+            "retiredKnowledge": 2,
+            "deletedWorkItems": 3,
+            "deletedAssociationIds": [4, 5],
+        }
+    )
 
     assert listing.next_cursor == 10
     assert detail.evidence[0]["id"] == 2
     assert changes.changes[0]["fact"] == "shared"
     assert reverification.demoted_knowledge_ids == [3]
     assert assessment.state == "trusted"
+    assert maintenance.deleted_association_ids == [4, 5]
 
 
 def test_context_response_normalizes_unresolved_work_strings_and_legacy_objects() -> None:

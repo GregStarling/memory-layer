@@ -124,33 +124,44 @@ export async function runMaintenance(
     deletedWorkItemIds.push(item.id);
   }
 
-  const [associations, activeKnowledgeById, activeWorkItemsById, activePlaybooksById] = await Promise.all([
-    adapter.listAssociations(scope),
-    adapter.getActiveKnowledgeMemory(scope).then((items) => new Set(items.map((item) => item.id))),
-    adapter.getActiveWorkItems(scope).then((items) => new Set(items.map((item) => item.id))),
-    adapter.getActivePlaybooks(scope).then((items) => new Set(items.map((item) => item.id))),
-  ]);
+  const associations = await adapter.listAssociations(scope);
+  const existenceCache = new Map<string, boolean>();
+  async function entityExists(
+    kind: 'knowledge' | 'work_item' | 'playbook' | 'working_memory',
+    id: number,
+  ): Promise<boolean> {
+    const cacheKey = `${kind}:${id}`;
+    if (existenceCache.has(cacheKey)) {
+      return existenceCache.get(cacheKey)!;
+    }
+    const exists =
+      kind === 'knowledge'
+        ? (await adapter.getKnowledgeMemoryById(id)) != null
+        : kind === 'work_item'
+          ? (await adapter.getWorkItemById(id)) != null
+          : kind === 'playbook'
+            ? (await adapter.getPlaybookById(id)) != null
+            : (await adapter.getWorkingMemoryById(id)) != null;
+    existenceCache.set(cacheKey, exists);
+    return exists;
+  }
   for (const association of associations) {
     const sourceExists =
       association.source_kind === 'knowledge'
-        ? activeKnowledgeById.has(association.source_id)
+        ? await entityExists('knowledge', association.source_id)
         : association.source_kind === 'work_item'
-          ? activeWorkItemsById.has(association.source_id)
+          ? await entityExists('work_item', association.source_id)
           : association.source_kind === 'playbook'
-            ? activePlaybooksById.has(association.source_id)
-            : association.source_kind === 'working_memory'
-              ? (await adapter.getWorkingMemoryById(association.source_id)) != null
-              : false;
+            ? await entityExists('playbook', association.source_id)
+            : await entityExists('working_memory', association.source_id);
     const targetExists =
       association.target_kind === 'knowledge'
-        ? activeKnowledgeById.has(association.target_id)
+        ? await entityExists('knowledge', association.target_id)
         : association.target_kind === 'work_item'
-          ? activeWorkItemsById.has(association.target_id)
+          ? await entityExists('work_item', association.target_id)
           : association.target_kind === 'playbook'
-            ? activePlaybooksById.has(association.target_id)
-            : association.target_kind === 'working_memory'
-              ? (await adapter.getWorkingMemoryById(association.target_id)) != null
-              : false;
+            ? await entityExists('playbook', association.target_id)
+            : await entityExists('working_memory', association.target_id);
     if (!sourceExists || !targetExists) {
       await adapter.deleteAssociation(association.id);
       deletedAssociationIds.push(association.id);

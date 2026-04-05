@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createSQLiteAdapterWithEmbeddings } from '../adapters/sqlite/index.js';
+import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 import { createMemoryEventEmitter } from '../core/events.js';
 import { createMemoryManager } from '../core/manager.js';
 import { createClaudeMemoryManager } from '../core/provider-managers.js';
@@ -158,6 +159,237 @@ describe('memory manager', () => {
       'Need the redis cache rollout notes',
     ]);
     expect(context.relevantKnowledge[0]?.id).toBe(redis.id);
+    await manager.close();
+  });
+
+  it('does not consult live semantic retrieval when replaying exact historical context', async () => {
+    const scope = makeScope();
+    const findSimilarSpy = vi.spyOn(adapter.embeddings, 'findSimilar');
+    const findSimilarCrossScopeSpy = vi.spyOn(adapter.embeddings, 'findSimilarCrossScope');
+    const embeddingGenerator = vi.fn(async () => [new Float32Array([1, 0])]);
+    const manager = createMemoryManager({
+      adapter,
+      scope,
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      autoCompact: false,
+      embeddingAdapter: adapter.embeddings,
+      embeddingGenerator,
+    });
+
+    adapter.insertTurn({
+      ...scope,
+      session_id: 'session-1',
+      actor: 'user',
+      role: 'user',
+      content: 'Need the redis cache rollout notes',
+    });
+    adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'Redis cache rollout checklist',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+
+    const context = await manager.getContextAt(Math.floor(Date.now() / 1000) + 1);
+
+    expect(context.activeTurns).toHaveLength(1);
+    expect(embeddingGenerator).not.toHaveBeenCalled();
+    expect(findSimilarSpy).not.toHaveBeenCalled();
+    expect(findSimilarCrossScopeSpy).not.toHaveBeenCalled();
+    await manager.close();
+  });
+
+  it('paginates diffState across all matching events', async () => {
+    const scope = makeScope();
+    const manager = createMemoryManager({
+      adapter,
+      scope,
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      autoCompact: false,
+    });
+
+    for (let index = 0; index < 520; index += 1) {
+      adapter.insertTurn({
+        ...scope,
+        session_id: 'session-1',
+        actor: 'user',
+        role: 'user',
+        content: `turn-${index}`,
+      });
+    }
+
+    const diff = await manager.diffState(0, Math.floor(Date.now() / 1000) + 1, {
+      entityKind: 'turn',
+    });
+
+    expect(diff.summary.totalEvents).toBe(520);
+    expect(diff.events).toHaveLength(520);
+    await manager.close();
+  });
+
+  it('keeps processing turns when session-state projection refresh fails', async () => {
+    const scope = makeScope();
+    const asyncAdapter = wrapSyncAdapter(adapter);
+    const manager = createMemoryManager({
+      asyncAdapter: {
+        ...asyncAdapter,
+        upsertSessionState: async () => {
+          throw new Error('projection write failed');
+        },
+      },
+      closeAdapter: false,
+      scope,
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      autoCompact: false,
+    });
+
+    const turn = await manager.processTurn('user', 'hello');
+
+    expect(turn.content).toBe('hello');
+    expect(adapter.getActiveTurns(scope, 'session-1')).toHaveLength(1);
+    await manager.close();
+  });
+
+  it('returns a coherent best-effort state snapshot before temporal cutover', async () => {
+    const scope = makeScope();
+    const asyncAdapter = wrapSyncAdapter(adapter);
+    const actor = {
+      actor_kind: 'agent' as const,
+      actor_id: 'planner',
+      system_id: null,
+      display_name: null,
+      metadata: null,
+    };
+    const recipient = {
+      actor_kind: 'human' as const,
+      actor_id: 'operator',
+      system_id: null,
+      display_name: 'Op',
+      metadata: null,
+    };
+    const manager = createMemoryManager({
+      asyncAdapter: {
+        ...asyncAdapter,
+        getTemporalWatermark: async () => null,
+      },
+      closeAdapter: false,
+      scope,
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      autoCompact: false,
+    });
+
+    const objective = adapter.insertWorkItem({
+      ...scope,
+      session_id: 'session-1',
+      title: 'Ship rollout',
+      kind: 'objective',
+      status: 'open',
+    });
+    adapter.insertWorkItem({
+      ...scope,
+      session_id: 'session-1',
+      title: 'Confirm rollback owner',
+      kind: 'unresolved_work',
+      status: 'blocked',
+    });
+    adapter.claimWorkItem({
+      ...scope,
+      work_item_id: objective.id,
+      actor,
+      session_id: 'session-1',
+      visibility_class: 'private',
+    });
+    adapter.createHandoff({
+      ...scope,
+      work_item_id: objective.id,
+      from_actor: actor,
+      to_actor: recipient,
+      session_id: 'session-1',
+      summary: 'Take over deploy watch',
+      visibility_class: 'private',
+    });
+
+    const state = await manager.getStateAt(Math.floor(Date.now() / 1000), {
+      includeCoordinationState: true,
+      view: 'operator_supervisor',
+      viewer: actor,
+    });
+
+    expect(state.exact).toBe(false);
+    expect(state.workItems).toHaveLength(2);
+    expect(state.workClaims).toHaveLength(1);
+    expect(state.handoffs).toHaveLength(1);
+    await manager.close();
+  });
+
+  it('normalizes expired coordination state in exact temporal replay', async () => {
+    const scope = makeScope();
+    const manager = createMemoryManager({
+      adapter,
+      scope,
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      autoCompact: false,
+    });
+    const actor = {
+      actor_kind: 'agent' as const,
+      actor_id: 'planner',
+      system_id: null,
+      display_name: null,
+      metadata: null,
+    };
+    const recipient = {
+      actor_kind: 'human' as const,
+      actor_id: 'operator',
+      system_id: null,
+      display_name: 'Op',
+      metadata: null,
+    };
+
+    const workItem = await manager.trackWorkItem('Ship rollout');
+    await manager.claimWorkItem({
+      workItemId: workItem.id,
+      actor,
+      leaseSeconds: 1,
+    });
+    await manager.handoffWorkItem({
+      workItemId: workItem.id,
+      fromActor: actor,
+      toActor: recipient,
+      summary: 'Take over deploy watch',
+      expiresAt: Math.floor(Date.now() / 1000) + 1,
+    });
+
+    const state = await manager.getStateAt(Math.floor(Date.now() / 1000) + 5);
+
+    expect(state.exact).toBe(true);
+    expect(state.workClaims[0]?.status).toBe('expired');
+    expect(state.handoffs[0]?.status).toBe('expired');
     await manager.close();
   });
 

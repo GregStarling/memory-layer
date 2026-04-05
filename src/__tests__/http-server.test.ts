@@ -230,6 +230,56 @@ describe('HTTP server', () => {
     });
   });
 
+  it('returns coordination source event ids and maintenance association deletions in HTTP responses', async () => {
+    const base = await setup(13114);
+    const actor = {
+      actor_kind: 'agent',
+      actor_id: 'planner',
+      system_id: null,
+      display_name: null,
+      metadata: null,
+    };
+    const recipient = {
+      actor_kind: 'human',
+      actor_id: 'operator',
+      system_id: null,
+      display_name: 'Op',
+      metadata: null,
+    };
+
+    const work = await fetch(`${base}/v1/work`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Ship rollout',
+      }),
+    }).then((res) => res.json());
+
+    const claim = await fetch(`${base}/v1/work-items/${work.workItemId}/claim`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ actor }),
+    }).then((res) => res.json());
+    const handoff = await fetch(`${base}/v1/work-items/${work.workItemId}/handoffs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from_actor: actor,
+        to_actor: recipient,
+        summary: 'Take over deploy watch',
+      }),
+    }).then((res) => res.json());
+    const maintenance = await fetch(`${base}/v1/maintenance`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }).then((res) => res.json());
+
+    expect(claim.claim.source_event_id).toBeDefined();
+    expect(handoff.handoff.source_event_id).toBeDefined();
+    expect(Array.isArray(maintenance.deletedAssociationIds)).toBe(true);
+  });
+
   it('exposes inspection endpoints and reverification controls', async () => {
     const base = await setup(13112);
 
