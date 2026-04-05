@@ -155,12 +155,20 @@ export interface StorageAdapter {
     },
   ): KnowledgeMemory | null;
   touchKnowledgeMemory(id: number): void;
+  touchKnowledgeMemories(ids: number[]): void;
   retireKnowledgeMemory(id: number, retiredAt?: number): void;
   supersedeKnowledgeMemory(oldId: number, newId: number): void;
 
   insertWorkItem(input: NewWorkItem): WorkItem;
+  getWorkItemById(id: number): WorkItem | null;
   getActiveWorkItems(scope: MemoryScope): WorkItem[];
+  getActiveWorkItemsCrossScope(scope: MemoryScope, level: ScopeLevel): WorkItem[];
   getWorkItemsByTimeRange(scope: MemoryScope, range: TimeRange): WorkItem[];
+  getWorkItemsByTimeRangeCrossScope(
+    scope: MemoryScope,
+    level: ScopeLevel,
+    range: TimeRange,
+  ): WorkItem[];
   updateWorkItemStatus(id: number, status: WorkItem['status']): void;
   updateWorkItem(
     id: number,
@@ -173,11 +181,21 @@ export interface StorageAdapter {
   releaseWorkClaim(claimId: number, actor: ActorRef, reason?: string): WorkClaim | null;
   getActiveWorkClaim(workItemId: number): WorkClaim | null;
   listWorkClaims(scope: MemoryScope, options?: WorkClaimQuery): WorkClaim[];
+  listWorkClaimsCrossScope(
+    scope: MemoryScope,
+    level: ScopeLevel,
+    options?: WorkClaimQuery,
+  ): WorkClaim[];
   createHandoff(input: NewHandoffInput): HandoffRecord;
   acceptHandoff(handoffId: number, actor: ActorRef, reason?: string): HandoffRecord | null;
   rejectHandoff(handoffId: number, actor: ActorRef, reason?: string): HandoffRecord | null;
   cancelHandoff(handoffId: number, actor: ActorRef, reason?: string): HandoffRecord | null;
   listHandoffs(scope: MemoryScope, options?: HandoffQuery): HandoffRecord[];
+  listHandoffsCrossScope(
+    scope: MemoryScope,
+    level: ScopeLevel,
+    options?: HandoffQuery,
+  ): HandoffRecord[];
 
   upsertContextMonitor(input: ContextMonitorUpsert): ContextMonitor;
   getContextMonitor(scope: MemoryScope): ContextMonitor | null;
@@ -189,7 +207,14 @@ export interface StorageAdapter {
   insertPlaybook(input: NewPlaybook): Playbook;
   getPlaybookById(id: number): Playbook | null;
   getActivePlaybooks(scope: MemoryScope): Playbook[];
+  getActivePlaybooksCrossScope(scope: MemoryScope, level: ScopeLevel): Playbook[];
   searchPlaybooks(scope: MemoryScope, query: string, options?: SearchOptions): SearchResult<Playbook>[];
+  searchPlaybooksCrossScope(
+    scope: MemoryScope,
+    level: ScopeLevel,
+    query: string,
+    options?: SearchOptions,
+  ): SearchResult<Playbook>[];
   updatePlaybook(
     id: number,
     patch: {

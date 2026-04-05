@@ -103,6 +103,13 @@ const TOOLS: McpTool[] = [
       type: 'object',
       properties: {
         relevanceQuery: { type: 'string', description: 'Optional query to rank knowledge by relevance' },
+        view: {
+          type: 'string',
+          enum: ['local_only', 'local_plus_shared_collaboration', 'operator_supervisor', 'workspace_shared'],
+          description: 'Optional context visibility/view policy',
+        },
+        viewer: { type: 'object', description: 'Optional viewer actor for operator/supervisor coordination views' },
+        includeCoordinationState: { type: 'boolean', description: 'Include coordination state in the response' },
         includeDebug: { type: 'boolean', description: 'Include selection reasons and debug trace' },
       },
     },
@@ -115,6 +122,13 @@ const TOOLS: McpTool[] = [
       properties: {
         asOf: { type: 'number', description: 'Unix timestamp to replay at' },
         relevanceQuery: { type: 'string', description: 'Optional query to rank knowledge' },
+        view: {
+          type: 'string',
+          enum: ['local_only', 'local_plus_shared_collaboration', 'operator_supervisor', 'workspace_shared'],
+          description: 'Optional context visibility/view policy',
+        },
+        viewer: { type: 'object', description: 'Optional viewer actor for operator/supervisor coordination views' },
+        includeCoordinationState: { type: 'boolean', description: 'Include coordination state in the response' },
         includeDebug: { type: 'boolean', description: 'Include debug traces in the context payload' },
       },
       required: ['asOf'],
@@ -927,6 +941,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
   let adapterPromise: Promise<{
     asyncAdapter: AsyncStorageAdapter;
     embeddingAdapter?: EmbeddingAdapter;
+    close: () => Promise<void>;
   }> | null = null;
 
   function touchCache<T>(
@@ -950,6 +965,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
   async function getAsyncAdapter(): Promise<{
     asyncAdapter: AsyncStorageAdapter;
     embeddingAdapter?: EmbeddingAdapter;
+    close: () => Promise<void>;
   }> {
     if (!adapterPromise) {
       adapterPromise = (async () => {
@@ -958,6 +974,9 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           return {
             asyncAdapter: wrapSyncAdapter(sqlite),
             embeddingAdapter: sqlite.embeddings,
+            close: async () => {
+              sqlite.close();
+            },
           };
         }
         const moduleName = 'pg';
@@ -973,10 +992,13 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
         const pool = new Pool({
           connectionString: config.databaseUrl ?? process.env.MEMORY_DATABASE_URL,
         });
-        const asyncAdapter = createPostgresAdapter(pool);
+        const asyncAdapter = createPostgresAdapter(pool, { ownsPool: false });
         return {
           asyncAdapter,
           embeddingAdapter: createPostgresEmbeddingAdapter(pool),
+          close: async () => {
+            await pool.end();
+          },
         };
       })();
     }
@@ -1009,10 +1031,10 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
       ...baseOptions,
       asyncAdapter: adapterContext.asyncAdapter,
       embeddingAdapter: adapterContext.embeddingAdapter,
+      closeAdapter: false,
     });
-    touchCache(managers, key, manager, MANAGER_CACHE_LIMIT, (evictedKey, evictedManager) => {
+    touchCache(managers, key, manager, MANAGER_CACHE_LIMIT, (evictedKey) => {
       runtimes.delete(evictedKey);
-      void evictedManager.close().catch(() => undefined);
     });
     return manager;
   }
@@ -1072,6 +1094,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
       ...baseOptions,
       asyncAdapter: adapterContext.asyncAdapter,
       embeddingAdapter: adapterContext.embeddingAdapter,
+      closeAdapter: false,
     });
     touchCache(
       sessionManagers,
@@ -1087,8 +1110,6 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
     touchCache(sessionRuntimes, key, runtime, RUNTIME_CACHE_LIMIT);
     return runtime;
   }
-
-  const managerPromise = getManager(config.scope ?? 'default');
 
   async function callTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
     try {
@@ -1119,6 +1140,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
             args.relevanceQuery ? String(args.relevanceQuery) : undefined,
             {
               view: parseContextViewPolicy(args.view),
+              viewer: parseActorRef(args.viewer, 'viewer'),
               includeCoordinationState: args.includeCoordinationState === true,
             },
           );
@@ -1136,6 +1158,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           const state = await requestManager.getStateAt(asOf, {
             relevanceQuery: optionalString(args.relevanceQuery, 'relevanceQuery'),
             view: parseContextViewPolicy(args.view),
+            viewer: parseActorRef(args.viewer, 'viewer'),
             includeCoordinationState: args.includeCoordinationState === true,
           });
           return jsonResult(
@@ -1635,25 +1658,12 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
     callTool,
     manager: undefined,
     async close() {
-      const manager = await managerPromise;
-      const closedManagers = new Set<MemoryManager>();
-      for (const cachedManager of managers.values()) {
-        if (closedManagers.has(cachedManager)) continue;
-        closedManagers.add(cachedManager);
-        await cachedManager.close();
-      }
+      const adapterContext = await getAsyncAdapter();
       managers.clear();
-      for (const cachedManager of sessionManagers.values()) {
-        if (closedManagers.has(cachedManager)) continue;
-        closedManagers.add(cachedManager);
-        await cachedManager.close();
-      }
       sessionManagers.clear();
       sessionRuntimes.clear();
       runtimes.clear();
-      if (!closedManagers.has(manager)) {
-        await manager.close();
-      }
+      await adapterContext.close();
     },
   };
 }

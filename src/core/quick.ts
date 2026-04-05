@@ -86,6 +86,8 @@ export interface CreateMemoryOptions {
   autoDetectWorkspace?: boolean;
   /** Structured generation client for episodic recall, playbooks, and reflect. */
   structuredClient?: StructuredGenerationClient;
+  /** Whether the created manager owns adapter shutdown. Defaults to true. */
+  closeAdapter?: boolean;
 }
 
 export interface CreateMemoryAsyncOptions extends CreateMemoryOptions {
@@ -435,6 +437,7 @@ function createMemoryInternal(
     failurePolicy: options.failurePolicy,
     tokenEstimator: options.tokenEstimator,
     structuredClient: options.structuredClient ?? options.summarizerOptions?.client,
+    closeAdapter: options.closeAdapter,
   });
 
   emitMemoryEvent(

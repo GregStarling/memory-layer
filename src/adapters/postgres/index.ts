@@ -70,6 +70,7 @@ import { estimateTokens } from '../../core/tokens.js';
 export interface PostgresAdapterOptions {
   logger?: Logger;
   onEvent?: EventHook;
+  ownsPool?: boolean;
 }
 
 interface PgPool {
@@ -94,16 +95,13 @@ function scopeWhere(prefix = ''): string {
 
 function wideScopeWhere(scope: MemoryScope, level: ScopeLevel, prefix = ''): string {
   const p = prefix ? `${prefix}.` : '';
-  const normalized = normalizeScope(scope);
   switch (level) {
     case 'tenant':
       return `${p}tenant_id = $1`;
     case 'system':
       return `${p}tenant_id = $1 AND ${p}system_id = $2`;
     case 'workspace':
-      return normalized.collaboration_id.length > 0
-        ? `${p}tenant_id = $1 AND ${p}collaboration_id = $2`
-        : `${p}tenant_id = $1 AND ${p}system_id = $2 AND ${p}workspace_id = $3`;
+      return `${p}tenant_id = $1 AND ${p}workspace_id = $2`;
     default:
       return scopeWhere(prefix);
   }
@@ -117,9 +115,7 @@ function wideScopeParams(scope: MemoryScope, level: ScopeLevel): unknown[] {
     case 'system':
       return [n.tenant_id, n.system_id];
     case 'workspace':
-      return n.collaboration_id.length > 0
-        ? [n.tenant_id, n.collaboration_id]
-        : [n.tenant_id, n.system_id, n.workspace_id];
+      return [n.tenant_id, n.workspace_id];
     default:
       return scopeParams(scope);
   }
@@ -667,11 +663,18 @@ export function createPostgresAdapter(
     client: PgClient & { release(): void };
     savepointCounter: number;
   }>();
-  const rootQuery = pool.query.bind(pool);
-  pool.query = ((text: string, values?: unknown[]) => {
+  const rootPool = pool;
+  const rootQuery = rootPool.query.bind(rootPool);
+  const scopedQuery = ((text: string, values?: unknown[]) => {
     const context = txStorage.getStore();
     return context ? context.client.query(text, values) : rootQuery(text, values);
   }) as PgPool['query'];
+  pool = new Proxy(rootPool, {
+    get(target, prop, receiver) {
+      if (prop === 'query') return scopedQuery;
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as PgPool;
   let temporalInitPromise: Promise<void> | null = null;
 
   function resolveEventQuery(query?: MemoryEventQuery): {
@@ -939,6 +942,35 @@ export function createPostgresAdapter(
       entity_kind: 'work_claim',
       entity_id: String(expired.id),
       event_type: 'work_claim.expired',
+      payload: { after: expired },
+      created_at: expiredAt,
+    });
+    return expired;
+  }
+
+  async function expireHandoffRecord(
+    row: Record<string, unknown>,
+    expiredAt = now(),
+  ): Promise<HandoffRecord> {
+    const { rows } = await pool.query(
+      `UPDATE handoff_records
+       SET status = 'expired', decision_reason = 'expired', version = COALESCE(version, 1) + 1
+       WHERE id = $1
+       RETURNING *`,
+      [Number(row.id)],
+    );
+    const expired = mapHandoff(rows[0] ?? row);
+    await insertMemoryEventInternal({
+      ...normalizeScope(expired),
+      session_id: expired.session_id,
+      actor_id: expired.to_actor.actor_id,
+      actor_kind: expired.to_actor.actor_kind,
+      actor_system_id: expired.to_actor.system_id,
+      actor_display_name: expired.to_actor.display_name,
+      actor_metadata: expired.to_actor.metadata,
+      entity_kind: 'handoff',
+      entity_id: String(expired.id),
+      event_type: 'handoff.expired',
       payload: { after: expired },
       created_at: expiredAt,
     });
@@ -1645,6 +1677,51 @@ export function createPostgresAdapter(
       }
     },
 
+    async touchKnowledgeMemories(ids: number[]) {
+      const uniqueIds = [...new Set(ids)].filter((id) => Number.isInteger(id) && id > 0);
+      if (uniqueIds.length === 0) return;
+      const { rows: beforeRows } = await pool.query(
+        'SELECT * FROM knowledge_memory WHERE id = ANY($1::int[])',
+        [uniqueIds],
+      );
+      if (beforeRows.length === 0) return;
+      const touchedAt = now();
+      await pool.query(
+        `UPDATE knowledge_memory
+         SET access_count = access_count + 1, last_accessed_at = $2
+         WHERE id = ANY($1::int[])`,
+        [uniqueIds, touchedAt],
+      );
+      const { rows: afterRows } = await pool.query(
+        'SELECT * FROM knowledge_memory WHERE id = ANY($1::int[])',
+        [uniqueIds],
+      );
+      const afterById = new Map(afterRows.map((row) => {
+        const mapped = mapKnowledgeMemory(row);
+        return [mapped.id, mapped] as const;
+      }));
+      for (const row of beforeRows) {
+        const before = mapKnowledgeMemory(row);
+        const after = afterById.get(before.id);
+        if (!after) continue;
+        await insertMemoryEventInternal({
+          ...normalizeScope(after),
+          entity_kind: 'knowledge_memory',
+          entity_id: String(after.id),
+          event_type: 'knowledge.touched',
+          payload: {
+            before,
+            after,
+            patch: {
+              last_accessed_at: touchedAt,
+              access_count: after.access_count,
+            },
+          },
+          created_at: touchedAt,
+        });
+      }
+    },
+
     async retireKnowledgeMemory(id, retiredAt) {
       const before = await this.getKnowledgeMemoryById(id);
       const effectiveRetiredAt = retiredAt ?? now();
@@ -1732,9 +1809,38 @@ export function createPostgresAdapter(
       return rows.map(mapWorkItem);
     },
 
+    async getWorkItemById(id) {
+      const { rows } = await pool.query('SELECT * FROM work_items WHERE id = $1', [id]);
+      return rows[0] ? mapWorkItem(rows[0]) : null;
+    },
+
+    async getActiveWorkItemsCrossScope(scope, level) {
+      const { rows } = await pool.query(
+        `SELECT * FROM work_items WHERE ${wideScopeWhere(scope, level)} AND status != 'done' ORDER BY id DESC`,
+        wideScopeParams(scope, level),
+      );
+      return rows.map(mapWorkItem);
+    },
+
     async getWorkItemsByTimeRange(scope, range) {
       const params = scopeParams(scope);
       let query = `SELECT * FROM work_items WHERE ${scopeWhere()}`;
+      if (range.start_at != null) {
+        params.push(range.start_at);
+        query += ` AND created_at >= $${params.length}`;
+      }
+      if (range.end_at != null) {
+        params.push(range.end_at);
+        query += ` AND created_at <= $${params.length}`;
+      }
+      query += ' ORDER BY id DESC';
+      const { rows } = await pool.query(query, params);
+      return rows.map(mapWorkItem);
+    },
+
+    async getWorkItemsByTimeRangeCrossScope(scope, level, range) {
+      const params = wideScopeParams(scope, level);
+      let query = `SELECT * FROM work_items WHERE ${wideScopeWhere(scope, level)}`;
       if (range.start_at != null) {
         params.push(range.start_at);
         query += ` AND created_at >= $${params.length}`;
@@ -1945,6 +2051,13 @@ export function createPostgresAdapter(
           throw new ConflictError(`Claim ${claimId} is owned by another actor`);
         }
         const currentNow = now();
+        if (claim.status !== 'active') {
+          throw new ConflictError(`Claim ${claimId} is no longer active`);
+        }
+        if (claim.expires_at <= currentNow) {
+          await expireClaimRecord(beforeRows[0], currentNow);
+          return null;
+        }
         const { rows } = await pool.query(
           `UPDATE work_claims_current
            SET expires_at = $2, version = COALESCE(version, 1) + 1
@@ -1982,6 +2095,9 @@ export function createPostgresAdapter(
         const claim = mapWorkClaim(beforeRows[0]);
         if (!sameActor(claim.actor, actor)) {
           throw new ConflictError(`Claim ${claimId} is owned by another actor`);
+        }
+        if (claim.status !== 'active') {
+          throw new ConflictError(`Claim ${claimId} is no longer active`);
         }
         const releasedAt = now();
         const { rows } = await pool.query(
@@ -2028,9 +2144,56 @@ export function createPostgresAdapter(
     },
 
     async listWorkClaims(scope: MemoryScope, options?: WorkClaimQuery): Promise<WorkClaim[]> {
+      const expiredAt = now();
+      const { rows: expiredRows } = await pool.query(
+        `SELECT * FROM work_claims_current
+         WHERE ${scopeWhere()} AND status = 'active' AND expires_at <= $6`,
+        [...scopeParams(scope), expiredAt],
+      );
+      if (expiredRows.length > 0) {
+        await this.transaction(async () => {
+          for (const row of expiredRows) {
+            await expireClaimRecord(row, expiredAt);
+          }
+        });
+      }
       const { rows } = await pool.query(
         `SELECT * FROM work_claims_current WHERE ${scopeWhere()} ORDER BY claimed_at DESC`,
         scopeParams(scope),
+      );
+      const claims = rows.map(mapWorkClaim);
+      return claims.filter((claim) => {
+        if (!options?.includeExpired && claim.status === 'expired') return false;
+        if (!options?.includeReleased && claim.status === 'released') return false;
+        if (options?.sessionId && claim.session_id !== options.sessionId) return false;
+        if (options?.visibilityClass && claim.visibility_class !== options.visibilityClass) return false;
+        if (options?.actor && !sameActor(claim.actor, options.actor)) return false;
+        return true;
+      });
+    },
+
+    async listWorkClaimsCrossScope(
+      scope: MemoryScope,
+      level: ScopeLevel,
+      options?: WorkClaimQuery,
+    ): Promise<WorkClaim[]> {
+      const expiredAt = now();
+      const levelParams = wideScopeParams(scope, level);
+      const { rows: expiredRows } = await pool.query(
+        `SELECT * FROM work_claims_current
+         WHERE ${wideScopeWhere(scope, level)} AND status = 'active' AND expires_at <= $${levelParams.length + 1}`,
+        [...levelParams, expiredAt],
+      );
+      if (expiredRows.length > 0) {
+        await this.transaction(async () => {
+          for (const row of expiredRows) {
+            await expireClaimRecord(row, expiredAt);
+          }
+        });
+      }
+      const { rows } = await pool.query(
+        `SELECT * FROM work_claims_current WHERE ${wideScopeWhere(scope, level)} ORDER BY claimed_at DESC`,
+        levelParams,
       );
       const claims = rows.map(mapWorkClaim);
       return claims.filter((claim) => {
@@ -2116,6 +2279,14 @@ export function createPostgresAdapter(
         if (!sameActor(handoff.to_actor, actor)) {
           throw new ConflictError(`Handoff ${handoffId} is assigned to another actor`);
         }
+        const acceptedAt = now();
+        if (handoff.status !== 'pending') {
+          throw new ConflictError(`Handoff ${handoffId} is no longer pending`);
+        }
+        if (handoff.expires_at != null && handoff.expires_at <= acceptedAt) {
+          await expireHandoffRecord(handoffRows[0], acceptedAt);
+          return null;
+        }
         const activeClaim = await this.getActiveWorkClaim(handoff.work_item_id);
         if (activeClaim && !sameActor(activeClaim.actor, handoff.from_actor)) {
           throw new ConflictError(`Work item ${handoff.work_item_id} has another active owner`);
@@ -2130,7 +2301,6 @@ export function createPostgresAdapter(
           session_id: handoff.session_id,
           visibility_class: handoff.visibility_class,
         });
-        const acceptedAt = now();
         const { rows } = await pool.query(
           `UPDATE handoff_records
            SET status = 'accepted', accepted_at = $2, decision_reason = $3, version = COALESCE(version, 1) + 1
@@ -2170,6 +2340,13 @@ export function createPostgresAdapter(
           throw new ConflictError(`Handoff ${handoffId} is assigned to another actor`);
         }
         const rejectedAt = now();
+        if (handoff.status !== 'pending') {
+          throw new ConflictError(`Handoff ${handoffId} is no longer pending`);
+        }
+        if (handoff.expires_at != null && handoff.expires_at <= rejectedAt) {
+          await expireHandoffRecord(handoffRows[0], rejectedAt);
+          return null;
+        }
         const { rows } = await pool.query(
           `UPDATE handoff_records
            SET status = 'rejected', rejected_at = $2, decision_reason = $3, version = COALESCE(version, 1) + 1
@@ -2209,6 +2386,13 @@ export function createPostgresAdapter(
           throw new ConflictError(`Handoff ${handoffId} was created by another actor`);
         }
         const canceledAt = now();
+        if (handoff.status !== 'pending') {
+          throw new ConflictError(`Handoff ${handoffId} is no longer pending`);
+        }
+        if (handoff.expires_at != null && handoff.expires_at <= canceledAt) {
+          await expireHandoffRecord(handoffRows[0], canceledAt);
+          return null;
+        }
         const { rows } = await pool.query(
           `UPDATE handoff_records
            SET status = 'canceled', canceled_at = $2, decision_reason = $3, version = COALESCE(version, 1) + 1
@@ -2240,9 +2424,58 @@ export function createPostgresAdapter(
     },
 
     async listHandoffs(scope: MemoryScope, options?: HandoffQuery): Promise<HandoffRecord[]> {
+      const expiredAt = now();
+      const { rows: expiredRows } = await pool.query(
+        `SELECT * FROM handoff_records
+         WHERE ${scopeWhere()} AND status = 'pending' AND expires_at IS NOT NULL AND expires_at <= $6`,
+        [...scopeParams(scope), expiredAt],
+      );
+      if (expiredRows.length > 0) {
+        await this.transaction(async () => {
+          for (const row of expiredRows) {
+            await expireHandoffRecord(row, expiredAt);
+          }
+        });
+      }
       const { rows } = await pool.query(
         `SELECT * FROM handoff_records WHERE ${scopeWhere()} ORDER BY created_at DESC`,
         scopeParams(scope),
+      );
+      const handoffs = rows.map(mapHandoff);
+      return handoffs.filter((handoff) => {
+        if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
+        if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
+        if (options?.actor) {
+          if (options.direction === 'inbound') return sameActor(handoff.to_actor, options.actor);
+          if (options.direction === 'outbound') return sameActor(handoff.from_actor, options.actor);
+          return sameActor(handoff.to_actor, options.actor) || sameActor(handoff.from_actor, options.actor);
+        }
+        return true;
+      }).slice(0, options?.limit ?? handoffs.length);
+    },
+
+    async listHandoffsCrossScope(
+      scope: MemoryScope,
+      level: ScopeLevel,
+      options?: HandoffQuery,
+    ): Promise<HandoffRecord[]> {
+      const expiredAt = now();
+      const levelParams = wideScopeParams(scope, level);
+      const { rows: expiredRows } = await pool.query(
+        `SELECT * FROM handoff_records
+         WHERE ${wideScopeWhere(scope, level)} AND status = 'pending' AND expires_at IS NOT NULL AND expires_at <= $${levelParams.length + 1}`,
+        [...levelParams, expiredAt],
+      );
+      if (expiredRows.length > 0) {
+        await this.transaction(async () => {
+          for (const row of expiredRows) {
+            await expireHandoffRecord(row, expiredAt);
+          }
+        });
+      }
+      const { rows } = await pool.query(
+        `SELECT * FROM handoff_records WHERE ${wideScopeWhere(scope, level)} ORDER BY created_at DESC`,
+        levelParams,
       );
       const handoffs = rows.map(mapHandoff);
       return handoffs.filter((handoff) => {
@@ -2349,6 +2582,15 @@ export function createPostgresAdapter(
       );
       return rows.map(mapPlaybook);
     },
+    async getActivePlaybooksCrossScope(scope, level) {
+      const { rows } = await pool.query(
+        `SELECT * FROM playbooks
+         WHERE ${wideScopeWhere(scope, level)} AND status IN ('draft', 'active')
+         ORDER BY id DESC`,
+        wideScopeParams(scope, level),
+      );
+      return rows.map(mapPlaybook);
+    },
     async searchPlaybooks(scope, query, options) {
       const limit = options?.limit ?? 20;
       const activeOnly = options?.activeOnly ?? true;
@@ -2361,6 +2603,28 @@ export function createPostgresAdapter(
          AND search_vector @@ plainto_tsquery('english', $6)
          ORDER BY rank DESC LIMIT $7`,
         [...scopeParams(scope), query, limit],
+      );
+      return rows.map((row: Record<string, unknown>, index: number) => ({
+        item: mapPlaybook(row),
+        rank: Number(row.rank ?? index),
+      }));
+    },
+    async searchPlaybooksCrossScope(scope, level, query, options) {
+      const limit = options?.limit ?? 20;
+      const activeOnly = options?.activeOnly ?? true;
+      const scopeClause = wideScopeWhere(scope, level);
+      const statusFilter = activeOnly
+        ? `AND status NOT IN ('archived', 'deprecated')`
+        : '';
+      const baseParams = wideScopeParams(scope, level);
+      const queryIndex = baseParams.length + 1;
+      const limitIndex = baseParams.length + 2;
+      const { rows } = await pool.query(
+        `SELECT *, ts_rank(search_vector, plainto_tsquery('english', $${queryIndex})) AS rank
+         FROM playbooks WHERE ${scopeClause} ${statusFilter}
+         AND search_vector @@ plainto_tsquery('english', $${queryIndex})
+         ORDER BY rank DESC LIMIT $${limitIndex}`,
+        [...baseParams, query, limit],
       );
       return rows.map((row: Record<string, unknown>, index: number) => ({
         item: mapPlaybook(row),
@@ -2640,7 +2904,9 @@ export function createPostgresAdapter(
     },
 
     async close() {
-      await pool.end();
+      if (options?.ownsPool !== false) {
+        await rootPool.end();
+      }
     },
   };
 }

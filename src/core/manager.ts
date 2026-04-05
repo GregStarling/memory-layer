@@ -148,6 +148,7 @@ export interface MemoryManagerConfig {
   };
   redactText?: (input: { kind: 'turn' | 'fact' | 'work_item'; text: string }) => string;
   structuredClient?: StructuredGenerationClient;
+  closeAdapter?: boolean;
 }
 
 export interface MemoryManager {
@@ -291,6 +292,7 @@ export interface MemoryManager {
     entityKind?: MemoryEventEntityKind;
     entityId?: string;
     pollIntervalMs?: number;
+    signal?: AbortSignal;
   }): AsyncIterable<MemoryEventRecord>;
   inspectKnowledge(id: number): Promise<{
     knowledge: KnowledgeMemory | null;
@@ -437,10 +439,20 @@ async function assertAssociationEndpointInScope(
     return;
   }
   if (kind === 'work_item') {
-    const items = await adapter.getActiveWorkItems(norm);
-    const match = items.find((item) => item.id === id);
+    const match = await adapter.getWorkItemById(id);
     if (!match) {
       throw new ResourceNotFoundError(
+        `addAssociation: ${role} work_item ${id} does not exist in the current scope`,
+      );
+    }
+    if (
+      match.tenant_id !== norm.tenant_id ||
+      match.system_id !== norm.system_id ||
+      match.workspace_id !== norm.workspace_id ||
+      match.collaboration_id !== norm.collaboration_id ||
+      match.scope_id !== norm.scope_id
+    ) {
+      throw new ScopeMismatchError(
         `addAssociation: ${role} work_item ${id} does not exist in the current scope`,
       );
     }
@@ -1015,9 +1027,13 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     );
   }
 
-  async function insertManagedTurn(role: TurnRole, content: string, actor: string): Promise<Turn> {
+  async function insertManagedTurnRecord(
+    role: TurnRole,
+    content: string,
+    actor: string,
+  ): Promise<Turn> {
     const redactedContent = config.redactText ? config.redactText({ kind: 'turn', text: content }) : content;
-    const turn = await asyncAdapter.insertTurn({
+    return asyncAdapter.insertTurn({
       ...config.scope,
       session_id: config.sessionId,
       actor,
@@ -1025,7 +1041,10 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       content: redactedContent,
       token_estimate: tokenEstimator(redactedContent),
     });
+  }
 
+  async function insertManagedTurn(role: TurnRole, content: string, actor: string): Promise<Turn> {
+    const turn = await insertManagedTurnRecord(role, content, actor);
     emitMemoryEvent('manager', config.scope, { logger: config.logger, onEvent }, 0, {
       action: 'process_turn',
       role,
@@ -1048,12 +1067,29 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     },
 
     async processExchange(userContent, assistantContent, actors) {
-      const userTurn = await insertManagedTurn('user', userContent, actors?.user ?? 'user');
-      const assistantTurn = await insertManagedTurn(
-        'assistant',
-        assistantContent,
-        actors?.assistant ?? 'assistant',
-      );
+      const [userTurn, assistantTurn] = await asyncAdapter.transaction(async () => {
+        const createdUserTurn = await insertManagedTurnRecord(
+          'user',
+          userContent,
+          actors?.user ?? 'user',
+        );
+        const createdAssistantTurn = await insertManagedTurnRecord(
+          'assistant',
+          assistantContent,
+          actors?.assistant ?? 'assistant',
+        );
+        return [createdUserTurn, createdAssistantTurn] as const;
+      });
+      emitMemoryEvent('manager', config.scope, { logger: config.logger, onEvent }, 0, {
+        action: 'process_turn',
+        role: 'user',
+        turnId: userTurn.id,
+      });
+      emitMemoryEvent('manager', config.scope, { logger: config.logger, onEvent }, 0, {
+        action: 'process_turn',
+        role: 'assistant',
+        turnId: assistantTurn.id,
+      });
       const compactionResult = autoCompact
         ? await runCompaction(await asyncAdapter.getActiveTurns(config.scope, config.sessionId))
         : null;
@@ -1074,13 +1110,36 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
     async getStateAt(asOf, options) {
       const replay = await buildReplayedContext(asOf, options?.relevanceQuery, options);
-      const sourceEvents = replay.exact
-        ? replay.events
-        : await listAllMemoryEvents(asyncAdapter, config.scope, {
-            endAt: asOf,
-            limit: 500,
-          });
-      const replayed = foldTemporalState(sourceEvents, { sessionId: config.sessionId });
+      const replayed = replay.exact
+        ? foldTemporalState(replay.events, { sessionId: config.sessionId })
+        : {
+            turns: replay.context.activeTurns,
+            workingMemory: [
+              ...replay.context.recentSummaries,
+              ...(replay.context.workingMemory ? [replay.context.workingMemory] : []),
+            ].sort((a, b) => a.created_at - b.created_at || a.id - b.id),
+            knowledge: [
+              ...new Map(
+                [
+                  ...replay.context.trustedCoreMemory,
+                  ...replay.context.taskRelevantKnowledge,
+                  ...replay.context.provisionalKnowledge,
+                  ...replay.context.disputedKnowledge,
+                  ...replay.context.associatedKnowledge,
+                ].map((item) => [item.id, item]),
+              ).values(),
+            ],
+            workItems: replay.context.activeObjectives,
+            workClaims: replay.context.coordinationState?.ownedClaims ?? [],
+            handoffs: [
+              ...(replay.context.coordinationState?.pendingInboundHandoffs ?? []),
+              ...(replay.context.coordinationState?.pendingOutboundHandoffs ?? []),
+            ],
+            associations: [],
+            playbooks: replay.context.relevantPlaybooks ?? [],
+            sessionStates: [],
+            watermarkEventId: null,
+          };
       return {
         asOf,
         exact: replay.exact,
@@ -1294,9 +1353,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     },
 
     async claimWorkItem(input) {
-      const workItem = (await asyncAdapter.getActiveWorkItems(config.scope)).find(
-        (item) => item.id === input.workItemId,
-      );
+      const workItem = await asyncAdapter.getWorkItemById(input.workItemId);
       return asyncAdapter.claimWorkItem({
         ...normalizeScope(config.scope),
         work_item_id: input.workItemId,
@@ -1323,9 +1380,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     },
 
     async handoffWorkItem(input) {
-      const workItem = (await asyncAdapter.getActiveWorkItems(config.scope)).find(
-        (item) => item.id === input.workItemId,
-      );
+      const workItem = await asyncAdapter.getWorkItemById(input.workItemId);
       return asyncAdapter.createHandoff({
         ...normalizeScope(config.scope),
         work_item_id: input.workItemId,
@@ -1364,7 +1419,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         options?.cursor ??
         (await asyncAdapter.getTemporalWatermark('temporal'))?.last_event_id ??
         0;
-      for (;;) {
+      while (!options?.signal?.aborted) {
         const page = await asyncAdapter.listMemoryEvents(config.scope, {
           cursor,
           sessionId: options?.sessionId,
@@ -1376,6 +1431,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
           cursor = event.event_id;
           yield event;
         }
+        if (options?.signal?.aborted) break;
         await delay(options?.pollIntervalMs ?? 250);
       }
     },
@@ -1809,7 +1865,9 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     },
 
     async close() {
-      await asyncAdapter.close();
+      if (config.closeAdapter !== false) {
+        await asyncAdapter.close();
+      }
     },
   };
 }

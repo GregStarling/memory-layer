@@ -1,4 +1,4 @@
-import { timingSafeEqual } from 'crypto';
+import { createHash, timingSafeEqual } from 'crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import {
   createMemoryWithAsyncAdapter,
@@ -91,10 +91,9 @@ const MAX_LIST_LIMIT = 100;
 
 function safeSecretEquals(provided: string | string[] | undefined, expected: string): boolean {
   if (typeof provided !== 'string') return false;
-  const providedBuffer = Buffer.from(provided);
-  const expectedBuffer = Buffer.from(expected);
-  if (providedBuffer.length !== expectedBuffer.length) return false;
-  return timingSafeEqual(providedBuffer, expectedBuffer);
+  const providedBuffer = createHash('sha256').update(provided).digest();
+  const expectedBuffer = createHash('sha256').update(expected).digest();
+  return timingSafeEqual(providedBuffer, expectedBuffer) && provided.length === expected.length;
 }
 
 function writeJson(res: ServerResponse, status: number, data: unknown): void {
@@ -368,6 +367,19 @@ function parseContextViewPolicy(
   return value ? requireEnum(value, CONTEXT_VIEW_POLICIES, name) : undefined;
 }
 
+function parseViewerFromQuery(query: Record<string, string | undefined>): ActorRef | undefined {
+  if (query.viewer_actor_id == null && query.viewer_actor_kind == null) return undefined;
+  return parseActorRef(
+    {
+      actor_kind: query.viewer_actor_kind,
+      actor_id: query.viewer_actor_id,
+      system_id: query.viewer_system_id,
+      display_name: query.viewer_display_name,
+    },
+    'viewer',
+  );
+}
+
 function parseActorRef(value: unknown, name = 'actor'): ActorRef | undefined {
   if (value == null) return undefined;
   if (!isRecord(value)) {
@@ -578,9 +590,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
     while (cache.size > limit) {
       const oldestKey = cache.keys().next().value;
       if (!oldestKey) break;
-      const evicted = cache.get(oldestKey);
       cache.delete(oldestKey);
-      void evicted?.close().catch(() => undefined);
     }
   }
   function touchSnapshot(key: string, snapshot: SessionSnapshotCacheEntry): void {
@@ -628,7 +638,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         );
         const Pool = pgModule.Pool ?? pgModule.default?.Pool;
         const pool = new Pool({ connectionString: databaseUrl });
-        const asyncAdapter = createPostgresAdapter(pool);
+        const asyncAdapter = createPostgresAdapter(pool, { ownsPool: false });
         return {
           asyncAdapter,
           embeddingAdapter: createPostgresEmbeddingAdapter(pool),
@@ -694,6 +704,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       ...baseOptions,
       asyncAdapter: adapterResources.asyncAdapter,
       embeddingAdapter: adapterResources.embeddingAdapter,
+      closeAdapter: false,
     });
   }
 
@@ -737,6 +748,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       ...baseOptions,
       asyncAdapter: adapterResources.asyncAdapter,
       embeddingAdapter: adapterResources.embeddingAdapter,
+      closeAdapter: false,
     });
     touchManagerCache(sessionManagers, key, manager, SESSION_MANAGER_CACHE_LIMIT);
     return manager;
@@ -809,6 +821,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
         const context = await requestManager.getContext(query.query || undefined, {
           view: parseContextViewPolicy(query.view),
+          viewer: parseViewerFromQuery(query),
           includeCoordinationState: query.include_coordination === 'true',
         });
         writeJson(res, 200, serializeContextResponse(context, {
@@ -828,6 +841,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const state = await requestManager.getStateAt(asOf, {
           relevanceQuery: query.query || undefined,
           view: parseContextViewPolicy(query.view),
+          viewer: parseViewerFromQuery(query),
           includeCoordinationState: query.include_coordination === 'true',
         });
         writeJson(res, 200, serializeTemporalState(state, {
@@ -919,19 +933,28 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         });
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
         let closed = false;
+        const abortController = new AbortController();
         req.on('close', () => {
           closed = true;
+          abortController.abort();
         });
         const cursor = parseOptionalInteger(query.cursor);
+        const initialCursor =
+          cursor ??
+          (await requestManager.listMemoryEvents({
+            limit: 1,
+          })).events[0]?.event_id ??
+          0;
         const iterator = requestManager.streamChanges({
           cursor,
           sessionId: query.session_id || undefined,
           entityKind: query.entity_kind as never,
           entityId: query.entity_id || undefined,
           pollIntervalMs: 250,
+          signal: abortController.signal,
         });
         void (async () => {
-          res.write(`data: ${JSON.stringify({ type: 'connected', cursor: cursor ?? null })}\n\n`);
+          res.write(`data: ${JSON.stringify({ type: 'connected', cursor: initialCursor })}\n\n`);
           try {
             for await (const event of iterator) {
               if (closed) break;
@@ -1868,14 +1891,10 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
             client.response.end();
           }
           sseClients.clear();
-          server.close();
-          for (const cachedManager of managers.values()) {
-            await cachedManager.close();
-          }
+          await new Promise<void>((resolveClose) => {
+            server.close(() => resolveClose());
+          });
           managers.clear();
-          for (const cachedManager of sessionManagers.values()) {
-            await cachedManager.close();
-          }
           sessionManagers.clear();
           sessionSnapshots.clear();
           await adapterResources.close();

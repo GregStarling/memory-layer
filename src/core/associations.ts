@@ -77,16 +77,18 @@ export async function traverseAssociations(
       const key = visitedKey(neighborKind, neighborId);
       const neighborAlreadyVisited = visited.has(key);
 
-      // Only include edge if both endpoints are in the node set
-      if (neighborAlreadyVisited || nodes.length < maxNodes) {
-        edgeIds.add(edge.id);
-        edges.push(edge);
-      }
-
       if (!neighborAlreadyVisited && nodes.length < maxNodes) {
         visited.add(key);
         nodes.push({ kind: neighborKind, id: neighborId });
         queue.push({ kind: neighborKind, id: neighborId, depth: current.depth + 1 });
+      }
+
+      const neighborInNodeSet =
+        neighborAlreadyVisited ||
+        nodes.some((node) => node.kind === neighborKind && node.id === neighborId);
+      if (neighborInNodeSet) {
+        edgeIds.add(edge.id);
+        edges.push(edge);
       }
     }
   }

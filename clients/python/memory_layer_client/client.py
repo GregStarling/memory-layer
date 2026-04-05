@@ -158,6 +158,17 @@ def _actor_to_dict(actor: ActorRef) -> dict[str, Any]:
     return payload
 
 
+def _viewer_query_params(viewer: Optional[ActorRef]) -> dict[str, Any]:
+    if viewer is None:
+        return {}
+    return {
+        "viewer_actor_kind": viewer.actor_kind,
+        "viewer_actor_id": viewer.actor_id,
+        "viewer_system_id": viewer.system_id,
+        "viewer_display_name": viewer.display_name,
+    }
+
+
 class MemoryClient:
     """Typed synchronous client for the memory-layer HTTP API."""
 
@@ -265,12 +276,14 @@ class MemoryClient:
         scope: Optional[MemoryScope] = None,
         view: Optional[str] = None,
         include_coordination: Optional[bool] = None,
+        viewer: Optional[ActorRef] = None,
     ) -> ContextResponse:
         params = {
             "query": query,
             "view": view,
             "include_coordination": str(include_coordination).lower() if include_coordination is not None else None,
         }
+        params.update(_viewer_query_params(viewer))
         if scope or self.default_scope:
             params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
         payload = self._request(
@@ -288,6 +301,7 @@ class MemoryClient:
         scope: Optional[MemoryScope] = None,
         view: Optional[str] = None,
         include_coordination: Optional[bool] = None,
+        viewer: Optional[ActorRef] = None,
     ) -> TemporalStateResponse:
         params: dict[str, Any] = {
             "as_of": as_of,
@@ -295,6 +309,7 @@ class MemoryClient:
             "view": view,
             "include_coordination": str(include_coordination).lower() if include_coordination is not None else None,
         }
+        params.update(_viewer_query_params(viewer))
         if scope or self.default_scope:
             params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
         payload = self._request(
@@ -1411,12 +1426,14 @@ class AsyncMemoryClient:
         scope: Optional[MemoryScope] = None,
         view: Optional[str] = None,
         include_coordination: Optional[bool] = None,
+        viewer: Optional[ActorRef] = None,
     ) -> ContextResponse:
         params = {
             "query": query,
             "view": view,
             "include_coordination": str(include_coordination).lower() if include_coordination is not None else None,
         }
+        params.update(_viewer_query_params(viewer))
         if scope or self.default_scope:
             params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
         payload = await self._request(
@@ -1434,6 +1451,7 @@ class AsyncMemoryClient:
         scope: Optional[MemoryScope] = None,
         view: Optional[str] = None,
         include_coordination: Optional[bool] = None,
+        viewer: Optional[ActorRef] = None,
     ) -> TemporalStateResponse:
         params: dict[str, Any] = {
             "as_of": as_of,
@@ -1441,6 +1459,7 @@ class AsyncMemoryClient:
             "view": view,
             "include_coordination": str(include_coordination).lower() if include_coordination is not None else None,
         }
+        params.update(_viewer_query_params(viewer))
         if scope or self.default_scope:
             params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
         payload = await self._request(

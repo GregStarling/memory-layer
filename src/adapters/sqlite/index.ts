@@ -131,26 +131,30 @@ function loadBetterSqlite3(): BetterSqliteConstructor {
 }
 
 function scopeWhereForLevel(scope: Parameters<typeof normalizeScope>[0], level: ScopeLevel): string {
-  const normalized = normalizeScope(scope);
   if (level === 'tenant') return 'tenant_id = ?';
   if (level === 'system') return 'tenant_id = ? AND system_id = ?';
-  if (level === 'workspace') {
-    return normalized.collaboration_id.length > 0
-      ? 'tenant_id = ? AND collaboration_id = ?'
-      : 'tenant_id = ? AND system_id = ? AND workspace_id = ?';
-  }
+  if (level === 'workspace') return 'tenant_id = ? AND workspace_id = ?';
   return SCOPE_WHERE;
+}
+
+function scopeWhereForLevelWithPrefix(
+  scope: Parameters<typeof normalizeScope>[0],
+  level: ScopeLevel,
+  prefix: string,
+): string {
+  return scopeWhereForLevel(scope, level)
+    .replaceAll('tenant_id', `${prefix}.tenant_id`)
+    .replaceAll('system_id', `${prefix}.system_id`)
+    .replaceAll('workspace_id', `${prefix}.workspace_id`)
+    .replaceAll('collaboration_id', `${prefix}.collaboration_id`)
+    .replaceAll('scope_id', `${prefix}.scope_id`);
 }
 
 function scopeParamsForLevel(scope: Parameters<typeof normalizeScope>[0], level: ScopeLevel): string[] {
   const normalized = normalizeScope(scope);
   if (level === 'tenant') return [normalized.tenant_id];
   if (level === 'system') return [normalized.tenant_id, normalized.system_id];
-  if (level === 'workspace') {
-    return normalized.collaboration_id.length > 0
-      ? [normalized.tenant_id, normalized.collaboration_id]
-      : [normalized.tenant_id, normalized.system_id, normalized.workspace_id];
-  }
+  if (level === 'workspace') return [normalized.tenant_id, normalized.workspace_id];
   return [...scopeValues(normalized)];
 }
 
@@ -1732,6 +1736,22 @@ function createAdapterFromDatabase(
       return rows.map(rowToWorkItem);
     },
 
+    getWorkItemById(id: number): WorkItem | null {
+      const row = db.prepare('SELECT * FROM work_items WHERE id = ?').get(id) as WorkItem | undefined;
+      return row ? rowToWorkItem(row) : null;
+    },
+
+    getActiveWorkItemsCrossScope(scope, level): WorkItem[] {
+      const rows = db
+        .prepare(
+          `SELECT * FROM work_items
+           WHERE ${scopeWhereForLevel(scope, level)} AND status != 'done'
+           ORDER BY updated_at DESC`,
+        )
+        .all(...scopeParamsForLevel(scope, level)) as WorkItem[];
+      return rows.map(rowToWorkItem);
+    },
+
     getWorkItemsByTimeRange(scope, range): WorkItem[] {
       const time = timeRangeWhere(range, 'created_at');
       const rows = db
@@ -1741,6 +1761,18 @@ function createAdapterFromDatabase(
            ORDER BY created_at ASC`,
         )
         .all(...scopeValues(scope), ...time.params) as WorkItem[];
+      return rows.map(rowToWorkItem);
+    },
+
+    getWorkItemsByTimeRangeCrossScope(scope, level, range): WorkItem[] {
+      const time = timeRangeWhere(range, 'created_at');
+      const rows = db
+        .prepare(
+          `SELECT * FROM work_items
+           WHERE ${scopeWhereForLevel(scope, level)}${time.clause}
+           ORDER BY created_at ASC`,
+        )
+        .all(...scopeParamsForLevel(scope, level), ...time.params) as WorkItem[];
       return rows.map(rowToWorkItem);
     },
 
@@ -1945,6 +1977,34 @@ function createAdapterFromDatabase(
         throw new ConflictError(`Claim ${claimId} is owned by another actor`);
       }
       const now = nowSeconds();
+      if (claim.status !== 'active') {
+        throw new ConflictError(`Claim ${claimId} is no longer active`);
+      }
+      if (claim.expires_at <= now) {
+        db.prepare(
+          `UPDATE work_claims_current
+           SET status = 'expired', released_at = ?, release_reason = 'expired', version = version + 1
+           WHERE id = ?`,
+        ).run(now, claimId);
+        const expired = mapWorkClaim(
+          db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(claimId) as Record<string, unknown>,
+        );
+        insertMemoryEventInternal({
+          ...normalizeScope(expired),
+          session_id: expired.session_id,
+          actor_id: expired.actor.actor_id,
+          actor_kind: expired.actor.actor_kind,
+          actor_system_id: expired.actor.system_id,
+          actor_display_name: expired.actor.display_name,
+          actor_metadata: expired.actor.metadata,
+          entity_kind: 'work_claim',
+          entity_id: String(expired.id),
+          event_type: 'work_claim.expired',
+          payload: { before: cloneValue(claim), after: cloneValue(expired) },
+          created_at: now,
+        });
+        return null;
+      }
       db.prepare(
         `UPDATE work_claims_current
          SET expires_at = ?, version = version + 1
@@ -1978,6 +2038,9 @@ function createAdapterFromDatabase(
       if (claim.actor.actor_kind !== actor.actor_kind || claim.actor.actor_id !== actor.actor_id) {
         throw new ConflictError(`Claim ${claimId} is owned by another actor`);
       }
+      if (claim.status !== 'active') {
+        throw new ConflictError(`Claim ${claimId} is no longer active`);
+      }
       const now = nowSeconds();
       db.prepare(
         `UPDATE work_claims_current
@@ -2008,17 +2071,128 @@ function createAdapterFromDatabase(
       const row = db
         .prepare(
           `SELECT * FROM work_claims_current
-           WHERE work_item_id = ? AND status = 'active' AND expires_at > ?
+           WHERE work_item_id = ? AND status = 'active'
            ORDER BY id DESC LIMIT 1`,
         )
-        .get(workItemId, nowSeconds()) as Record<string, unknown> | undefined;
-      return row ? mapWorkClaim(row) : null;
+        .get(workItemId) as Record<string, unknown> | undefined;
+      if (!row) return null;
+      const claim = mapWorkClaim(row);
+      if (claim.expires_at > nowSeconds()) return claim;
+      const expiredAt = nowSeconds();
+      db.prepare(
+        `UPDATE work_claims_current
+         SET status = 'expired', released_at = ?, release_reason = 'expired', version = version + 1
+         WHERE id = ?`,
+      ).run(expiredAt, claim.id);
+      const expired = mapWorkClaim(
+        db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(claim.id) as Record<string, unknown>,
+      );
+      insertMemoryEventInternal({
+        ...normalizeScope(expired),
+        session_id: expired.session_id,
+        actor_id: expired.actor.actor_id,
+        actor_kind: expired.actor.actor_kind,
+        actor_system_id: expired.actor.system_id,
+        actor_display_name: expired.actor.display_name,
+        actor_metadata: expired.actor.metadata,
+        entity_kind: 'work_claim',
+        entity_id: String(expired.id),
+        event_type: 'work_claim.expired',
+        payload: { before: cloneValue(claim), after: cloneValue(expired) },
+        created_at: expiredAt,
+      });
+      return null;
     },
 
     listWorkClaims(scope, options?: WorkClaimQuery): WorkClaim[] {
+      const now = nowSeconds();
+      const expiredRows = db
+        .prepare(
+          `SELECT * FROM work_claims_current
+           WHERE ${SCOPE_WHERE} AND status = 'active' AND expires_at <= ?`,
+        )
+        .all(...scopeValues(scope), now) as Array<Record<string, unknown>>;
+      for (const row of expiredRows) {
+        const before = mapWorkClaim(row);
+        db.prepare(
+          `UPDATE work_claims_current
+           SET status = 'expired', released_at = ?, release_reason = 'expired', version = version + 1
+           WHERE id = ?`,
+        ).run(now, before.id);
+        const after = mapWorkClaim(
+          db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(before.id) as Record<string, unknown>,
+        );
+        insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          actor_id: after.actor.actor_id,
+          actor_kind: after.actor.actor_kind,
+          actor_system_id: after.actor.system_id,
+          actor_display_name: after.actor.display_name,
+          actor_metadata: after.actor.metadata,
+          entity_kind: 'work_claim',
+          entity_id: String(after.id),
+          event_type: 'work_claim.expired',
+          payload: { before: cloneValue(before), after: cloneValue(after) },
+          created_at: now,
+        });
+      }
       const rows = db
         .prepare(`SELECT * FROM work_claims_current WHERE ${SCOPE_WHERE} ORDER BY claimed_at DESC`)
         .all(...scopeValues(scope)) as Array<Record<string, unknown>>;
+      return rows
+        .map(mapWorkClaim)
+        .filter((claim) => {
+          if (!options?.includeExpired && claim.status === 'expired') return false;
+          if (!options?.includeReleased && claim.status === 'released') return false;
+          if (options?.sessionId && claim.session_id !== options.sessionId) return false;
+          if (options?.visibilityClass && claim.visibility_class !== options.visibilityClass) return false;
+          if (options?.actor) {
+            return (
+              claim.actor.actor_kind === options.actor.actor_kind &&
+              claim.actor.actor_id === options.actor.actor_id
+            );
+          }
+          return true;
+        });
+    },
+
+    listWorkClaimsCrossScope(scope, level, options?: WorkClaimQuery): WorkClaim[] {
+      const now = nowSeconds();
+      const expiredRows = db
+        .prepare(
+          `SELECT * FROM work_claims_current
+           WHERE ${scopeWhereForLevel(scope, level)} AND status = 'active' AND expires_at <= ?`,
+        )
+        .all(...scopeParamsForLevel(scope, level), now) as Array<Record<string, unknown>>;
+      for (const row of expiredRows) {
+        const before = mapWorkClaim(row);
+        db.prepare(
+          `UPDATE work_claims_current
+           SET status = 'expired', released_at = ?, release_reason = 'expired', version = version + 1
+           WHERE id = ?`,
+        ).run(now, before.id);
+        const after = mapWorkClaim(
+          db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(before.id) as Record<string, unknown>,
+        );
+        insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          actor_id: after.actor.actor_id,
+          actor_kind: after.actor.actor_kind,
+          actor_system_id: after.actor.system_id,
+          actor_display_name: after.actor.display_name,
+          actor_metadata: after.actor.metadata,
+          entity_kind: 'work_claim',
+          entity_id: String(after.id),
+          event_type: 'work_claim.expired',
+          payload: { before: cloneValue(before), after: cloneValue(after) },
+          created_at: now,
+        });
+      }
+      const rows = db
+        .prepare(`SELECT * FROM work_claims_current WHERE ${scopeWhereForLevel(scope, level)} ORDER BY claimed_at DESC`)
+        .all(...scopeParamsForLevel(scope, level)) as Array<Record<string, unknown>>;
       return rows
         .map(mapWorkClaim)
         .filter((claim) => {
@@ -2094,6 +2268,35 @@ function createAdapterFromDatabase(
       if (handoff.to_actor.actor_kind !== actor.actor_kind || handoff.to_actor.actor_id !== actor.actor_id) {
         throw new ConflictError(`Handoff ${handoffId} is assigned to another actor`);
       }
+      const now = nowSeconds();
+      if (handoff.status !== 'pending') {
+        throw new ConflictError(`Handoff ${handoffId} is no longer pending`);
+      }
+      if (handoff.expires_at != null && handoff.expires_at <= now) {
+        db.prepare(
+          `UPDATE handoff_records
+           SET status = 'expired', decision_reason = 'expired', version = version + 1
+           WHERE id = ?`,
+        ).run(handoffId);
+        const expired = mapHandoff(
+          db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown>,
+        );
+        insertMemoryEventInternal({
+          ...normalizeScope(expired),
+          session_id: expired.session_id,
+          actor_id: expired.to_actor.actor_id,
+          actor_kind: expired.to_actor.actor_kind,
+          actor_system_id: expired.to_actor.system_id,
+          actor_display_name: expired.to_actor.display_name,
+          actor_metadata: expired.to_actor.metadata,
+          entity_kind: 'handoff',
+          entity_id: String(expired.id),
+          event_type: 'handoff.expired',
+          payload: { before: cloneValue(handoff), after: cloneValue(expired) },
+          created_at: now,
+        });
+        return null;
+      }
       const activeClaim = this.getActiveWorkClaim(handoff.work_item_id);
       if (activeClaim &&
         !(activeClaim.actor.actor_kind === handoff.from_actor.actor_kind && activeClaim.actor.actor_id === handoff.from_actor.actor_id)
@@ -2110,7 +2313,6 @@ function createAdapterFromDatabase(
         session_id: handoff.session_id,
         visibility_class: handoff.visibility_class,
       });
-      const now = nowSeconds();
       db.prepare(
         `UPDATE handoff_records
          SET status = 'accepted', accepted_at = ?, decision_reason = ?, version = version + 1
@@ -2145,6 +2347,34 @@ function createAdapterFromDatabase(
         throw new ConflictError(`Handoff ${handoffId} is assigned to another actor`);
       }
       const now = nowSeconds();
+      if (handoff.status !== 'pending') {
+        throw new ConflictError(`Handoff ${handoffId} is no longer pending`);
+      }
+      if (handoff.expires_at != null && handoff.expires_at <= now) {
+        db.prepare(
+          `UPDATE handoff_records
+           SET status = 'expired', decision_reason = 'expired', version = version + 1
+           WHERE id = ?`,
+        ).run(handoffId);
+        const expired = mapHandoff(
+          db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown>,
+        );
+        insertMemoryEventInternal({
+          ...normalizeScope(expired),
+          session_id: expired.session_id,
+          actor_id: expired.to_actor.actor_id,
+          actor_kind: expired.to_actor.actor_kind,
+          actor_system_id: expired.to_actor.system_id,
+          actor_display_name: expired.to_actor.display_name,
+          actor_metadata: expired.to_actor.metadata,
+          entity_kind: 'handoff',
+          entity_id: String(expired.id),
+          event_type: 'handoff.expired',
+          payload: { before: cloneValue(handoff), after: cloneValue(expired) },
+          created_at: now,
+        });
+        return null;
+      }
       db.prepare(
         `UPDATE handoff_records
          SET status = 'rejected', rejected_at = ?, decision_reason = ?, version = version + 1
@@ -2179,6 +2409,34 @@ function createAdapterFromDatabase(
         throw new ConflictError(`Handoff ${handoffId} was created by another actor`);
       }
       const now = nowSeconds();
+      if (handoff.status !== 'pending') {
+        throw new ConflictError(`Handoff ${handoffId} is no longer pending`);
+      }
+      if (handoff.expires_at != null && handoff.expires_at <= now) {
+        db.prepare(
+          `UPDATE handoff_records
+           SET status = 'expired', decision_reason = 'expired', version = version + 1
+           WHERE id = ?`,
+        ).run(handoffId);
+        const expired = mapHandoff(
+          db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown>,
+        );
+        insertMemoryEventInternal({
+          ...normalizeScope(expired),
+          session_id: expired.session_id,
+          actor_id: expired.from_actor.actor_id,
+          actor_kind: expired.from_actor.actor_kind,
+          actor_system_id: expired.from_actor.system_id,
+          actor_display_name: expired.from_actor.display_name,
+          actor_metadata: expired.from_actor.metadata,
+          entity_kind: 'handoff',
+          entity_id: String(expired.id),
+          event_type: 'handoff.expired',
+          payload: { before: cloneValue(handoff), after: cloneValue(expired) },
+          created_at: now,
+        });
+        return null;
+      }
       db.prepare(
         `UPDATE handoff_records
          SET status = 'canceled', canceled_at = ?, decision_reason = ?, version = version + 1
@@ -2205,9 +2463,93 @@ function createAdapterFromDatabase(
     },
 
     listHandoffs(scope, options?: HandoffQuery): HandoffRecord[] {
+      const now = nowSeconds();
+      const expiredRows = db
+        .prepare(
+          `SELECT * FROM handoff_records
+           WHERE ${SCOPE_WHERE} AND status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?`,
+        )
+        .all(...scopeValues(scope), now) as Array<Record<string, unknown>>;
+      for (const row of expiredRows) {
+        const before = mapHandoff(row);
+        db.prepare(
+          `UPDATE handoff_records
+           SET status = 'expired', decision_reason = 'expired', version = version + 1
+           WHERE id = ?`,
+        ).run(before.id);
+        const after = mapHandoff(
+          db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(before.id) as Record<string, unknown>,
+        );
+        insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          actor_id: after.to_actor.actor_id,
+          actor_kind: after.to_actor.actor_kind,
+          actor_system_id: after.to_actor.system_id,
+          actor_display_name: after.to_actor.display_name,
+          actor_metadata: after.to_actor.metadata,
+          entity_kind: 'handoff',
+          entity_id: String(after.id),
+          event_type: 'handoff.expired',
+          payload: { before: cloneValue(before), after: cloneValue(after) },
+          created_at: now,
+        });
+      }
       const rows = db
         .prepare(`SELECT * FROM handoff_records WHERE ${SCOPE_WHERE} ORDER BY created_at DESC`)
         .all(...scopeValues(scope)) as Array<Record<string, unknown>>;
+      return rows.map(mapHandoff).filter((handoff) => {
+        if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
+        if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
+        if (!options?.actor) return true;
+        const inbound =
+          handoff.to_actor.actor_kind === options.actor.actor_kind &&
+          handoff.to_actor.actor_id === options.actor.actor_id;
+        const outbound =
+          handoff.from_actor.actor_kind === options.actor.actor_kind &&
+          handoff.from_actor.actor_id === options.actor.actor_id;
+        if (options.direction === 'inbound') return inbound;
+        if (options.direction === 'outbound') return outbound;
+        return inbound || outbound;
+      });
+    },
+
+    listHandoffsCrossScope(scope, level, options?: HandoffQuery): HandoffRecord[] {
+      const now = nowSeconds();
+      const expiredRows = db
+        .prepare(
+          `SELECT * FROM handoff_records
+           WHERE ${scopeWhereForLevel(scope, level)} AND status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?`,
+        )
+        .all(...scopeParamsForLevel(scope, level), now) as Array<Record<string, unknown>>;
+      for (const row of expiredRows) {
+        const before = mapHandoff(row);
+        db.prepare(
+          `UPDATE handoff_records
+           SET status = 'expired', decision_reason = 'expired', version = version + 1
+           WHERE id = ?`,
+        ).run(before.id);
+        const after = mapHandoff(
+          db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(before.id) as Record<string, unknown>,
+        );
+        insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          actor_id: after.to_actor.actor_id,
+          actor_kind: after.to_actor.actor_kind,
+          actor_system_id: after.to_actor.system_id,
+          actor_display_name: after.to_actor.display_name,
+          actor_metadata: after.to_actor.metadata,
+          entity_kind: 'handoff',
+          entity_id: String(after.id),
+          event_type: 'handoff.expired',
+          payload: { before: cloneValue(before), after: cloneValue(after) },
+          created_at: now,
+        });
+      }
+      const rows = db
+        .prepare(`SELECT * FROM handoff_records WHERE ${scopeWhereForLevel(scope, level)} ORDER BY created_at DESC`)
+        .all(...scopeParamsForLevel(scope, level)) as Array<Record<string, unknown>>;
       return rows.map(mapHandoff).filter((handoff) => {
         if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
         if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
@@ -2234,6 +2576,46 @@ function createAdapterFromDatabase(
       ).run(touchedAt, id);
       const after = getKnowledgeMemoryById(id);
       if (before && after) {
+        insertMemoryEventInternal({
+          ...normalizeScope(after),
+          entity_kind: 'knowledge_memory',
+          entity_id: String(after.id),
+          event_type: 'knowledge.touched',
+          payload: {
+            before: cloneValue(before),
+            after: cloneValue(after),
+            patch: {
+              last_accessed_at: touchedAt,
+              access_count: after.access_count,
+            },
+          },
+          created_at: touchedAt,
+        });
+      }
+    },
+
+    touchKnowledgeMemories(ids: number[]): void {
+      const uniqueIds = [...new Set(ids)].filter((id) => Number.isInteger(id) && id > 0);
+      if (uniqueIds.length === 0) return;
+      const placeholders = uniqueIds.map(() => '?').join(', ');
+      const beforeRows = db
+        .prepare(`SELECT * FROM knowledge_memory WHERE id IN (${placeholders})`)
+        .all(...uniqueIds) as KnowledgeMemoryRow[];
+      if (beforeRows.length === 0) return;
+      const touchedAt = nowSeconds();
+      db.prepare(
+        `UPDATE knowledge_memory
+         SET last_accessed_at = ?, access_count = access_count + 1
+         WHERE id IN (${placeholders})`,
+      ).run(touchedAt, ...uniqueIds);
+      const afterRows = db
+        .prepare(`SELECT * FROM knowledge_memory WHERE id IN (${placeholders})`)
+        .all(...uniqueIds) as KnowledgeMemoryRow[];
+      const afterById = new Map(afterRows.map((row) => [Number(row.id), rowToKnowledgeMemory(row)]));
+      for (const row of beforeRows) {
+        const before = rowToKnowledgeMemory(row);
+        const after = afterById.get(before.id);
+        if (!after) continue;
         insertMemoryEventInternal({
           ...normalizeScope(after),
           entity_kind: 'knowledge_memory',
@@ -2427,6 +2809,16 @@ function createAdapterFromDatabase(
         .all(...scopeValues(scope)) as PlaybookRow[];
       return rows.map(rowToPlaybook);
     },
+    getActivePlaybooksCrossScope(scope, level): Playbook[] {
+      const rows = db
+        .prepare(
+          `SELECT * FROM playbooks
+           WHERE ${scopeWhereForLevel(scope, level)} AND status IN ('draft', 'active')
+           ORDER BY id DESC`,
+        )
+        .all(...scopeParamsForLevel(scope, level)) as PlaybookRow[];
+      return rows.map(rowToPlaybook);
+    },
     searchPlaybooks(scope, query, options): SearchResult<Playbook>[] {
       const limit = options?.limit ?? 20;
       const activeOnly = options?.activeOnly ?? true;
@@ -2445,6 +2837,29 @@ function createAdapterFromDatabase(
              ORDER BY rank LIMIT ?`,
           )
           .all(...scopeValues(scope), safeQuery, limit) as PlaybookRow[];
+        return rows.map((row, index) => ({ item: rowToPlaybook(row), rank: index }));
+      } catch {
+        return [];
+      }
+    },
+    searchPlaybooksCrossScope(scope, level, query, options): SearchResult<Playbook>[] {
+      const limit = options?.limit ?? 20;
+      const activeOnly = options?.activeOnly ?? true;
+      const safeQuery = toSafeFtsQuery(query);
+      if (!safeQuery) return [];
+      const statusFilter = activeOnly
+        ? `AND p.status NOT IN ('archived', 'deprecated')`
+        : '';
+      try {
+        const rows = db
+          .prepare(
+            `SELECT p.* FROM playbooks p
+             INNER JOIN playbooks_fts f ON f.rowid = p.id
+             WHERE ${scopeWhereForLevelWithPrefix(scope, level, 'p')} ${statusFilter}
+             AND playbooks_fts MATCH ?
+             ORDER BY rank LIMIT ?`,
+          )
+          .all(...scopeParamsForLevel(scope, level), safeQuery, limit) as PlaybookRow[];
         return rows.map((row, index) => ({ item: rowToPlaybook(row), rank: index }));
       } catch {
         return [];

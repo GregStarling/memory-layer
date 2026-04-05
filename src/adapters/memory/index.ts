@@ -122,19 +122,11 @@ function matchesLevel(item: MemoryScope, scope: MemoryScope, level: ScopeLevel):
   const right = normalizeScope(scope);
   if (left.tenant_id !== right.tenant_id) return false;
   if (level === 'tenant') return true;
-  const explicitCollaboration =
-    left.collaboration_id.length > 0 && right.collaboration_id.length > 0;
-  if (level === 'workspace' && explicitCollaboration) {
-    return left.collaboration_id === right.collaboration_id;
-  }
+  if (level === 'workspace') return left.workspace_id === right.workspace_id;
   if (left.system_id !== right.system_id) return false;
   if (level === 'system') return true;
-  if (explicitCollaboration) {
-    if (left.collaboration_id !== right.collaboration_id) return false;
-  } else if (left.workspace_id !== right.workspace_id) {
-    return false;
-  }
-  if (level === 'workspace') return true;
+  if (left.workspace_id !== right.workspace_id) return false;
+  if (left.collaboration_id !== right.collaboration_id) return false;
   return left.scope_id === right.scope_id;
 }
 
@@ -246,6 +238,10 @@ function makeClaimToken(): string {
 
 function isClaimExpired(claim: WorkClaim, now = nowSeconds()): boolean {
   return claim.status === 'active' && claim.expires_at <= now;
+}
+
+function isHandoffExpired(handoff: HandoffRecord, now = nowSeconds()): boolean {
+  return handoff.status === 'pending' && handoff.expires_at != null && handoff.expires_at <= now;
 }
 
 function matchesEventQuery(item: MemoryEventRecord, query?: MemoryEventQuery): boolean {
@@ -905,6 +901,13 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       });
     },
 
+    touchKnowledgeMemories(ids) {
+      const uniqueIds = [...new Set(ids)].filter((id) => Number.isInteger(id) && id > 0);
+      for (const id of uniqueIds) {
+        this.touchKnowledgeMemory(id);
+      }
+    },
+
     retireKnowledgeMemory(id, retiredAt = nowSeconds()) {
       const item = state.knowledgeMemory.find((entry) => entry.id === id);
       if (!item) return;
@@ -982,15 +985,32 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       return item;
     },
 
+    getWorkItemById(id) {
+      const item = state.workItems.find((entry) => entry.id === id);
+      return item ? cloneValue(item) : null;
+    },
+
     getActiveWorkItems(scope) {
       return state.workItems.filter(
         (item) => matchesScope(item, scope) && item.status !== 'done',
       );
     },
 
+    getActiveWorkItemsCrossScope(scope, level) {
+      return state.workItems.filter(
+        (item) => matchesLevel(item, scope, level) && item.status !== 'done',
+      );
+    },
+
     getWorkItemsByTimeRange(scope, range) {
       return state.workItems.filter(
         (item) => matchesScope(item, scope) && inRange(item.created_at, range),
+      );
+    },
+
+    getWorkItemsByTimeRangeCrossScope(scope, level, range) {
+      return state.workItems.filter(
+        (item) => matchesLevel(item, scope, level) && inRange(item.created_at, range),
       );
     },
 
@@ -1177,6 +1197,30 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         throw new ConflictError(`Claim ${claimId} is owned by another actor`);
       }
       const now = nowSeconds();
+      if (isClaimExpired(claim, now)) {
+        claim.status = 'expired';
+        claim.released_at = now;
+        claim.release_reason = 'expired';
+        claim.version += 1;
+        this.insertMemoryEvent({
+          ...normalizeScope(claim),
+          session_id: claim.session_id,
+          actor_id: claim.actor.actor_id,
+          actor_kind: claim.actor.actor_kind,
+          actor_system_id: claim.actor.system_id,
+          actor_display_name: claim.actor.display_name,
+          actor_metadata: claim.actor.metadata,
+          entity_kind: 'work_claim',
+          entity_id: String(claim.id),
+          event_type: 'work_claim.expired',
+          payload: { after: cloneValue(claim) },
+          created_at: now,
+        });
+        return null;
+      }
+      if (claim.status !== 'active') {
+        throw new ConflictError(`Claim ${claimId} is no longer active`);
+      }
       claim.expires_at = Math.max(claim.expires_at, now) + leaseSeconds;
       claim.version += 1;
       this.insertMemoryEvent({
@@ -1203,6 +1247,9 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       if (!matchesActor(actor, claim.actor)) {
         throw new ConflictError(`Claim ${claimId} is owned by another actor`);
       }
+      if (claim.status !== 'active') {
+        throw new ConflictError(`Claim ${claimId} is no longer active`);
+      }
       const now = nowSeconds();
       claim.status = 'released';
       claim.released_at = now;
@@ -1227,14 +1274,93 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
 
     getActiveWorkClaim(workItemId) {
       const claim = state.workClaims.find(
-        (entry) => entry.work_item_id === workItemId && entry.status === 'active' && !isClaimExpired(entry),
+        (entry) => entry.work_item_id === workItemId && entry.status === 'active',
       );
+      if (claim && isClaimExpired(claim)) {
+        claim.status = 'expired';
+        claim.released_at = nowSeconds();
+        claim.release_reason = 'expired';
+        claim.version += 1;
+        this.insertMemoryEvent({
+          ...normalizeScope(claim),
+          session_id: claim.session_id,
+          actor_id: claim.actor.actor_id,
+          actor_kind: claim.actor.actor_kind,
+          actor_system_id: claim.actor.system_id,
+          actor_display_name: claim.actor.display_name,
+          actor_metadata: claim.actor.metadata,
+          entity_kind: 'work_claim',
+          entity_id: String(claim.id),
+          event_type: 'work_claim.expired',
+          payload: { after: cloneValue(claim) },
+          created_at: claim.released_at,
+        });
+        return null;
+      }
       return claim ? cloneValue(claim) : null;
     },
 
     listWorkClaims(scope, options?: WorkClaimQuery) {
+      const currentNow = nowSeconds();
+      for (const claim of state.workClaims) {
+        if (matchesScope(claim, scope) && isClaimExpired(claim, currentNow)) {
+          claim.status = 'expired';
+          claim.released_at = currentNow;
+          claim.release_reason = 'expired';
+          claim.version += 1;
+          this.insertMemoryEvent({
+            ...normalizeScope(claim),
+            session_id: claim.session_id,
+            actor_id: claim.actor.actor_id,
+            actor_kind: claim.actor.actor_kind,
+            actor_system_id: claim.actor.system_id,
+            actor_display_name: claim.actor.display_name,
+            actor_metadata: claim.actor.metadata,
+            entity_kind: 'work_claim',
+            entity_id: String(claim.id),
+            event_type: 'work_claim.expired',
+            payload: { after: cloneValue(claim) },
+            created_at: currentNow,
+          });
+        }
+      }
       return state.workClaims.filter((claim) => {
         if (!matchesScope(claim, scope)) return false;
+        if (!options?.includeExpired && claim.status === 'expired') return false;
+        if (!options?.includeReleased && claim.status === 'released') return false;
+        if (options?.sessionId && claim.session_id !== options.sessionId) return false;
+        if (options?.visibilityClass && claim.visibility_class !== options.visibilityClass) return false;
+        if (options?.actor && !matchesActor(options.actor, claim.actor)) return false;
+        return true;
+      }).map(cloneValue);
+    },
+
+    listWorkClaimsCrossScope(scope, level: ScopeLevel, options?: WorkClaimQuery) {
+      const currentNow = nowSeconds();
+      for (const claim of state.workClaims) {
+        if (matchesLevel(claim, scope, level) && isClaimExpired(claim, currentNow)) {
+          claim.status = 'expired';
+          claim.released_at = currentNow;
+          claim.release_reason = 'expired';
+          claim.version += 1;
+          this.insertMemoryEvent({
+            ...normalizeScope(claim),
+            session_id: claim.session_id,
+            actor_id: claim.actor.actor_id,
+            actor_kind: claim.actor.actor_kind,
+            actor_system_id: claim.actor.system_id,
+            actor_display_name: claim.actor.display_name,
+            actor_metadata: claim.actor.metadata,
+            entity_kind: 'work_claim',
+            entity_id: String(claim.id),
+            event_type: 'work_claim.expired',
+            payload: { after: cloneValue(claim) },
+            created_at: currentNow,
+          });
+        }
+      }
+      return state.workClaims.filter((claim) => {
+        if (!matchesLevel(claim, scope, level)) return false;
         if (!options?.includeExpired && claim.status === 'expired') return false;
         if (!options?.includeReleased && claim.status === 'released') return false;
         if (options?.sessionId && claim.session_id !== options.sessionId) return false;
@@ -1293,6 +1419,29 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       if (!matchesActor(actor, handoff.to_actor)) {
         throw new ConflictError(`Handoff ${handoffId} is assigned to another actor`);
       }
+      if (isHandoffExpired(handoff)) {
+        handoff.status = 'expired';
+        handoff.decision_reason = 'expired';
+        handoff.version += 1;
+        this.insertMemoryEvent({
+          ...normalizeScope(handoff),
+          session_id: handoff.session_id,
+          actor_id: handoff.to_actor.actor_id,
+          actor_kind: handoff.to_actor.actor_kind,
+          actor_system_id: handoff.to_actor.system_id,
+          actor_display_name: handoff.to_actor.display_name,
+          actor_metadata: handoff.to_actor.metadata,
+          entity_kind: 'handoff',
+          entity_id: String(handoff.id),
+          event_type: 'handoff.expired',
+          payload: { after: cloneValue(handoff) },
+          created_at: nowSeconds(),
+        });
+        return null;
+      }
+      if (handoff.status !== 'pending') {
+        throw new ConflictError(`Handoff ${handoffId} is no longer pending`);
+      }
       const activeClaim = state.workClaims.find(
         (claim) => claim.work_item_id === handoff.work_item_id && claim.status === 'active' && !isClaimExpired(claim),
       );
@@ -1338,6 +1487,29 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       if (!matchesActor(actor, handoff.to_actor)) {
         throw new ConflictError(`Handoff ${handoffId} is assigned to another actor`);
       }
+      if (isHandoffExpired(handoff)) {
+        handoff.status = 'expired';
+        handoff.decision_reason = 'expired';
+        handoff.version += 1;
+        this.insertMemoryEvent({
+          ...normalizeScope(handoff),
+          session_id: handoff.session_id,
+          actor_id: handoff.to_actor.actor_id,
+          actor_kind: handoff.to_actor.actor_kind,
+          actor_system_id: handoff.to_actor.system_id,
+          actor_display_name: handoff.to_actor.display_name,
+          actor_metadata: handoff.to_actor.metadata,
+          entity_kind: 'handoff',
+          entity_id: String(handoff.id),
+          event_type: 'handoff.expired',
+          payload: { after: cloneValue(handoff) },
+          created_at: nowSeconds(),
+        });
+        return null;
+      }
+      if (handoff.status !== 'pending') {
+        throw new ConflictError(`Handoff ${handoffId} is no longer pending`);
+      }
       handoff.status = 'rejected';
       handoff.rejected_at = nowSeconds();
       handoff.decision_reason = reason ?? null;
@@ -1366,6 +1538,29 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       if (!matchesActor(actor, handoff.from_actor)) {
         throw new ConflictError(`Handoff ${handoffId} was created by another actor`);
       }
+      if (isHandoffExpired(handoff)) {
+        handoff.status = 'expired';
+        handoff.decision_reason = 'expired';
+        handoff.version += 1;
+        this.insertMemoryEvent({
+          ...normalizeScope(handoff),
+          session_id: handoff.session_id,
+          actor_id: handoff.from_actor.actor_id,
+          actor_kind: handoff.from_actor.actor_kind,
+          actor_system_id: handoff.from_actor.system_id,
+          actor_display_name: handoff.from_actor.display_name,
+          actor_metadata: handoff.from_actor.metadata,
+          entity_kind: 'handoff',
+          entity_id: String(handoff.id),
+          event_type: 'handoff.expired',
+          payload: { after: cloneValue(handoff) },
+          created_at: nowSeconds(),
+        });
+        return null;
+      }
+      if (handoff.status !== 'pending') {
+        throw new ConflictError(`Handoff ${handoffId} is no longer pending`);
+      }
       handoff.status = 'canceled';
       handoff.canceled_at = nowSeconds();
       handoff.decision_reason = reason ?? null;
@@ -1388,8 +1583,67 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     },
 
     listHandoffs(scope, options?: HandoffQuery) {
+      const currentNow = nowSeconds();
+      for (const handoff of state.handoffs) {
+        if (matchesScope(handoff, scope) && isHandoffExpired(handoff, currentNow)) {
+          handoff.status = 'expired';
+          handoff.decision_reason = 'expired';
+          handoff.version += 1;
+          this.insertMemoryEvent({
+            ...normalizeScope(handoff),
+            session_id: handoff.session_id,
+            actor_id: handoff.to_actor.actor_id,
+            actor_kind: handoff.to_actor.actor_kind,
+            actor_system_id: handoff.to_actor.system_id,
+            actor_display_name: handoff.to_actor.display_name,
+            actor_metadata: handoff.to_actor.metadata,
+            entity_kind: 'handoff',
+            entity_id: String(handoff.id),
+            event_type: 'handoff.expired',
+            payload: { after: cloneValue(handoff) },
+            created_at: currentNow,
+          });
+        }
+      }
       return state.handoffs.filter((handoff) => {
         if (!matchesScope(handoff, scope)) return false;
+        if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
+        if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
+        if (!options?.actor) return true;
+        if (options.direction === 'inbound') return matchesActor(options.actor, handoff.to_actor);
+        if (options.direction === 'outbound') return matchesActor(options.actor, handoff.from_actor);
+        return (
+          matchesActor(options.actor, handoff.to_actor) ||
+          matchesActor(options.actor, handoff.from_actor)
+        );
+      }).map(cloneValue);
+    },
+
+    listHandoffsCrossScope(scope, level: ScopeLevel, options?: HandoffQuery) {
+      const currentNow = nowSeconds();
+      for (const handoff of state.handoffs) {
+        if (matchesLevel(handoff, scope, level) && isHandoffExpired(handoff, currentNow)) {
+          handoff.status = 'expired';
+          handoff.decision_reason = 'expired';
+          handoff.version += 1;
+          this.insertMemoryEvent({
+            ...normalizeScope(handoff),
+            session_id: handoff.session_id,
+            actor_id: handoff.to_actor.actor_id,
+            actor_kind: handoff.to_actor.actor_kind,
+            actor_system_id: handoff.to_actor.system_id,
+            actor_display_name: handoff.to_actor.display_name,
+            actor_metadata: handoff.to_actor.metadata,
+            entity_kind: 'handoff',
+            entity_id: String(handoff.id),
+            event_type: 'handoff.expired',
+            payload: { after: cloneValue(handoff) },
+            created_at: currentNow,
+          });
+        }
+      }
+      return state.handoffs.filter((handoff) => {
+        if (!matchesLevel(handoff, scope, level)) return false;
         if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
         if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
         if (!options?.actor) return true;
@@ -1514,6 +1768,11 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         (p) => matchesScope(p, scope) && (p.status === 'draft' || p.status === 'active'),
       );
     },
+    getActivePlaybooksCrossScope(scope: MemoryScope, level: ScopeLevel): Playbook[] {
+      return state.playbooks.filter(
+        (p) => matchesLevel(p, scope, level) && (p.status === 'draft' || p.status === 'active'),
+      );
+    },
     searchPlaybooks(scope: MemoryScope, query: string, options?: SearchOptions): SearchResult<Playbook>[] {
       const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
       if (tokens.length === 0) return [];
@@ -1522,6 +1781,26 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       return state.playbooks
         .filter((p) => {
           if (!matchesScope(p, scope)) return false;
+          if (activeOnly && (p.status === 'archived' || p.status === 'deprecated')) return false;
+          const text = `${p.title} ${p.description} ${p.instructions}`.toLowerCase();
+          return tokens.every((token) => text.includes(token));
+        })
+        .slice(0, limit)
+        .map((item, index) => ({ item, rank: index }));
+    },
+    searchPlaybooksCrossScope(
+      scope: MemoryScope,
+      level: ScopeLevel,
+      query: string,
+      options?: SearchOptions,
+    ): SearchResult<Playbook>[] {
+      const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+      if (tokens.length === 0) return [];
+      const limit = options?.limit ?? 20;
+      const activeOnly = options?.activeOnly ?? true;
+      return state.playbooks
+        .filter((p) => {
+          if (!matchesLevel(p, scope, level)) return false;
           if (activeOnly && (p.status === 'archived' || p.status === 'deprecated')) return false;
           const text = `${p.title} ${p.description} ${p.instructions}`.toLowerCase();
           return tokens.every((token) => text.includes(token));

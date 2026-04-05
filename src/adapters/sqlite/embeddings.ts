@@ -11,14 +11,9 @@ const KNOWLEDGE_SCOPE_WHERE =
   'tenant_id = ? AND system_id = ? AND workspace_id = ? AND collaboration_id = ? AND scope_id = ?';
 
 function scopeWhereForLevel(scope: MemoryScope, level: ScopeLevel): string {
-  const normalized = normalizeScope(scope);
   if (level === 'tenant') return 'km.tenant_id = ?';
   if (level === 'system') return 'km.tenant_id = ? AND km.system_id = ?';
-  if (level === 'workspace') {
-    return normalized.collaboration_id.length > 0
-      ? 'km.tenant_id = ? AND km.collaboration_id = ?'
-      : 'km.tenant_id = ? AND km.system_id = ? AND km.workspace_id = ?';
-  }
+  if (level === 'workspace') return 'km.tenant_id = ? AND km.workspace_id = ?';
   return SCOPE_WHERE;
 }
 
@@ -26,11 +21,7 @@ function scopeParamsForLevel(scope: MemoryScope, level: ScopeLevel): string[] {
   const normalized = normalizeScope(scope);
   if (level === 'tenant') return [normalized.tenant_id];
   if (level === 'system') return [normalized.tenant_id, normalized.system_id];
-  if (level === 'workspace') {
-    return normalized.collaboration_id.length > 0
-      ? [normalized.tenant_id, normalized.collaboration_id]
-      : [normalized.tenant_id, normalized.system_id, normalized.workspace_id];
-  }
+  if (level === 'workspace') return [normalized.tenant_id, normalized.workspace_id];
   return [...scopeValues(normalized)];
 }
 

@@ -161,12 +161,20 @@ export interface AsyncStorageAdapter {
     },
   ): Promise<KnowledgeMemory | null>;
   touchKnowledgeMemory(id: number): Promise<void>;
+  touchKnowledgeMemories(ids: number[]): Promise<void>;
   retireKnowledgeMemory(id: number, retiredAt?: number): Promise<void>;
   supersedeKnowledgeMemory(oldId: number, newId: number): Promise<void>;
 
   insertWorkItem(input: NewWorkItem): Promise<WorkItem>;
+  getWorkItemById(id: number): Promise<WorkItem | null>;
   getActiveWorkItems(scope: MemoryScope): Promise<WorkItem[]>;
+  getActiveWorkItemsCrossScope(scope: MemoryScope, level: ScopeLevel): Promise<WorkItem[]>;
   getWorkItemsByTimeRange(scope: MemoryScope, range: TimeRange): Promise<WorkItem[]>;
+  getWorkItemsByTimeRangeCrossScope(
+    scope: MemoryScope,
+    level: ScopeLevel,
+    range: TimeRange,
+  ): Promise<WorkItem[]>;
   updateWorkItemStatus(id: number, status: WorkItem['status']): Promise<void>;
   updateWorkItem(
     id: number,
@@ -179,11 +187,21 @@ export interface AsyncStorageAdapter {
   releaseWorkClaim(claimId: number, actor: ActorRef, reason?: string): Promise<WorkClaim | null>;
   getActiveWorkClaim(workItemId: number): Promise<WorkClaim | null>;
   listWorkClaims(scope: MemoryScope, options?: WorkClaimQuery): Promise<WorkClaim[]>;
+  listWorkClaimsCrossScope(
+    scope: MemoryScope,
+    level: ScopeLevel,
+    options?: WorkClaimQuery,
+  ): Promise<WorkClaim[]>;
   createHandoff(input: NewHandoffInput): Promise<HandoffRecord>;
   acceptHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null>;
   rejectHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null>;
   cancelHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null>;
   listHandoffs(scope: MemoryScope, options?: HandoffQuery): Promise<HandoffRecord[]>;
+  listHandoffsCrossScope(
+    scope: MemoryScope,
+    level: ScopeLevel,
+    options?: HandoffQuery,
+  ): Promise<HandoffRecord[]>;
 
   upsertContextMonitor(input: ContextMonitorUpsert): Promise<ContextMonitor>;
   getContextMonitor(scope: MemoryScope): Promise<ContextMonitor | null>;
@@ -195,8 +213,15 @@ export interface AsyncStorageAdapter {
   insertPlaybook(input: NewPlaybook): Promise<Playbook>;
   getPlaybookById(id: number): Promise<Playbook | null>;
   getActivePlaybooks(scope: MemoryScope): Promise<Playbook[]>;
+  getActivePlaybooksCrossScope(scope: MemoryScope, level: ScopeLevel): Promise<Playbook[]>;
   searchPlaybooks(
     scope: MemoryScope,
+    query: string,
+    options?: SearchOptions,
+  ): Promise<SearchResult<Playbook>[]>;
+  searchPlaybooksCrossScope(
+    scope: MemoryScope,
+    level: ScopeLevel,
     query: string,
     options?: SearchOptions,
   ): Promise<SearchResult<Playbook>[]>;

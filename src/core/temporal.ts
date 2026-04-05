@@ -102,15 +102,9 @@ function matchesLevel(item: MemoryScope, scope: MemoryScope, level: ScopeLevel):
   const right = normalizeScope(scope);
   if (left.tenant_id !== right.tenant_id) return false;
   if (level === 'tenant') return true;
+  if (level === 'workspace') return left.workspace_id === right.workspace_id;
   if (left.system_id !== right.system_id) return false;
   if (level === 'system') return true;
-  const explicitCollaboration =
-    left.collaboration_id.length > 0 && right.collaboration_id.length > 0;
-  if (level === 'workspace') {
-    return explicitCollaboration
-      ? left.collaboration_id === right.collaboration_id
-      : left.workspace_id === right.workspace_id;
-  }
   return matchesScope(left, right);
 }
 
@@ -209,9 +203,6 @@ export function foldTemporalState(
         break;
       default:
         break;
-    }
-    if (!after && before && event.entity_kind === 'work_item') {
-      workItems.delete(event.entity_id);
     }
   }
 
@@ -374,13 +365,19 @@ export function createTemporalReplayAdapter(
     getKnowledgeMemoryAuditsForKnowledge: async () => [],
     updateKnowledgeMemory: () => unsupported('updateKnowledgeMemory'),
     touchKnowledgeMemory: async () => undefined,
+    touchKnowledgeMemories: async () => undefined,
     retireKnowledgeMemory: () => unsupported('retireKnowledgeMemory'),
     supersedeKnowledgeMemory: () => unsupported('supersedeKnowledgeMemory'),
     insertWorkItem: () => unsupported('insertWorkItem'),
+    getWorkItemById: async (id) => state.workItems.find((item) => item.id === id) ?? null,
     getActiveWorkItems: async (scope) =>
       state.workItems.filter((item) => matchesScope(item, scope) && item.status !== 'done'),
+    getActiveWorkItemsCrossScope: async (scope, level) =>
+      state.workItems.filter((item) => matchesLevel(item, scope, level) && item.status !== 'done'),
     getWorkItemsByTimeRange: async (scope, range) =>
       state.workItems.filter((item) => matchesScope(item, scope) && inRange(item.created_at, range)),
+    getWorkItemsByTimeRangeCrossScope: async (scope, level, range) =>
+      state.workItems.filter((item) => matchesLevel(item, scope, level) && inRange(item.created_at, range)),
     updateWorkItemStatus: () => unsupported('updateWorkItemStatus'),
     updateWorkItem: async () => unsupported('updateWorkItem'),
     deleteWorkItem: () => unsupported('deleteWorkItem'),
@@ -396,6 +393,19 @@ export function createTemporalReplayAdapter(
     listWorkClaims: async (scope, options?: WorkClaimQuery) =>
       state.workClaims.filter((claim) => {
         if (!matchesScope(claim, scope)) return false;
+        if (options?.sessionId && claim.session_id !== options.sessionId) return false;
+        if (options?.visibilityClass && claim.visibility_class !== options.visibilityClass) return false;
+        if (options?.actor) {
+          return (
+            claim.actor.actor_kind === options.actor.actor_kind &&
+            claim.actor.actor_id === options.actor.actor_id
+          );
+        }
+        return true;
+      }),
+    listWorkClaimsCrossScope: async (scope, level, options?: WorkClaimQuery) =>
+      state.workClaims.filter((claim) => {
+        if (!matchesLevel(claim, scope, level)) return false;
         if (options?.sessionId && claim.session_id !== options.sessionId) return false;
         if (options?.visibilityClass && claim.visibility_class !== options.visibilityClass) return false;
         if (options?.actor) {
@@ -429,6 +439,22 @@ export function createTemporalReplayAdapter(
         if (options.direction === 'outbound') return outbound;
         return inbound || outbound;
       }),
+    listHandoffsCrossScope: async (scope, level, options) =>
+      state.handoffs.filter((handoff) => {
+        if (!matchesLevel(handoff, scope, level)) return false;
+        if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
+        if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
+        if (!options?.actor) return true;
+        const inbound =
+          handoff.to_actor.actor_kind === options.actor.actor_kind &&
+          handoff.to_actor.actor_id === options.actor.actor_id;
+        const outbound =
+          handoff.from_actor.actor_kind === options.actor.actor_kind &&
+          handoff.from_actor.actor_id === options.actor.actor_id;
+        if (options.direction === 'inbound') return inbound;
+        if (options.direction === 'outbound') return outbound;
+        return inbound || outbound;
+      }),
     upsertContextMonitor: () => unsupported('upsertContextMonitor'),
     getContextMonitor: async () => null,
     insertCompactionLog: () => unsupported('insertCompactionLog'),
@@ -440,11 +466,29 @@ export function createTemporalReplayAdapter(
       state.playbooks.filter(
         (item) => matchesScope(item, scope) && (item.status === 'draft' || item.status === 'active'),
       ),
+    getActivePlaybooksCrossScope: async (scope, level) =>
+      state.playbooks.filter(
+        (item) => matchesLevel(item, scope, level) && (item.status === 'draft' || item.status === 'active'),
+      ),
     searchPlaybooks: async (scope, query, options) =>
       state.playbooks
         .filter(
           (item) =>
             matchesScope(item, scope) &&
+            (options?.activeOnly === false || (item.status !== 'archived' && item.status !== 'deprecated')),
+        )
+        .map((item) => ({
+          item,
+          rank: scoreText(query, `${item.title} ${item.description} ${item.instructions}`),
+        }))
+        .filter((entry) => entry.rank > 0)
+        .sort((a, b) => b.rank - a.rank || b.item.updated_at - a.item.updated_at)
+        .slice(0, options?.limit ?? 10),
+    searchPlaybooksCrossScope: async (scope, level, query, options) =>
+      state.playbooks
+        .filter(
+          (item) =>
+            matchesLevel(item, scope, level) &&
             (options?.activeOnly === false || (item.status !== 'archived' && item.status !== 'deprecated')),
         )
         .map((item) => ({

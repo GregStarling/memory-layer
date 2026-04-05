@@ -10,6 +10,7 @@ import type { ConflictStrategy, ExtractionPolicy } from '../contracts/policy.js'
 import { DEFAULT_EXTRACTION_POLICY } from '../contracts/policy.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type { StorageAdapter } from '../contracts/storage.js';
+import { UniqueConstraintError } from '../contracts/storage.js';
 import type {
   CompactionTrigger,
   EvidenceSourceType,
@@ -1141,8 +1142,10 @@ export async function extractKnowledge(
               confidence: 1,
               auto_generated: true,
             });
-          } catch {
-            // Unique constraint — association already exists
+          } catch (error) {
+            if (!(error instanceof UniqueConstraintError)) {
+              throw error;
+            }
           }
         }
 
@@ -1250,8 +1253,10 @@ export async function extractKnowledge(
               confidence: 1,
               auto_generated: true,
             });
-          } catch {
-            // Unique constraint — association already exists
+          } catch (error) {
+            if (!(error instanceof UniqueConstraintError)) {
+              throw error;
+            }
           }
         }
 

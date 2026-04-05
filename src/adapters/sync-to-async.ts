@@ -85,15 +85,21 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
       Promise.resolve(adapter.getKnowledgeMemoryAuditsForKnowledge(scope, knowledgeId, limit)),
     updateKnowledgeMemory: (id, patch) => Promise.resolve(adapter.updateKnowledgeMemory(id, patch)),
     touchKnowledgeMemory: (id) => Promise.resolve(adapter.touchKnowledgeMemory(id)),
+    touchKnowledgeMemories: (ids) => Promise.resolve(adapter.touchKnowledgeMemories(ids)),
     retireKnowledgeMemory: (id, retiredAt) =>
       Promise.resolve(adapter.retireKnowledgeMemory(id, retiredAt)),
     supersedeKnowledgeMemory: (oldId, newId) =>
       Promise.resolve(adapter.supersedeKnowledgeMemory(oldId, newId)),
 
     insertWorkItem: (input) => Promise.resolve(adapter.insertWorkItem(input)),
+    getWorkItemById: (id) => Promise.resolve(adapter.getWorkItemById(id)),
     getActiveWorkItems: (scope) => Promise.resolve(adapter.getActiveWorkItems(scope)),
+    getActiveWorkItemsCrossScope: (scope, level) =>
+      Promise.resolve(adapter.getActiveWorkItemsCrossScope(scope, level)),
     getWorkItemsByTimeRange: (scope, range) =>
       Promise.resolve(adapter.getWorkItemsByTimeRange(scope, range)),
+    getWorkItemsByTimeRangeCrossScope: (scope, level, range) =>
+      Promise.resolve(adapter.getWorkItemsByTimeRangeCrossScope(scope, level, range)),
     updateWorkItemStatus: (id, status) =>
       Promise.resolve(adapter.updateWorkItemStatus(id, status)),
     updateWorkItem: (id, patch, options) =>
@@ -106,6 +112,8 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
       Promise.resolve(adapter.releaseWorkClaim(claimId, actor, reason)),
     getActiveWorkClaim: (workItemId) => Promise.resolve(adapter.getActiveWorkClaim(workItemId)),
     listWorkClaims: (scope, options) => Promise.resolve(adapter.listWorkClaims(scope, options)),
+    listWorkClaimsCrossScope: (scope, level, options) =>
+      Promise.resolve(adapter.listWorkClaimsCrossScope(scope, level, options)),
     createHandoff: (input) => Promise.resolve(adapter.createHandoff(input)),
     acceptHandoff: (handoffId, actor, reason) =>
       Promise.resolve(adapter.acceptHandoff(handoffId, actor, reason)),
@@ -114,6 +122,8 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
     cancelHandoff: (handoffId, actor, reason) =>
       Promise.resolve(adapter.cancelHandoff(handoffId, actor, reason)),
     listHandoffs: (scope, options) => Promise.resolve(adapter.listHandoffs(scope, options)),
+    listHandoffsCrossScope: (scope, level, options) =>
+      Promise.resolve(adapter.listHandoffsCrossScope(scope, level, options)),
 
     upsertContextMonitor: (input) => Promise.resolve(adapter.upsertContextMonitor(input)),
     getContextMonitor: (scope) => Promise.resolve(adapter.getContextMonitor(scope)),
@@ -126,8 +136,12 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
     insertPlaybook: (input) => Promise.resolve(adapter.insertPlaybook(input)),
     getPlaybookById: (id) => Promise.resolve(adapter.getPlaybookById(id)),
     getActivePlaybooks: (scope) => Promise.resolve(adapter.getActivePlaybooks(scope)),
+    getActivePlaybooksCrossScope: (scope, level) =>
+      Promise.resolve(adapter.getActivePlaybooksCrossScope(scope, level)),
     searchPlaybooks: (scope, query, options) =>
       Promise.resolve(adapter.searchPlaybooks(scope, query, options)),
+    searchPlaybooksCrossScope: (scope, level, query, options) =>
+      Promise.resolve(adapter.searchPlaybooksCrossScope(scope, level, query, options)),
     updatePlaybook: (id, patch) => Promise.resolve(adapter.updatePlaybook(id, patch)),
     recordPlaybookUse: (id) => Promise.resolve(adapter.recordPlaybookUse(id)),
     insertPlaybookRevision: (input) => Promise.resolve(adapter.insertPlaybookRevision(input)),

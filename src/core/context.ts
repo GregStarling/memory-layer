@@ -4,7 +4,9 @@ import type {
   ActorRef,
   ContextViewPolicy,
   CoordinationState,
+  HandoffRecord,
   MemoryVisibilityClass,
+  WorkClaim,
 } from '../contracts/coordination.js';
 import type { EventHook, Logger } from '../contracts/observability.js';
 import type { ContextMode, ContextPolicy } from '../contracts/policy.js';
@@ -45,6 +47,7 @@ export interface ContextAssemblyOptions {
   view?: ContextViewPolicy;
   viewer?: ActorRef;
   includeCoordinationState?: boolean;
+  persistSessionStateProjection?: boolean;
 }
 
 export interface KnowledgeSelectionReason {
@@ -231,6 +234,58 @@ function resolveVisiblePlaybooks(
   scope: MemoryScope,
   view: ContextViewPolicy,
 ): Playbook[] {
+  return items.filter((item) => {
+    if (item.visibility_class === 'tenant') return false;
+    if (view === 'local_only') {
+      return item.visibility_class === 'private' && matchesVisibility('private', item, scope);
+    }
+    if (view === 'local_plus_shared_collaboration' || view === 'operator_supervisor') {
+      return (
+        (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
+        (item.visibility_class === 'shared_collaboration' &&
+          matchesVisibility('shared_collaboration', item, scope))
+      );
+    }
+    return (
+      (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
+      (item.visibility_class === 'shared_collaboration' &&
+        matchesVisibility('shared_collaboration', item, scope)) ||
+      (item.visibility_class === 'workspace' && matchesVisibility('workspace', item, scope))
+    );
+  });
+}
+
+function resolveVisibleWorkClaims(
+  items: WorkClaim[],
+  scope: MemoryScope,
+  view: ContextViewPolicy,
+): WorkClaim[] {
+  return items.filter((item) => {
+    if (item.visibility_class === 'tenant') return false;
+    if (view === 'local_only') {
+      return item.visibility_class === 'private' && matchesVisibility('private', item, scope);
+    }
+    if (view === 'local_plus_shared_collaboration' || view === 'operator_supervisor') {
+      return (
+        (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
+        (item.visibility_class === 'shared_collaboration' &&
+          matchesVisibility('shared_collaboration', item, scope))
+      );
+    }
+    return (
+      (item.visibility_class === 'private' && matchesVisibility('private', item, scope)) ||
+      (item.visibility_class === 'shared_collaboration' &&
+        matchesVisibility('shared_collaboration', item, scope)) ||
+      (item.visibility_class === 'workspace' && matchesVisibility('workspace', item, scope))
+    );
+  });
+}
+
+function resolveVisibleHandoffs(
+  items: HandoffRecord[],
+  scope: MemoryScope,
+  view: ContextViewPolicy,
+): HandoffRecord[] {
   return items.filter((item) => {
     if (item.visibility_class === 'tenant') return false;
     if (view === 'local_only') {
@@ -439,15 +494,30 @@ async function getContextWorkItems(
   adapter: AsyncStorageAdapter,
   scope: MemoryScope,
   asOf?: number,
+  level?: ScopeLevel,
 ): Promise<WorkItem[]> {
   if (asOf == null) {
-    return adapter.getActiveWorkItems(scope);
+    return level && level !== 'scope'
+      ? adapter.getActiveWorkItemsCrossScope(scope, level)
+      : adapter.getActiveWorkItems(scope);
   }
 
-  const workItems = await adapter.getWorkItemsByTimeRange(scope, { end_at: asOf });
+  const workItems =
+    level && level !== 'scope'
+      ? await adapter.getWorkItemsByTimeRangeCrossScope(scope, level, { end_at: asOf })
+      : await adapter.getWorkItemsByTimeRange(scope, { end_at: asOf });
   return workItems
     .filter((item) => isWorkItemActiveAt(item, asOf))
     .sort((a, b) => b.updated_at - a.updated_at || b.created_at - a.created_at || b.id - a.id);
+}
+
+function resolveContextScopeLevel(
+  crossScopeLevel: ScopeLevel | undefined,
+  view: ContextViewPolicy | undefined,
+): ScopeLevel | undefined {
+  if (crossScopeLevel === 'tenant') return 'tenant';
+  if (view && view !== 'local_only') return 'workspace';
+  return crossScopeLevel;
 }
 
 function computeContextTokenEstimate(
@@ -637,6 +707,7 @@ export async function buildMemoryContext(
   const tokenEstimator = options?.tokenEstimator ?? estimateTokens;
   const asOf = options?.asOf;
   const view = options?.view;
+  const effectiveScopeLevel = resolveContextScopeLevel(options?.crossScopeLevel, view);
 
   let activeTurns = await adapter.getActiveTurns(normalizedScope, options?.sessionId);
   if (asOf != null) {
@@ -644,11 +715,11 @@ export async function buildMemoryContext(
   }
   const contextWorkItems = view
     ? resolveVisibleWorkItems(
-        await getContextWorkItems(adapter, normalizedScope, asOf),
+        await getContextWorkItems(adapter, normalizedScope, asOf, effectiveScopeLevel),
         normalizedScope,
         view,
       )
-    : await getContextWorkItems(adapter, normalizedScope, asOf);
+    : await getContextWorkItems(adapter, normalizedScope, asOf, effectiveScopeLevel);
   const activeObjectives = contextWorkItems.filter((item) => item.kind === 'objective');
   const workingMemoryCandidates = await adapter.getActiveWorkingMemory(
     normalizedScope,
@@ -662,8 +733,8 @@ export async function buildMemoryContext(
     .filter((summary) => summary.id !== workingMemory?.id)
     .slice(0, policy.maxRecentSummaries);
 
-  const activeKnowledge = options?.crossScopeLevel
-    ? await adapter.getActiveKnowledgeCrossScope(normalizedScope, options.crossScopeLevel)
+  const activeKnowledge = effectiveScopeLevel && effectiveScopeLevel !== 'scope'
+    ? await adapter.getActiveKnowledgeCrossScope(normalizedScope, effectiveScopeLevel)
     : await adapter.getActiveKnowledgeMemory(normalizedScope);
   const temporalKnowledge = view
     ? resolveVisibleKnowledge(
@@ -674,10 +745,10 @@ export async function buildMemoryContext(
     : activeKnowledge.filter((item) => asOf == null || item.created_at <= asOf);
   const lexicalRanks = options?.relevanceQuery
     ? normalizeLexicalRanks(
-        options.crossScopeLevel
+        effectiveScopeLevel && effectiveScopeLevel !== 'scope'
           ? await adapter.searchKnowledgeCrossScope(
               normalizedScope,
-              options.crossScopeLevel,
+              effectiveScopeLevel,
               options.relevanceQuery,
               {
                 limit: policy.maxKnowledgeItems * 2,
@@ -693,10 +764,10 @@ export async function buildMemoryContext(
   let semanticRanks = new Map<number, number>();
   if (options?.embeddingAdapter && options.queryVector) {
     try {
-      const semanticResults = options.crossScopeLevel
+      const semanticResults = effectiveScopeLevel && effectiveScopeLevel !== 'scope'
         ? await options.embeddingAdapter.findSimilarCrossScope(
             normalizedScope,
-            options.crossScopeLevel,
+            effectiveScopeLevel,
             options.queryVector,
             {
               limit: policy.maxKnowledgeItems * 2,
@@ -716,7 +787,9 @@ export async function buildMemoryContext(
   }
 
   const scopedKnowledge =
-    options?.crossScopeLevel && options.crossScopeLevel !== 'scope'
+    view && view !== 'local_only'
+      ? temporalKnowledge
+      : effectiveScopeLevel && effectiveScopeLevel !== 'scope'
       ? temporalKnowledge.filter(
           (item) =>
             item.scope_id === normalizedScope.scope_id ||
@@ -737,7 +810,7 @@ export async function buildMemoryContext(
     policy,
     normalizedScope,
     relevanceTexts,
-    options?.crossScopeLevel != null && options.crossScopeLevel !== 'scope',
+    effectiveScopeLevel != null && effectiveScopeLevel !== 'scope',
   );
   const trustedCoreClasses = new Set(['identity', 'constraint', 'preference']);
   const trustedCoreSelection = selectKnowledge(
@@ -792,9 +865,21 @@ export async function buildMemoryContext(
       detail: `excluded:${candidate.item.knowledge_state}:${candidate.item.knowledge_class}`,
     }));
 
+  const scopedKnowledgeById = new Map(scopedKnowledge.map((item) => [item.id, item]));
   let relevantPlaybooks: Playbook[] = options?.relevanceQuery
-    ? (await adapter.searchPlaybooks(normalizedScope, options.relevanceQuery, { limit: 3, activeOnly: true }))
-        .map((hit) => hit.item)
+    ? (
+        effectiveScopeLevel && effectiveScopeLevel !== 'scope'
+          ? await adapter.searchPlaybooksCrossScope(
+              normalizedScope,
+              effectiveScopeLevel,
+              options.relevanceQuery,
+              { limit: 3, activeOnly: true },
+            )
+          : await adapter.searchPlaybooks(normalizedScope, options.relevanceQuery, {
+              limit: 3,
+              activeOnly: true,
+            })
+      ).map((hit) => hit.item)
     : [];
   relevantPlaybooks = view
     ? resolveVisiblePlaybooks(relevantPlaybooks, normalizedScope, view)
@@ -817,46 +902,46 @@ export async function buildMemoryContext(
   };
   if (relevantKnowledge.length > 0) {
     const associationSeeds = relevantKnowledge.slice(0, maxAssociationSeedItems);
-    const fromPromises = associationSeeds.map((k) =>
-      adapter.getAssociationsFrom('knowledge', k.id, normalizedScope),
+    const associationResults = await Promise.all(
+      associationSeeds.map(async (knowledge) => {
+        const associationScope = normalizeScope(knowledge);
+        const [from, to] = await Promise.all([
+          adapter.getAssociationsFrom('knowledge', knowledge.id, associationScope),
+          adapter.getAssociationsTo('knowledge', knowledge.id, associationScope),
+        ]);
+        return { from, to };
+      }),
     );
-    const toPromises = associationSeeds.map((k) =>
-      adapter.getAssociationsTo('knowledge', k.id, normalizedScope),
-    );
-    const [allFromAssocs, allToAssocs] = await Promise.all([
-      Promise.all(fromPromises),
-      Promise.all(toPromises),
-    ]);
-    const expandIds = new Set<number>();
+    const expandScores = new Map<number, number>();
     // Outbound: current node is source, neighbor is target
-    for (const assocs of allFromAssocs) {
+    for (const { from: assocs } of associationResults) {
       for (const a of assocs) {
         if (
           (a.association_type === 'supports' || a.association_type === 'related_to') &&
           a.target_kind === 'knowledge' &&
           a.confidence >= associationMinConfidence &&
-          !selectedIds.has(a.target_id) &&
-          !expandIds.has(a.target_id)
+          !selectedIds.has(a.target_id)
         ) {
-          expandIds.add(a.target_id);
+          expandScores.set(a.target_id, Math.max(expandScores.get(a.target_id) ?? 0, a.confidence));
         }
       }
     }
     // Inbound: current node is target, neighbor is source
-    for (const assocs of allToAssocs) {
+    for (const { to: assocs } of associationResults) {
       for (const a of assocs) {
         if (
           (a.association_type === 'supports' || a.association_type === 'related_to') &&
           a.source_kind === 'knowledge' &&
           a.confidence >= associationMinConfidence &&
-          !selectedIds.has(a.source_id) &&
-          !expandIds.has(a.source_id)
+          !selectedIds.has(a.source_id)
         ) {
-          expandIds.add(a.source_id);
+          expandScores.set(a.source_id, Math.max(expandScores.get(a.source_id) ?? 0, a.confidence));
         }
       }
     }
-    const candidateAssociationIds = [...expandIds];
+    const candidateAssociationIds = [...expandScores.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+      .map(([id]) => id);
     associationTrace.candidateKnowledgeIds = candidateAssociationIds;
     if (candidateAssociationIds.length > maxAssociatedKnowledgeItems) {
       associationTrace.truncatedKnowledgeIds = candidateAssociationIds.slice(
@@ -864,18 +949,9 @@ export async function buildMemoryContext(
       );
     }
     for (const targetId of candidateAssociationIds.slice(0, maxAssociatedKnowledgeItems)) {
-      const km = await adapter.getKnowledgeMemoryById(targetId);
-      if (
-        km &&
-        km.knowledge_state !== 'retired' &&
-        km.knowledge_state !== 'superseded' &&
-        km.tenant_id === normalizedScope.tenant_id &&
-        km.system_id === normalizedScope.system_id &&
-        km.workspace_id === normalizedScope.workspace_id &&
-        km.collaboration_id === normalizedScope.collaboration_id &&
-        km.scope_id === normalizedScope.scope_id
-      ) {
-        associatedKnowledge.push(km);
+      const knowledge = scopedKnowledgeById.get(targetId);
+      if (knowledge && knowledge.knowledge_state !== 'retired' && knowledge.knowledge_state !== 'superseded') {
+        associatedKnowledge.push(knowledge);
       }
     }
     associationTrace.includedKnowledgeIds = associatedKnowledge.map((knowledge) => knowledge.id);
@@ -974,31 +1050,55 @@ export async function buildMemoryContext(
   tokenTrimTrace.finalTokenEstimate = tokenEstimate;
 
   if (policy.touchSelectedKnowledge) {
-    for (const knowledge of relevantKnowledge) {
-      await adapter.touchKnowledgeMemory(knowledge.id);
-    }
+    await adapter.touchKnowledgeMemories(relevantKnowledge.map((knowledge) => knowledge.id));
   }
 
-  const workClaims = options?.includeCoordinationState || view
-    ? await adapter.listWorkClaims(normalizedScope, {
-        actor: options?.viewer
-          ? {
-              actor_kind: options.viewer.actor_kind,
-              actor_id: options.viewer.actor_id,
-            }
-          : undefined,
-      })
+  const rawWorkClaims = options?.includeCoordinationState || view
+    ? await (
+      effectiveScopeLevel && effectiveScopeLevel !== 'scope'
+        ? adapter.listWorkClaimsCrossScope(normalizedScope, effectiveScopeLevel, {
+            actor: options?.viewer
+              ? {
+                  actor_kind: options.viewer.actor_kind,
+                  actor_id: options.viewer.actor_id,
+                }
+              : undefined,
+          })
+        : adapter.listWorkClaims(normalizedScope, {
+            actor: options?.viewer
+              ? {
+                  actor_kind: options.viewer.actor_kind,
+                  actor_id: options.viewer.actor_id,
+                }
+              : undefined,
+          })
+    )
     : [];
-  const handoffs = options?.includeCoordinationState || view
-    ? await adapter.listHandoffs(normalizedScope, {
-        actor: options?.viewer
-          ? {
-              actor_kind: options.viewer.actor_kind,
-              actor_id: options.viewer.actor_id,
-            }
-          : undefined,
-      })
+  const workClaims = view
+    ? resolveVisibleWorkClaims(rawWorkClaims, normalizedScope, view)
+    : rawWorkClaims;
+  const rawHandoffs = options?.includeCoordinationState || view
+    ? await (
+      effectiveScopeLevel && effectiveScopeLevel !== 'scope'
+        ? adapter.listHandoffsCrossScope(normalizedScope, effectiveScopeLevel, {
+            actor: options?.viewer
+              ? {
+                  actor_kind: options.viewer.actor_kind,
+                  actor_id: options.viewer.actor_id,
+                }
+              : undefined,
+          })
+        : adapter.listHandoffs(normalizedScope, {
+            actor: options?.viewer
+              ? {
+                  actor_kind: options.viewer.actor_kind,
+                  actor_id: options.viewer.actor_id,
+                }
+              : undefined,
+          })
+    )
     : [];
+  const handoffs = view ? resolveVisibleHandoffs(rawHandoffs, normalizedScope, view) : rawHandoffs;
   const coordinationState: CoordinationState | null =
     options?.includeCoordinationState || view
       ? {
@@ -1051,7 +1151,7 @@ export async function buildMemoryContext(
     asOf == null && options?.sessionId
       ? await adapter.getSessionState(normalizedScope, options.sessionId)
       : null;
-  const sessionState = projectedSessionState
+  const sessionState = projectedSessionState && projectedSessionState.updatedAt >= derivedSessionState.updatedAt
     ? {
         currentObjective: projectedSessionState.currentObjective,
         blockers: projectedSessionState.blockers,
@@ -1062,7 +1162,7 @@ export async function buildMemoryContext(
         updatedAt: projectedSessionState.updatedAt,
       }
     : derivedSessionState;
-  if (asOf == null && options?.sessionId) {
+  if (asOf == null && options?.sessionId && options.persistSessionStateProjection) {
     const watermark = await adapter.getTemporalWatermark('temporal');
     if (
       !projectedSessionState ||
@@ -1081,10 +1181,10 @@ export async function buildMemoryContext(
     scope: {
       normalizedScope,
       scopeSource:
-        options?.crossScopeLevel != null && options.crossScopeLevel !== 'scope'
+        effectiveScopeLevel != null && effectiveScopeLevel !== 'scope'
           ? 'cross_scope'
           : 'local',
-      scopeLevel: options?.crossScopeLevel ?? 'scope',
+      scopeLevel: effectiveScopeLevel ?? 'scope',
       asOf: asOf ?? null,
     },
     selectedKnowledge: knowledgeSelectionReasons,
@@ -1101,7 +1201,7 @@ export async function buildMemoryContext(
     recentSummaryCount: trimmedSummaries.length,
     tokenEstimate,
     relevanceQuery: options?.relevanceQuery ?? null,
-    crossScopeLevel: options?.crossScopeLevel ?? 'scope',
+    crossScopeLevel: effectiveScopeLevel ?? 'scope',
     currentObjective,
     unresolvedWorkCount: unresolvedWork.length,
     sessionState,

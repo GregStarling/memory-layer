@@ -1013,6 +1013,23 @@ paths:
           in: query
           schema:
             type: boolean
+        - name: viewer_actor_kind
+          in: query
+          schema:
+            type: string
+            enum: [agent, human, system, service]
+        - name: viewer_actor_id
+          in: query
+          schema:
+            type: string
+        - name: viewer_system_id
+          in: query
+          schema:
+            type: string
+        - name: viewer_display_name
+          in: query
+          schema:
+            type: string
         - $ref: '#/components/parameters/ScopeTenant'
         - $ref: '#/components/parameters/ScopeSystem'
         - $ref: '#/components/parameters/ScopeWorkspace'
@@ -1045,6 +1062,23 @@ paths:
           in: query
           schema:
             type: boolean
+        - name: viewer_actor_kind
+          in: query
+          schema:
+            type: string
+            enum: [agent, human, system, service]
+        - name: viewer_actor_id
+          in: query
+          schema:
+            type: string
+        - name: viewer_system_id
+          in: query
+          schema:
+            type: string
+        - name: viewer_display_name
+          in: query
+          schema:
+            type: string
         - $ref: '#/components/parameters/ScopeTenant'
         - $ref: '#/components/parameters/ScopeSystem'
         - $ref: '#/components/parameters/ScopeWorkspace'
