@@ -102,6 +102,7 @@
     "eval:memory-quality:delta:enforce": "npm run build && node scripts/report-memory-quality-delta.mjs --enforce",
     "eval:platform-quality": "npm run build && node evals/platform-quality/index.mjs",
     "eval:platform-quality:enforce": "npm run build && node evals/platform-quality/index.mjs --enforce",
+    "release:notes": "node scripts/extract-changelog-release.mjs",
     "python:check": "cd clients/python && python3 -m venv .venv && .venv/bin/pip install -e '.[dev]' && .venv/bin/python -m build && .venv/bin/ruff check . && .venv/bin/pytest",
     "export:memory": "node scripts/export-memory.mjs",
     "import:memory": "node scripts/import-memory.mjs",

@@ -95,3 +95,4 @@ export function createOpenAIExtractor(options: ProviderExtractorOptions = {}): E
     )(...args);
   };
 }
+
