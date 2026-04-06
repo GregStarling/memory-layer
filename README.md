@@ -2,7 +2,7 @@
   <h1 align="center">memory-layer</h1>
   <p align="center">
     A cognitive memory architecture for AI systems.<br/>
-    Turns become summaries. Summaries become knowledge. Knowledge becomes context.<br/>
+    Interactions become summaries. Summaries become knowledge. Knowledge becomes context.<br/>
     Two lines to start. Enough architecture to scale.
   </p>
 </p>
