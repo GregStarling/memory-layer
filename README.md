@@ -2,12 +2,13 @@
   <h1 align="center">memory-layer</h1>
   <p align="center">
     A cognitive memory architecture for AI systems.<br/>
-    Three-tier storage. Trust-scored knowledge. Temporal replay.<br/>
-    Two lines to remember everything. Zero infrastructure to start.
+    Turns become summaries. Summaries become knowledge. Knowledge becomes context.<br/>
+    Two lines to start. Enough architecture to scale.
   </p>
 </p>
 
 <p align="center">
+  <a href="#why-it-stands-out">Why</a> &nbsp;&bull;&nbsp;
   <a href="#quick-start">Quick Start</a> &nbsp;&bull;&nbsp;
   <a href="#how-it-works">How It Works</a> &nbsp;&bull;&nbsp;
   <a href="#integrations">Integrations</a> &nbsp;&bull;&nbsp;
@@ -34,6 +35,30 @@ That's a working memory system. No API keys. No infrastructure. No configuration
 
 ---
 
+## Why It Stands Out
+
+- **Starts as a package, not an infrastructure project.** `createMemory()` works offline out of the box, then grows into SQLite, PostgreSQL, HTTP, or MCP without changing the core mental model.
+- **Treats memory as evolving state, not just search results.** Turns compact into summaries, summaries promote into evidence-backed knowledge, and context assembly respects trust, scope, and token budget.
+- **Keeps history, not just the latest projection.** Replay, diffs, streaming, and snapshots let you ask what changed and what the system knew at a specific time.
+- **Built for real agent operations.** Multi-scope routing, work claims, handoffs, playbooks, profiles, and association graphs are first-class instead of bolted on later.
+
+## When To Use It
+
+Use `memory-layer` when:
+
+- your agent needs durable preferences, constraints, and decisions across sessions
+- you need temporal replay, auditability, or change streams
+- multiple agents share workspace memory or coordinate on work
+- you want one memory abstraction that can start embedded and later move behind HTTP or MCP
+
+It is probably overkill when:
+
+- you only need vector search over a document corpus
+- a single chat transcript is enough and nothing needs to persist
+- you do not need trust lifecycles, temporal semantics, or multi-agent coordination
+
+---
+
 ## Quick Start
 
 ### Install
@@ -49,15 +74,16 @@ import { createMemory } from 'ai-memory-layer';
 
 const memory = createMemory();
 
-await memory.processExchange(
+await memory.learnFact(
   'Always use TypeScript strict mode in this project.',
-  'Got it — TypeScript strict mode is now a stored constraint.',
+  'constraint',
 );
 
-// Later, in a new session or turn:
 const ctx = await memory.getContext('typescript config');
 // ctx.relevantKnowledge → [{ fact: "Use TypeScript strict mode", knowledge_class: "constraint", ... }]
 ```
+
+For direct durable memory in one call, use `learnFact(...)`. Conversation-driven extraction also works, but durable knowledge appears after compaction rather than after a single exchange.
 
 No API keys required. Uses a pure-JS extractive summarizer, heuristic fact extractor, and local embedding fallback out of the box.
 
@@ -94,7 +120,7 @@ const memory = createMemory({
 });
 ```
 
-When `OPENAI_API_KEY` or `VOYAGE_API_KEY` is present, `createMemory()` auto-upgrades to provider-backed embeddings. The quality tier shifts silently — no code changes required.
+When `OPENAI_API_KEY` or `VOYAGE_API_KEY` is present, `createMemory()` upgrades the embedding tier automatically. You keep the same integration code and can opt into provider summarization or extraction when you want higher-fidelity memory formation.
 
 ---
 
@@ -226,7 +252,7 @@ const handler = wrapWithMemory(
 );
 ```
 
-### MCP Server (38 tools)
+### MCP Server
 
 ```typescript
 import { createMemoryMcpAdapter } from 'ai-memory-layer';
@@ -242,7 +268,7 @@ Or run standalone:
 npx memory-layer serve --transport mcp --db ./memory.db
 ```
 
-38 tools covering turns, context, search, episodes, cognitive retrieval, playbooks, associations, coordination, temporal queries, maintenance, and snapshots.
+Tool surface spanning turns, context, search, episodes, cognitive retrieval, playbooks, associations, coordination, temporal queries, maintenance, and snapshots.
 
 ### HTTP Service
 
@@ -250,7 +276,9 @@ npx memory-layer serve --transport mcp --db ./memory.db
 npx memory-layer serve --transport http --db ./memory.db --port 3100
 ```
 
-Full REST API documented in [`openapi.yaml`](openapi.yaml). 32+ endpoints with multi-tenant routing via scope headers, SSE event streaming, bearer auth, and admin key separation.
+Full REST API documented in [`openapi.yaml`](openapi.yaml), with multi-tenant routing via scope headers, SSE event streaming, bearer auth, and admin key separation.
+
+Important trust-model note: the built-in HTTP server treats a valid API key as one trust domain. Scope headers and query/body scope overrides are routing inputs, not tenant authorization boundaries. If you expose the server beyond localhost or a private service mesh, put tenant-aware auth in front of it.
 
 ---
 
@@ -325,7 +353,7 @@ const state = await memory.getStateAt(asOfTimestamp);
 // state.turns, state.knowledge, state.workItems, state.workClaims, state.handoffs, ...
 ```
 
-Exact replay (post-cutover) folds the event log into a read-only replay adapter. No live data leaks into historical queries — the replay is hermetic.
+Historical replay is exact after the replay cutover and best-effort before it. For exactness-sensitive flows, `getStateAt(...)` exposes whether the reconstruction is exact.
 
 ### Temporal Diffs
 
@@ -475,7 +503,7 @@ Orthogonal to presets. Controls how aggressively the system trusts and retains k
 | **Local semantic** | Composite heuristic | Lexical + local TF-IDF embeddings | Nothing |
 | **Provider-backed** | Claude/OpenAI LLM | Lexical + provider embeddings | API key |
 
-The local path is fully functional offline. Provider-backed is the gold standard when API access is available.
+The local path is fully functional offline. Provider-backed is the highest-quality tier when API access is available.
 
 <details>
 <summary><strong>MonitorPolicy</strong> — when compaction triggers</summary>
@@ -546,7 +574,18 @@ The local path is fully functional offline. Provider-backed is the gold standard
 
 ## API Reference
 
-### MemoryManager
+Most integrations only need a small slice of the surface:
+
+- `createMemory()` or `createMemoryRuntime(manager)`
+- `processExchange(...)` or `wrapModelCall(...)`
+- `getContext(...)` or `getSessionBootstrap(...)`
+- `learnFact(...)` for explicit durable memory
+- `forceCompact()`, `runMaintenance()`, and `getRuntimeDiagnostics()` for operations
+
+For the full transport contract, see [openapi.yaml](openapi.yaml). For the TypeScript surface, the package exports the types shown below.
+
+<details>
+<summary><strong>MemoryManager</strong> — full manager surface</summary>
 
 Returned by `createMemory()`, `createMemoryManager()`, and provider factories.
 
@@ -586,6 +625,9 @@ interface MemoryManager {
   trackWorkItem(title, kind?, status?, detail?): Promise<WorkItem>
   updateWorkItem(id, patch): Promise<WorkItem | null>
   claimWorkItem(input): Promise<WorkClaim>
+  renewWorkClaim(claimId, actor, leaseSeconds?): Promise<WorkClaim | null>
+  releaseWorkClaim(claimId, actor, reason?): Promise<WorkClaim | null>
+  listWorkClaims(options?): Promise<WorkClaim[]>
   handoffWorkItem(input): Promise<HandoffRecord>
   acceptHandoff(id, actor): Promise<HandoffRecord | null>
 
@@ -613,8 +655,10 @@ interface MemoryManager {
   close(): Promise<void>
 }
 ```
+</details>
 
-### MemoryRuntime
+<details>
+<summary><strong>MemoryRuntime</strong> — model-call integration hooks</summary>
 
 Returned by `createMemoryRuntime(manager)`. Higher-level hooks for model call integration.
 
@@ -634,8 +678,10 @@ interface MemoryRuntime {
   getSnapshot(): SessionSnapshot | null
 }
 ```
+</details>
 
-### MemoryContext
+<details>
+<summary><strong>MemoryContext</strong> — prompt-ready retrieval output</summary>
 
 The structured object returned by `getContext()`. Ready for prompt injection.
 
@@ -662,6 +708,8 @@ interface MemoryContext {
   tokenEstimate: number;
 }
 ```
+
+</details>
 
 ---
 
@@ -772,7 +820,7 @@ SQLite is the zero-friction production path. PostgreSQL + pgvector is the scalin
 
 ## Testing & Quality
 
-455 tests across 55 files. 14-metric behavioral eval suite as a hard release gate.
+Broad automated test coverage plus a behavioral eval gate keep the package honest before release.
 
 ```bash
 npm test                                      # full test suite
@@ -781,7 +829,7 @@ npm run eval:memory-quality:delta:enforce     # must not regress from baseline
 npm run release:check                         # full release gate
 ```
 
-Quality metrics include: constraint retention, preference retention, identity retention, update correctness, false memory rate, contradiction resolution, trusted memory precision/recall, scope isolation, compaction fidelity, and maintenance fidelity.
+Release checks cover unit and integration tests, behavioral memory-quality evals, transport parity, platform proofs, and packaging validation.
 
 ---
 
