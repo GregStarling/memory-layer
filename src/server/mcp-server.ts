@@ -1810,7 +1810,7 @@ export async function startMcpServer(config: McpServerConfig = {}): Promise<void
               capabilities: { tools: {} },
               serverInfo: {
                 name: 'memory-layer',
-                version: '2.0.0',
+                version: '3.0.0',
               },
             },
           }) + '\n',
