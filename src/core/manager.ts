@@ -114,6 +114,8 @@ import type { StructuredGenerationClient } from '../summarizers/client.js';
 import { searchEpisodes, summarizeEpisode, reflect } from './episodic.js';
 import { searchCognitive } from './cognitive.js';
 import { traverseAssociations, type AssociationGraph } from './associations.js';
+import { exportAsMarkdown } from './markdown-export.js';
+import { createHash } from 'crypto';
 import type { Profile, ProfileOptions } from '../contracts/profile.js';
 import { buildProfileFromKnowledge, getProfile } from './profile.js';
 import {
@@ -392,6 +394,14 @@ export interface MemoryManager {
   getAssociations(kind: AssociationTargetKind, id: number): Promise<{ from: Association[]; to: Association[] }>;
   traverseAssociations(kind: AssociationTargetKind, id: number, options?: { maxDepth?: number; maxNodes?: number }): Promise<AssociationGraph>;
   removeAssociation(id: number): Promise<void>;
+  ingestDocument(
+    content: string,
+    options: { title: string; url?: string; mimeType?: string; metadata?: Record<string, string> },
+  ): Promise<{ document: import('../contracts/types.js').SourceDocument; knowledge: KnowledgeMemory[] }>;
+  getSourceDocument(id: number): Promise<import('../contracts/types.js').SourceDocument | null>;
+  listSourceDocuments(options?: PaginationOptions): Promise<PaginatedResult<import('../contracts/types.js').SourceDocument>>;
+  exportAsMarkdown(options?: import('../contracts/export.js').MarkdownExportOptions): Promise<import('../contracts/export.js').MarkdownExportResult>;
+  promoteResponse(turnId: number, options?: { factTypes?: FactType[]; minConfidence?: FactConfidence }): Promise<KnowledgeMemory[]>;
   close(): Promise<void>;
 }
 
@@ -2204,6 +2214,98 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         throw new ScopeMismatchError(`Association ${id} not found in the current scope`);
       }
       await asyncAdapter.deleteAssociation(id);
+    },
+
+    async ingestDocument(content, options) {
+      if (!config.extractor) {
+        throw new ValidationError('An extractor is required for document ingestion');
+      }
+      const contentHash = createHash('sha256').update(content).digest('hex');
+      const existing = await asyncAdapter.getSourceDocumentByHash(contentHash, config.scope);
+      if (existing) {
+        return { document: existing, knowledge: [] };
+      }
+      const doc = await asyncAdapter.insertSourceDocument({
+        ...config.scope,
+        title: options.title,
+        content_hash: contentHash,
+        mime_type: options.mimeType ?? 'text/plain',
+        url: options.url ?? null,
+        metadata: options.metadata ?? {},
+        token_estimate: estimateTokens(content),
+      });
+      const facts = await config.extractor(content, [], []);
+      const created: KnowledgeMemory[] = [];
+      for (const fact of facts) {
+        const km = await asyncAdapter.insertKnowledgeMemory({
+          ...config.scope,
+          fact: config.redactText ? config.redactText({ kind: 'fact', text: fact.fact }) : fact.fact,
+          fact_type: fact.factType,
+          knowledge_class: manualKnowledgeClassForFactType(fact.factType),
+          source: 'manual',
+          confidence: fact.confidence,
+        });
+        created.push(km);
+      }
+      await maybeEmbedKnowledge(created);
+      await asyncAdapter.updateSourceDocument(doc.id, {
+        status: 'processed',
+        fact_count: created.length,
+        processed_at: Math.floor(Date.now() / 1000),
+      });
+      const updated = await asyncAdapter.getSourceDocumentById(doc.id);
+      return { document: updated ?? { ...doc, status: 'processed' as const, fact_count: created.length, processed_at: Math.floor(Date.now() / 1000) }, knowledge: created };
+    },
+
+    async getSourceDocument(id) {
+      const doc = await asyncAdapter.getSourceDocumentById(id);
+      if (!doc) return null;
+      if (!entityMatchesScope(doc, config.scope)) return null;
+      return doc;
+    },
+
+    async listSourceDocuments(options) {
+      return asyncAdapter.listSourceDocuments(config.scope, options);
+    },
+
+    async exportAsMarkdown(options) {
+      return exportAsMarkdown(asyncAdapter, config.scope, options);
+    },
+
+    async promoteResponse(turnId, options) {
+      if (!config.extractor) {
+        throw new ValidationError('An extractor is required for response promotion');
+      }
+      const turn = await asyncAdapter.getTurnById(turnId);
+      if (!turn) {
+        throw new ResourceNotFoundError(`Turn ${turnId} not found`);
+      }
+      if (!entityMatchesScope(turn, config.scope)) {
+        throw new ScopeMismatchError(`Turn ${turnId} does not belong to the current scope`);
+      }
+      if (turn.role !== 'assistant') {
+        throw new ValidationError('promoteResponse supports only assistant turns');
+      }
+      const facts = await config.extractor(turn.content, [], []);
+      const created: KnowledgeMemory[] = [];
+      for (const fact of facts) {
+        if (options?.factTypes && !options.factTypes.includes(fact.factType)) continue;
+        if (options?.minConfidence) {
+          const levels: Record<string, number> = { low: 0, medium: 1, high: 2 };
+          if ((levels[fact.confidence] ?? 0) < (levels[options.minConfidence] ?? 0)) continue;
+        }
+        const km = await asyncAdapter.insertKnowledgeMemory({
+          ...config.scope,
+          fact: config.redactText ? config.redactText({ kind: 'fact', text: fact.fact }) : fact.fact,
+          fact_type: fact.factType,
+          knowledge_class: manualKnowledgeClassForFactType(fact.factType),
+          source: 'manual',
+          confidence: fact.confidence,
+        });
+        created.push(km);
+      }
+      await maybeEmbedKnowledge(created);
+      return created;
     },
 
     async close() {

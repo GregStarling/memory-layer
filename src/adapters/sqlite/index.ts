@@ -49,6 +49,7 @@ import type {
   NewKnowledgeMemory,
   NewPlaybook,
   NewPlaybookRevision,
+  NewSourceDocument,
   NewWorkItem,
   NewTurn,
   NewWorkingMemory,
@@ -58,6 +59,8 @@ import type {
   PaginatedResult,
   SearchOptions,
   SearchResult,
+  SourceDocument,
+  SourceDocumentStatus,
   TimeRange,
   Turn,
   WorkItem,
@@ -666,6 +669,27 @@ function createAdapterFromDatabase(
       source_event_id: row.source_event_id != null ? String(row.source_event_id) : null,
       visibility_class: (row.visibility_class as HandoffRecord['visibility_class']) ?? 'private',
       version: Number(row.version ?? 1),
+    };
+  }
+
+  function mapSourceDocumentRow(row: Record<string, unknown>): SourceDocument {
+    return {
+      id: Number(row.id),
+      tenant_id: String(row.tenant_id ?? ''),
+      system_id: String(row.system_id ?? ''),
+      workspace_id: String(row.workspace_id ?? ''),
+      collaboration_id: String(row.collaboration_id ?? ''),
+      scope_id: String(row.scope_id ?? ''),
+      title: String(row.title),
+      content_hash: String(row.content_hash),
+      mime_type: String(row.mime_type ?? 'text/plain'),
+      url: row.url != null ? String(row.url) : null,
+      metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : {},
+      status: String(row.status ?? 'pending') as SourceDocumentStatus,
+      fact_count: Number(row.fact_count ?? 0),
+      token_estimate: Number(row.token_estimate ?? 0),
+      created_at: Number(row.created_at),
+      processed_at: row.processed_at != null ? Number(row.processed_at) : null,
     };
   }
 
@@ -3299,6 +3323,78 @@ function createAdapterFromDatabase(
     getTemporalWatermark: readTemporalWatermark,
 
     upsertTemporalWatermark: writeTemporalWatermark,
+
+    insertSourceDocument(input: NewSourceDocument): SourceDocument {
+      const n = normalizeScope(input);
+      const createdAt = nowSeconds();
+      const row = db
+        .prepare(
+          `INSERT INTO source_documents
+            (tenant_id, system_id, workspace_id, collaboration_id, scope_id, title, content_hash,
+             mime_type, url, metadata, status, fact_count, token_estimate, created_at, processed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NULL)
+           RETURNING *`,
+        )
+        .get(
+          ...scopeValues(n),
+          input.title,
+          input.content_hash,
+          input.mime_type ?? 'text/plain',
+          input.url ?? null,
+          JSON.stringify(input.metadata ?? {}),
+          input.status ?? 'pending',
+          input.token_estimate ?? 0,
+          createdAt,
+        ) as Record<string, unknown>;
+      return mapSourceDocumentRow(row);
+    },
+
+    getSourceDocumentById(id: number): SourceDocument | null {
+      const row = db
+        .prepare('SELECT * FROM source_documents WHERE id = ?')
+        .get(id) as Record<string, unknown> | undefined;
+      return row ? mapSourceDocumentRow(row) : null;
+    },
+
+    getSourceDocumentByHash(contentHash: string, scope): SourceDocument | null {
+      const row = db
+        .prepare(`SELECT * FROM source_documents WHERE content_hash = ? AND ${SCOPE_WHERE} LIMIT 1`)
+        .get(contentHash, ...scopeValues(normalizeScope(scope))) as Record<string, unknown> | undefined;
+      return row ? mapSourceDocumentRow(row) : null;
+    },
+
+    listSourceDocuments(scope, options?: PaginationOptions): PaginatedResult<SourceDocument> {
+      const n = normalizeScope(scope);
+      const limit = options?.limit ?? 50;
+      const cursor = typeof options?.cursor === 'number' ? options.cursor : undefined;
+      const params: unknown[] = [...scopeValues(n)];
+      let where = SCOPE_WHERE;
+      if (cursor != null) {
+        where += ' AND id < ?';
+        params.push(cursor);
+      }
+      params.push(limit + 1);
+      const rows = db
+        .prepare(`SELECT * FROM source_documents WHERE ${where} ORDER BY id DESC LIMIT ?`)
+        .all(...params) as Array<Record<string, unknown>>;
+      const hasMore = rows.length > limit;
+      const items = rows.slice(0, limit).map(mapSourceDocumentRow);
+      return { items, hasMore, nextCursor: hasMore && items.length > 0 ? items[items.length - 1].id : null };
+    },
+
+    updateSourceDocument(id: number, patch: { status?: SourceDocumentStatus; fact_count?: number; processed_at?: number | null }): SourceDocument | null {
+      const setClauses: string[] = [];
+      const values: unknown[] = [];
+      if (patch.status !== undefined) { setClauses.push('status = ?'); values.push(patch.status); }
+      if (patch.fact_count !== undefined) { setClauses.push('fact_count = ?'); values.push(patch.fact_count); }
+      if (patch.processed_at !== undefined) { setClauses.push('processed_at = ?'); values.push(patch.processed_at); }
+      if (setClauses.length === 0) return this.getSourceDocumentById(id);
+      values.push(id);
+      const row = db
+        .prepare(`UPDATE source_documents SET ${setClauses.join(', ')} WHERE id = ? RETURNING *`)
+        .get(...values) as Record<string, unknown> | undefined;
+      return row ? mapSourceDocumentRow(row) : null;
+    },
 
     transaction<T>(fn: () => T): T {
       return db.transaction(fn)();

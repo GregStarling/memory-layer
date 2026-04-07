@@ -52,6 +52,7 @@ import type {
   NewPlaybook,
   NewPlaybookRevision,
   NewTurn,
+  NewSourceDocument,
   NewWorkItem,
   NewWorkingMemory,
   Playbook,
@@ -60,6 +61,8 @@ import type {
   PaginatedResult,
   SearchOptions,
   SearchResult,
+  SourceDocument,
+  SourceDocumentStatus,
   TimeRange,
   Turn,
   WorkItem,
@@ -106,6 +109,7 @@ interface MemoryState {
   memoryEvents: MemoryEventRecord[];
   sessionStates: SessionStateProjection[];
   projectionWatermarks: TemporalProjectionWatermark[];
+  sourceDocuments: SourceDocument[];
 }
 
 function matchesScopedSession(
@@ -292,6 +296,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         metadata: null,
       },
     ],
+    sourceDocuments: [],
   };
 
   const ids = {
@@ -310,6 +315,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     playbookRevision: 1,
     association: 1,
     memoryEvent: 1,
+    sourceDocument: 1,
   };
 
   return {
@@ -2157,6 +2163,75 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         state.projectionWatermarks.push(next);
       }
       return cloneValue(next);
+    },
+
+    insertSourceDocument(input: NewSourceDocument): SourceDocument {
+      const n = normalizeScope(input);
+      const doc: SourceDocument = {
+        ...n,
+        id: ids.sourceDocument++,
+        title: input.title,
+        content_hash: input.content_hash,
+        mime_type: input.mime_type ?? 'text/plain',
+        url: input.url ?? null,
+        metadata: input.metadata ?? {},
+        status: input.status ?? 'pending',
+        fact_count: 0,
+        token_estimate: input.token_estimate ?? 0,
+        created_at: nowSeconds(),
+        processed_at: null,
+      };
+      state.sourceDocuments.push(doc);
+      return cloneValue(doc);
+    },
+
+    getSourceDocumentById(id: number): SourceDocument | null {
+      const doc = state.sourceDocuments.find((d) => d.id === id);
+      return doc ? cloneValue(doc) : null;
+    },
+
+    getSourceDocumentByHash(contentHash: string, scope: MemoryScope): SourceDocument | null {
+      const n = normalizeScope(scope);
+      const doc = state.sourceDocuments.find(
+        (d) =>
+          d.content_hash === contentHash &&
+          d.tenant_id === n.tenant_id &&
+          d.system_id === n.system_id &&
+          d.workspace_id === n.workspace_id &&
+          d.collaboration_id === n.collaboration_id &&
+          d.scope_id === n.scope_id,
+      );
+      return doc ? cloneValue(doc) : null;
+    },
+
+    listSourceDocuments(scope: MemoryScope, options?: PaginationOptions): PaginatedResult<SourceDocument> {
+      const n = normalizeScope(scope);
+      const limit = options?.limit ?? 50;
+      const cursor = typeof options?.cursor === 'number' ? options.cursor : undefined;
+      let filtered = state.sourceDocuments.filter(
+        (d) =>
+          d.tenant_id === n.tenant_id &&
+          d.system_id === n.system_id &&
+          d.workspace_id === n.workspace_id &&
+          d.collaboration_id === n.collaboration_id &&
+          d.scope_id === n.scope_id,
+      );
+      filtered.sort((a, b) => b.id - a.id);
+      if (cursor != null) {
+        filtered = filtered.filter((d) => d.id < cursor);
+      }
+      const hasMore = filtered.length > limit;
+      const items = filtered.slice(0, limit).map(cloneValue);
+      return { items, hasMore, nextCursor: hasMore && items.length > 0 ? items[items.length - 1].id : null };
+    },
+
+    updateSourceDocument(id: number, patch: { status?: SourceDocumentStatus; fact_count?: number; processed_at?: number | null }): SourceDocument | null {
+      const doc = state.sourceDocuments.find((d) => d.id === id);
+      if (!doc) return null;
+      if (patch.status !== undefined) doc.status = patch.status;
+      if (patch.fact_count !== undefined) doc.fact_count = patch.fact_count;
+      if (patch.processed_at !== undefined) doc.processed_at = patch.processed_at;
+      return cloneValue(doc);
     },
 
     transaction(fn) {
