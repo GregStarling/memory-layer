@@ -43,6 +43,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   python-client:
+    if: github.repository == 'GregStarling/memory-layer'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -75,6 +76,7 @@ jobs:
   github-release:
     runs-on: ubuntu-latest
     needs: [npm-package, python-client]
+    if: always() && needs.npm-package.result == 'success' && (needs.python-client.result == 'success' || needs.python-client.result == 'skipped')
     permissions:
       contents: write
     env:
