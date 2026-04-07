@@ -417,6 +417,7 @@ export function createTemporalReplayAdapter(
     listKnowledgeEvidenceForKnowledge: async () => [],
     listKnowledgeEvidenceForCandidate: async () => [],
     promoteKnowledgeCandidate: () => unsupported('promoteKnowledgeCandidate'),
+    deleteExpiredKnowledgeCandidates: () => unsupported('deleteExpiredKnowledgeCandidates'),
     getKnowledgeMemoryById: async (id) => knowledgeById.get(id) ?? null,
     getActiveKnowledgeMemory: async (scope) =>
       replayState.knowledge.filter(
@@ -493,6 +494,8 @@ export function createTemporalReplayAdapter(
       unsupported('renewWorkClaim'),
     releaseWorkClaim: async (_claimId: number, _actor: ActorRef, _reason?: string) =>
       unsupported('releaseWorkClaim'),
+    getWorkClaimById: async (claimId: number) =>
+      replayState.workClaims.find((claim) => claim.id === claimId) ?? null,
     getActiveWorkClaim: async (workItemId: number) =>
       replayState.workClaims.find(
         (claim) => claim.work_item_id === workItemId && claim.status === 'active',
@@ -528,6 +531,8 @@ export function createTemporalReplayAdapter(
         return true;
       }),
     createHandoff: async (_input: NewHandoffInput) => unsupported('createHandoff'),
+    getHandoffById: async (handoffId: number) =>
+      replayState.handoffs.find((handoff) => handoff.id === handoffId) ?? null,
     acceptHandoff: async (_handoffId: number, _actor: ActorRef, _reason?: string) =>
       unsupported('acceptHandoff'),
     rejectHandoff: async (_handoffId: number, _actor: ActorRef, _reason?: string) =>
@@ -663,6 +668,11 @@ export function createTemporalReplayAdapter(
       metadata: null,
     }),
     upsertTemporalWatermark: () => unsupported('upsertTemporalWatermark'),
+    insertSourceDocument: () => unsupported('insertSourceDocument'),
+    getSourceDocumentById: async () => null,
+    getSourceDocumentByHash: async () => null,
+    listSourceDocuments: async () => ({ items: [], hasMore: false, nextCursor: null }),
+    updateSourceDocument: () => unsupported('updateSourceDocument'),
     transaction: async <T>(fn: () => Promise<T>) => fn(),
     close: async () => undefined,
   };

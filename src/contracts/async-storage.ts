@@ -38,6 +38,7 @@ import type {
   NewKnowledgeMemoryAudit,
   NewPlaybook,
   NewPlaybookRevision,
+  NewSourceDocument,
   NewWorkItem,
   NewTurn,
   NewWorkingMemory,
@@ -47,6 +48,8 @@ import type {
   PlaybookRevision,
   SearchOptions,
   SearchResult,
+  SourceDocument,
+  SourceDocumentStatus,
   TimeRange,
   Turn,
   WorkItem,
@@ -108,6 +111,7 @@ export interface AsyncStorageAdapter {
   listKnowledgeEvidenceForKnowledge(knowledgeId: number): Promise<KnowledgeEvidence[]>;
   listKnowledgeEvidenceForCandidate(candidateId: number): Promise<KnowledgeEvidence[]>;
   promoteKnowledgeCandidate(candidateId: number, input: NewKnowledgeMemory): Promise<KnowledgeMemory>;
+  deleteExpiredKnowledgeCandidates(scope: MemoryScope, olderThan: number): Promise<number[]>;
   getKnowledgeMemoryById(id: number): Promise<KnowledgeMemory | null>;
   getExistingKnowledgeMemoryIds?(ids: number[]): Promise<number[]>;
   getActiveKnowledgeMemory(scope: MemoryScope): Promise<KnowledgeMemory[]>;
@@ -188,6 +192,7 @@ export interface AsyncStorageAdapter {
   claimWorkItem(input: NewWorkClaimInput): Promise<WorkClaim>;
   renewWorkClaim(claimId: number, actor: ActorRef, leaseSeconds?: number): Promise<WorkClaim | null>;
   releaseWorkClaim(claimId: number, actor: ActorRef, reason?: string): Promise<WorkClaim | null>;
+  getWorkClaimById(claimId: number): Promise<WorkClaim | null>;
   getActiveWorkClaim(workItemId: number): Promise<WorkClaim | null>;
   listWorkClaims(scope: MemoryScope, options?: WorkClaimQuery): Promise<WorkClaim[]>;
   listWorkClaimsCrossScope(
@@ -196,6 +201,7 @@ export interface AsyncStorageAdapter {
     options?: WorkClaimQuery,
   ): Promise<WorkClaim[]>;
   createHandoff(input: NewHandoffInput): Promise<HandoffRecord>;
+  getHandoffById(handoffId: number): Promise<HandoffRecord | null>;
   acceptHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null>;
   rejectHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null>;
   cancelHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null>;
@@ -278,6 +284,12 @@ export interface AsyncStorageAdapter {
   upsertTemporalWatermark(
     input: NewTemporalProjectionWatermark,
   ): Promise<TemporalProjectionWatermark>;
+
+  insertSourceDocument(input: NewSourceDocument): Promise<SourceDocument>;
+  getSourceDocumentById(id: number): Promise<SourceDocument | null>;
+  getSourceDocumentByHash(contentHash: string, scope: MemoryScope): Promise<SourceDocument | null>;
+  listSourceDocuments(scope: MemoryScope, options?: PaginationOptions): Promise<PaginatedResult<SourceDocument>>;
+  updateSourceDocument(id: number, patch: { status?: SourceDocumentStatus; fact_count?: number; processed_at?: number | null }): Promise<SourceDocument | null>;
 
   transaction<T>(fn: () => Promise<T>): Promise<T>;
   close(): Promise<void>;

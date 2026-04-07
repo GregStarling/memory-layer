@@ -512,8 +512,15 @@ function resolveRequestScope(
     if (!isRecord(bodyScope)) {
       throw new HttpRequestError(400, 'Invalid scope override');
     }
-    normalizeScope(bodyScope as unknown as MemoryScope);
-    return bodyScope as unknown as MemoryScope;
+    const validated: MemoryScope = {
+      tenant_id: requireString(bodyScope.tenant_id, 'scope.tenant_id'),
+      system_id: requireString(bodyScope.system_id, 'scope.system_id'),
+      scope_id: requireString(bodyScope.scope_id, 'scope.scope_id'),
+      workspace_id: optionalString(bodyScope.workspace_id, 'scope.workspace_id'),
+      collaboration_id: optionalString(bodyScope.collaboration_id, 'scope.collaboration_id'),
+    };
+    normalizeScope(validated);
+    return validated;
   }
 
   const headerScope = resolvePartialScope(

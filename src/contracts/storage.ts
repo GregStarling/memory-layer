@@ -53,6 +53,7 @@ import type {
   NewKnowledgeMemoryAudit,
   NewPlaybook,
   NewPlaybookRevision,
+  NewSourceDocument,
   NewWorkItem,
   NewTurn,
   NewWorkingMemory,
@@ -62,6 +63,8 @@ import type {
   PlaybookRevision,
   SearchOptions,
   SearchResult,
+  SourceDocument,
+  SourceDocumentStatus,
   TimeRange,
   Turn,
   WorkItem,
@@ -108,6 +111,7 @@ export interface StorageAdapter {
   listKnowledgeEvidenceForKnowledge(knowledgeId: number): KnowledgeEvidence[];
   listKnowledgeEvidenceForCandidate(candidateId: number): KnowledgeEvidence[];
   promoteKnowledgeCandidate(candidateId: number, input: NewKnowledgeMemory): KnowledgeMemory;
+  deleteExpiredKnowledgeCandidates(scope: MemoryScope, olderThan: number): number[];
   getKnowledgeMemoryById(id: number): KnowledgeMemory | null;
   getExistingKnowledgeMemoryIds?(ids: number[]): number[];
   getActiveKnowledgeMemory(scope: MemoryScope): KnowledgeMemory[];
@@ -182,6 +186,7 @@ export interface StorageAdapter {
   claimWorkItem(input: NewWorkClaimInput): WorkClaim;
   renewWorkClaim(claimId: number, actor: ActorRef, leaseSeconds?: number): WorkClaim | null;
   releaseWorkClaim(claimId: number, actor: ActorRef, reason?: string): WorkClaim | null;
+  getWorkClaimById(claimId: number): WorkClaim | null;
   getActiveWorkClaim(workItemId: number): WorkClaim | null;
   listWorkClaims(scope: MemoryScope, options?: WorkClaimQuery): WorkClaim[];
   listWorkClaimsCrossScope(
@@ -190,6 +195,7 @@ export interface StorageAdapter {
     options?: WorkClaimQuery,
   ): WorkClaim[];
   createHandoff(input: NewHandoffInput): HandoffRecord;
+  getHandoffById(handoffId: number): HandoffRecord | null;
   acceptHandoff(handoffId: number, actor: ActorRef, reason?: string): HandoffRecord | null;
   rejectHandoff(handoffId: number, actor: ActorRef, reason?: string): HandoffRecord | null;
   cancelHandoff(handoffId: number, actor: ActorRef, reason?: string): HandoffRecord | null;
@@ -266,6 +272,12 @@ export interface StorageAdapter {
   upsertSessionState(input: NewSessionStateProjection): SessionStateProjection;
   getTemporalWatermark(projectionName?: string): TemporalProjectionWatermark | null;
   upsertTemporalWatermark(input: NewTemporalProjectionWatermark): TemporalProjectionWatermark;
+
+  insertSourceDocument(input: NewSourceDocument): SourceDocument;
+  getSourceDocumentById(id: number): SourceDocument | null;
+  getSourceDocumentByHash(contentHash: string, scope: MemoryScope): SourceDocument | null;
+  listSourceDocuments(scope: MemoryScope, options?: PaginationOptions): PaginatedResult<SourceDocument>;
+  updateSourceDocument(id: number, patch: { status?: SourceDocumentStatus; fact_count?: number; processed_at?: number | null }): SourceDocument | null;
 
   transaction<T>(fn: () => T): T;
   close(): void;

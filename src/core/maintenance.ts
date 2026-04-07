@@ -124,6 +124,11 @@ export async function runMaintenance(
     deletedWorkItemIds.push(item.id);
   }
 
+  const candidateMaxAgeDays = 30;
+  const candidateOlderThan = now - candidateMaxAgeDays * 24 * 60 * 60;
+  const deletedCandidateIds = await adapter.deleteExpiredKnowledgeCandidates(scope, candidateOlderThan);
+  expiredCandidateIds.push(...deletedCandidateIds);
+
   const associations = await adapter.listAssociations(scope);
   const existenceCache = new Map<string, boolean>();
 

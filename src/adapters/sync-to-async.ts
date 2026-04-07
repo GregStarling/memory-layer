@@ -65,6 +65,8 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
       Promise.resolve(adapter.listKnowledgeEvidenceForCandidate(candidateId)),
     promoteKnowledgeCandidate: (candidateId, input) =>
       Promise.resolve(adapter.promoteKnowledgeCandidate(candidateId, input)),
+    deleteExpiredKnowledgeCandidates: (scope, olderThan) =>
+      Promise.resolve(adapter.deleteExpiredKnowledgeCandidates(scope, olderThan)),
     getKnowledgeMemoryById: (id) => Promise.resolve(adapter.getKnowledgeMemoryById(id)),
     getExistingKnowledgeMemoryIds: adapter.getExistingKnowledgeMemoryIds
       ? (ids) => Promise.resolve(adapter.getExistingKnowledgeMemoryIds!(ids))
@@ -119,11 +121,13 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
       Promise.resolve(adapter.renewWorkClaim(claimId, actor, leaseSeconds)),
     releaseWorkClaim: (claimId, actor, reason) =>
       Promise.resolve(adapter.releaseWorkClaim(claimId, actor, reason)),
+    getWorkClaimById: (claimId) => Promise.resolve(adapter.getWorkClaimById(claimId)),
     getActiveWorkClaim: (workItemId) => Promise.resolve(adapter.getActiveWorkClaim(workItemId)),
     listWorkClaims: (scope, options) => Promise.resolve(adapter.listWorkClaims(scope, options)),
     listWorkClaimsCrossScope: (scope, level, options) =>
       Promise.resolve(adapter.listWorkClaimsCrossScope(scope, level, options)),
     createHandoff: (input) => Promise.resolve(adapter.createHandoff(input)),
+    getHandoffById: (handoffId) => Promise.resolve(adapter.getHandoffById(handoffId)),
     acceptHandoff: (handoffId, actor, reason) =>
       Promise.resolve(adapter.acceptHandoff(handoffId, actor, reason)),
     rejectHandoff: (handoffId, actor, reason) =>
@@ -193,6 +197,12 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
       // method directly.
       return fn();
     },
+
+    insertSourceDocument: (input) => Promise.resolve(adapter.insertSourceDocument(input)),
+    getSourceDocumentById: (id) => Promise.resolve(adapter.getSourceDocumentById(id)),
+    getSourceDocumentByHash: (hash, scope) => Promise.resolve(adapter.getSourceDocumentByHash(hash, scope)),
+    listSourceDocuments: (scope, options) => Promise.resolve(adapter.listSourceDocuments(scope, options)),
+    updateSourceDocument: (id, patch) => Promise.resolve(adapter.updateSourceDocument(id, patch)),
 
     async close() {
       adapter.close();

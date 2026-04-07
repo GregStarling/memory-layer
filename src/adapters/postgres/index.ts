@@ -52,6 +52,7 @@ import type {
   NewKnowledgeMemoryAudit,
   NewPlaybook,
   NewPlaybookRevision,
+  NewSourceDocument,
   NewWorkItem,
   NewTurn,
   NewWorkingMemory,
@@ -61,6 +62,8 @@ import type {
   PaginatedResult,
   SearchOptions,
   SearchResult,
+  SourceDocument,
+  SourceDocumentStatus,
   TimeRange,
   Turn,
   WorkItem,
@@ -125,6 +128,27 @@ function wideScopeParams(scope: MemoryScope, level: ScopeLevel): unknown[] {
 
 function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+function mapSourceDocumentRow(row: Record<string, unknown>): SourceDocument {
+  return {
+    id: Number(row.id),
+    tenant_id: String(row.tenant_id ?? ''),
+    system_id: String(row.system_id ?? ''),
+    workspace_id: String(row.workspace_id ?? ''),
+    collaboration_id: String(row.collaboration_id ?? ''),
+    scope_id: String(row.scope_id ?? ''),
+    title: String(row.title),
+    content_hash: String(row.content_hash),
+    mime_type: String(row.mime_type ?? 'text/plain'),
+    url: row.url != null ? String(row.url) : null,
+    metadata: typeof row.metadata === 'object' && row.metadata !== null ? row.metadata as Record<string, string> : {},
+    status: String(row.status ?? 'pending') as SourceDocumentStatus,
+    fact_count: Number(row.fact_count ?? 0),
+    token_estimate: Number(row.token_estimate ?? 0),
+    created_at: Number(row.created_at),
+    processed_at: row.processed_at != null ? Number(row.processed_at) : null,
+  };
 }
 
 function vectorToLiteral(vector: EmbeddingVector): string {
@@ -1564,6 +1588,17 @@ export function createPostgresAdapter(
       return knowledge;
     },
 
+    async deleteExpiredKnowledgeCandidates(scope, olderThan): Promise<number[]> {
+      const n = normalizeScope(scope);
+      const { rows } = await pool.query(
+        `DELETE FROM knowledge_candidate
+         WHERE ${scopeWhere()} AND promoted_knowledge_id IS NULL AND created_at < $6
+         RETURNING id`,
+        [...scopeParams(n), olderThan],
+      );
+      return rows.map((r: Record<string, unknown>) => Number(r.id));
+    },
+
     async getKnowledgeMemoryById(id) {
       const { rows } = await pool.query('SELECT * FROM knowledge_memory WHERE id = $1', [id]);
       return rows[0] ? mapKnowledgeMemory(rows[0]) : null;
@@ -2270,6 +2305,12 @@ export function createPostgresAdapter(
       });
     },
 
+    async getWorkClaimById(claimId: number): Promise<WorkClaim | null> {
+      const { rows } = await pool.query('SELECT * FROM work_claims_current WHERE id = $1', [claimId]);
+      if (!rows[0]) return null;
+      return mapWorkClaim(rows[0]);
+    },
+
     async getActiveWorkClaim(workItemId: number): Promise<WorkClaim | null> {
       const existingRow = await getAnyClaimRowByWorkItem(workItemId);
       if (!existingRow) return null;
@@ -2409,6 +2450,12 @@ export function createPostgresAdapter(
         ]);
         return { ...handoff, source_event_id: event.event_id };
       });
+    },
+
+    async getHandoffById(handoffId: number): Promise<HandoffRecord | null> {
+      const { rows } = await pool.query('SELECT * FROM handoff_records WHERE id = $1', [handoffId]);
+      if (!rows[0]) return null;
+      return mapHandoff(rows[0]);
     },
 
     async acceptHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null> {
@@ -2889,12 +2936,13 @@ export function createPostgresAdapter(
         const { rows } = await pool.query(
           `INSERT INTO associations
             (tenant_id, system_id, workspace_id, collaboration_id, scope_id,
-             source_kind, source_id, target_kind, target_id, association_type, confidence, auto_generated, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+             source_kind, source_id, target_kind, target_id, association_type, confidence, auto_generated, visibility_class, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
            RETURNING *`,
           [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id,
            input.source_kind, input.source_id, input.target_kind, input.target_id,
            input.association_type, input.confidence ?? 0.5, input.auto_generated ?? false,
+           input.visibility_class ?? 'private',
            input.created_at ?? now()],
         );
         const association = mapAssociation(rows[0]);
@@ -3059,6 +3107,69 @@ export function createPostgresAdapter(
       } finally {
         client.release();
       }
+    },
+
+    async insertSourceDocument(input: NewSourceDocument): Promise<SourceDocument> {
+      const n = normalizeScope(input);
+      const createdAt = nowSeconds();
+      const { rows } = await pool.query(
+        `INSERT INTO source_documents
+          (tenant_id, system_id, workspace_id, collaboration_id, scope_id, title, content_hash,
+           mime_type, url, metadata, status, fact_count, token_estimate, created_at, processed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         RETURNING *`,
+        [
+          n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id,
+          input.title, input.content_hash, input.mime_type ?? 'text/plain',
+          input.url ?? null, JSON.stringify(input.metadata ?? {}),
+          input.status ?? 'pending', 0, input.token_estimate ?? 0,
+          createdAt, null,
+        ],
+      );
+      return mapSourceDocumentRow(rows[0]);
+    },
+
+    async getSourceDocumentById(id: number): Promise<SourceDocument | null> {
+      const { rows } = await pool.query('SELECT * FROM source_documents WHERE id = $1', [id]);
+      return rows.length > 0 ? mapSourceDocumentRow(rows[0]) : null;
+    },
+
+    async getSourceDocumentByHash(contentHash: string, scope: MemoryScope): Promise<SourceDocument | null> {
+      const n = normalizeScope(scope);
+      const { rows } = await pool.query(
+        `SELECT * FROM source_documents WHERE content_hash = $1 AND tenant_id = $2 AND system_id = $3 AND workspace_id = $4 AND collaboration_id = $5 AND scope_id = $6 LIMIT 1`,
+        [contentHash, n.tenant_id, n.system_id, n.workspace_id ?? '', n.collaboration_id ?? '', n.scope_id],
+      );
+      return rows.length > 0 ? mapSourceDocumentRow(rows[0]) : null;
+    },
+
+    async listSourceDocuments(scope: MemoryScope, opts?: PaginationOptions): Promise<PaginatedResult<SourceDocument>> {
+      const n = normalizeScope(scope);
+      const limit = opts?.limit ?? 50;
+      const cursor = typeof opts?.cursor === 'number' ? opts.cursor : undefined;
+      const baseWhere = `tenant_id = $1 AND system_id = $2 AND workspace_id = $3 AND collaboration_id = $4 AND scope_id = $5`;
+      const where = cursor != null ? `${baseWhere} AND id < $6` : baseWhere;
+      const params: unknown[] = [n.tenant_id, n.system_id, n.workspace_id ?? '', n.collaboration_id ?? '', n.scope_id];
+      if (cursor != null) params.push(cursor);
+      const { rows } = await pool.query(
+        `SELECT * FROM source_documents WHERE ${where} ORDER BY id DESC LIMIT $${params.length + 1}`,
+        [...params, limit + 1],
+      );
+      const hasMore = rows.length > limit;
+      const items = rows.slice(0, limit).map(mapSourceDocumentRow);
+      return { items, hasMore, nextCursor: hasMore && items.length > 0 ? items[items.length - 1].id : null };
+    },
+
+    async updateSourceDocument(id: number, patch: { status?: SourceDocumentStatus; fact_count?: number; processed_at?: number | null }): Promise<SourceDocument | null> {
+      const setClauses: string[] = [];
+      const values: unknown[] = [id];
+      let pi = 2;
+      if (patch.status !== undefined) { setClauses.push(`status = $${pi++}`); values.push(patch.status); }
+      if (patch.fact_count !== undefined) { setClauses.push(`fact_count = $${pi++}`); values.push(patch.fact_count); }
+      if (patch.processed_at !== undefined) { setClauses.push(`processed_at = $${pi++}`); values.push(patch.processed_at); }
+      if (setClauses.length === 0) return this.getSourceDocumentById(id);
+      const { rows } = await pool.query(`UPDATE source_documents SET ${setClauses.join(', ')} WHERE id = $1 RETURNING *`, values);
+      return rows.length > 0 ? mapSourceDocumentRow(rows[0]) : null;
     },
 
     async close() {

@@ -655,8 +655,36 @@ CREATE INDEX IF NOT EXISTS idx_handoffs_from_actor_status
 CREATE INDEX IF NOT EXISTS idx_handoffs_work_item_status
   ON handoff_records (work_item_id, status);
 
+-- v15: source_documents table + knowledge_evidence.source_document_id + associations.visibility_class
+CREATE TABLE IF NOT EXISTS source_documents (
+  id SERIAL PRIMARY KEY,
+  tenant_id TEXT NOT NULL DEFAULT '',
+  system_id TEXT NOT NULL DEFAULT '',
+  workspace_id TEXT NOT NULL DEFAULT '',
+  collaboration_id TEXT NOT NULL DEFAULT '',
+  scope_id TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  mime_type TEXT NOT NULL DEFAULT 'text/plain',
+  url TEXT,
+  metadata JSONB NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'pending',
+  fact_count INTEGER NOT NULL DEFAULT 0,
+  token_estimate INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER),
+  processed_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_documents_scope
+  ON source_documents (tenant_id, system_id, scope_id);
+CREATE INDEX IF NOT EXISTS idx_source_documents_hash
+  ON source_documents (content_hash, tenant_id, system_id, scope_id);
+
+ALTER TABLE knowledge_evidence ADD COLUMN IF NOT EXISTS source_document_id INTEGER REFERENCES source_documents(id) ON DELETE SET NULL;
+ALTER TABLE associations ADD COLUMN IF NOT EXISTS visibility_class TEXT NOT NULL DEFAULT 'private';
+
 -- Record all applied schema versions so upgrades are visible and auditable.
 -- ON CONFLICT DO NOTHING keeps this idempotent across repeated applies.
 INSERT INTO schema_version (version) VALUES
-  (1), (9), (10), (11), (12), (13), (14)
+  (1), (9), (10), (11), (12), (13), (14), (15)
 ON CONFLICT DO NOTHING;

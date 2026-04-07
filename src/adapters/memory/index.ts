@@ -693,6 +693,23 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       return knowledge;
     },
 
+    deleteExpiredKnowledgeCandidates(scope, olderThan) {
+      const n = normalizeScope(scope);
+      const expired = state.knowledgeCandidates.filter(
+        (c) =>
+          c.tenant_id === n.tenant_id &&
+          c.system_id === n.system_id &&
+          c.workspace_id === n.workspace_id &&
+          c.collaboration_id === n.collaboration_id &&
+          c.scope_id === n.scope_id &&
+          c.promoted_knowledge_id === null &&
+          c.created_at < olderThan,
+      );
+      const ids = expired.map((c) => c.id);
+      state.knowledgeCandidates = state.knowledgeCandidates.filter((c) => !ids.includes(c.id));
+      return ids;
+    },
+
     getKnowledgeMemoryById(id) {
       return state.knowledgeMemory.find((item) => item.id === id) ?? null;
     },
@@ -1278,6 +1295,12 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       return cloneValue(claim);
     },
 
+    getWorkClaimById(claimId) {
+      const claim = state.workClaims.find((entry) => entry.id === claimId);
+      if (!claim) return null;
+      return cloneValue(claim);
+    },
+
     getActiveWorkClaim(workItemId) {
       const claim = state.workClaims.find(
         (entry) => entry.work_item_id === workItemId && entry.status === 'active',
@@ -1415,6 +1438,12 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         payload: { after: cloneValue(handoff) },
         created_at: handoff.created_at,
       });
+      return cloneValue(handoff);
+    },
+
+    getHandoffById(handoffId) {
+      const handoff = state.handoffs.find((entry) => entry.id === handoffId);
+      if (!handoff) return null;
       return cloneValue(handoff);
     },
 

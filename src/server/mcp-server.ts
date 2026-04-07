@@ -1000,8 +1000,16 @@ function resolveScopeInput(
     if (!isRecord(args.scope)) {
       throw new McpValidationError('Invalid scope override');
     }
-    normalizeScope(args.scope as unknown as MemoryScope);
-    return args.scope as unknown as MemoryScope;
+    const raw = args.scope;
+    const validated: MemoryScope = {
+      tenant_id: requireString(raw.tenant_id, 'scope.tenant_id'),
+      system_id: requireString(raw.system_id, 'scope.system_id'),
+      scope_id: requireString(raw.scope_id, 'scope.scope_id'),
+      workspace_id: optionalString(raw.workspace_id, 'scope.workspace_id'),
+      collaboration_id: optionalString(raw.collaboration_id, 'scope.collaboration_id'),
+    };
+    normalizeScope(validated);
+    return validated;
   }
   return fallbackScope ?? 'default';
 }
@@ -1538,6 +1546,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
             expiredWorkingMemory: report.expiredWorkingMemoryIds.length,
             retiredKnowledge: report.retiredKnowledgeIds.length,
             deletedWorkItems: report.deletedWorkItemIds.length,
+            deletedAssociationIds: report.deletedAssociationIds,
           });
         }
         case 'memory_search_episodes': {
@@ -1631,7 +1640,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
             includeProvisional: args.includeProvisional != null ? Boolean(args.includeProvisional) : undefined,
             includeDisputed: args.includeDisputed != null ? Boolean(args.includeDisputed) : undefined,
           });
-          return jsonResult(profile);
+          return jsonResult({ profile });
         }
         case 'memory_create_playbook': {
           const playbook = await requestManager.createPlaybook({
@@ -1810,7 +1819,7 @@ export async function startMcpServer(config: McpServerConfig = {}): Promise<void
               capabilities: { tools: {} },
               serverInfo: {
                 name: 'memory-layer',
-                version: '3.0.0',
+                version: '3.1.0',
               },
             },
           }) + '\n',

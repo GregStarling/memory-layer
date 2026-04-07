@@ -532,6 +532,20 @@ function knowledgeMatchesScope(knowledge: KnowledgeMemory, scope: MemoryScope): 
   );
 }
 
+function entityMatchesScope(
+  entity: { tenant_id: string; system_id: string; workspace_id: string; collaboration_id: string; scope_id: string },
+  scope: MemoryScope,
+): boolean {
+  const normalized = normalizeScope(scope);
+  return (
+    entity.tenant_id === normalized.tenant_id &&
+    entity.system_id === normalized.system_id &&
+    entity.workspace_id === normalized.workspace_id &&
+    entity.collaboration_id === normalized.collaboration_id &&
+    entity.scope_id === normalized.scope_id
+  );
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -810,8 +824,24 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     for (const result of filteredLexical) {
       merged.set(result.item.id, result);
     }
+    // Batch-fetch semantic-only hits to avoid N+1 individual lookups
+    const semanticOnlyIds = semantic
+      .filter((result) => !merged.has(result.knowledgeMemoryId))
+      .map((result) => result.knowledgeMemoryId);
+    const fetchedKnowledgeMap = new Map<number, KnowledgeMemory>();
+    if (semanticOnlyIds.length > 0) {
+      const fetched = await Promise.all(
+        semanticOnlyIds.map((id) => asyncAdapter.getKnowledgeMemoryById(id)),
+      );
+      for (const km of fetched) {
+        if (km) fetchedKnowledgeMap.set(km.id, km);
+      }
+    }
+
     for (const result of semantic) {
-      const knowledge = await asyncAdapter.getKnowledgeMemoryById(result.knowledgeMemoryId);
+      const knowledge = merged.has(result.knowledgeMemoryId)
+        ? merged.get(result.knowledgeMemoryId)!.item
+        : fetchedKnowledgeMap.get(result.knowledgeMemoryId) ?? null;
       if (!knowledge) continue;
       if (!matchesKnowledgeSearchOptions(knowledge, options)) continue;
       const existing = merged.get(knowledge.id);
@@ -1623,6 +1653,13 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     },
 
     async updateWorkItem(id, patch, options) {
+      const existing = await asyncAdapter.getWorkItemById(id);
+      if (!existing) {
+        return null;
+      }
+      if (!entityMatchesScope(existing, config.scope)) {
+        throw new ScopeMismatchError(`Work item ${id} does not belong to the current scope`);
+      }
       const workItem = await asyncAdapter.updateWorkItem(id, patch, options);
       await refreshSessionStateProjection();
       return workItem;
@@ -1630,6 +1667,9 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
     async claimWorkItem(input) {
       const workItem = await asyncAdapter.getWorkItemById(input.workItemId);
+      if (workItem && !entityMatchesScope(workItem, config.scope)) {
+        throw new ScopeMismatchError(`Work item ${input.workItemId} does not belong to the current scope`);
+      }
       return asyncAdapter.claimWorkItem({
         ...normalizeScope(config.scope),
         work_item_id: input.workItemId,
@@ -1641,10 +1681,18 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     },
 
     async renewWorkClaim(claimId, actor, leaseSeconds) {
+      const claim = await asyncAdapter.getWorkClaimById(claimId);
+      if (claim && !entityMatchesScope(claim, config.scope)) {
+        throw new ScopeMismatchError(`Work claim ${claimId} does not belong to the current scope`);
+      }
       return asyncAdapter.renewWorkClaim(claimId, actor, leaseSeconds);
     },
 
     async releaseWorkClaim(claimId, actor, reason) {
+      const claim = await asyncAdapter.getWorkClaimById(claimId);
+      if (claim && !entityMatchesScope(claim, config.scope)) {
+        throw new ScopeMismatchError(`Work claim ${claimId} does not belong to the current scope`);
+      }
       return asyncAdapter.releaseWorkClaim(claimId, actor, reason);
     },
 
@@ -1657,6 +1705,9 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
     async handoffWorkItem(input) {
       const workItem = await asyncAdapter.getWorkItemById(input.workItemId);
+      if (workItem && !entityMatchesScope(workItem, config.scope)) {
+        throw new ScopeMismatchError(`Work item ${input.workItemId} does not belong to the current scope`);
+      }
       return asyncAdapter.createHandoff({
         ...normalizeScope(config.scope),
         work_item_id: input.workItemId,
@@ -1671,14 +1722,26 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     },
 
     async acceptHandoff(handoffId, actor, reason) {
+      const handoff = await asyncAdapter.getHandoffById(handoffId);
+      if (handoff && !entityMatchesScope(handoff, config.scope)) {
+        throw new ScopeMismatchError(`Handoff ${handoffId} does not belong to the current scope`);
+      }
       return asyncAdapter.acceptHandoff(handoffId, actor, reason);
     },
 
     async rejectHandoff(handoffId, actor, reason) {
+      const handoff = await asyncAdapter.getHandoffById(handoffId);
+      if (handoff && !entityMatchesScope(handoff, config.scope)) {
+        throw new ScopeMismatchError(`Handoff ${handoffId} does not belong to the current scope`);
+      }
       return asyncAdapter.rejectHandoff(handoffId, actor, reason);
     },
 
     async cancelHandoff(handoffId, actor, reason) {
+      const handoff = await asyncAdapter.getHandoffById(handoffId);
+      if (handoff && !entityMatchesScope(handoff, config.scope)) {
+        throw new ScopeMismatchError(`Handoff ${handoffId} does not belong to the current scope`);
+      }
       return asyncAdapter.cancelHandoff(handoffId, actor, reason);
     },
 

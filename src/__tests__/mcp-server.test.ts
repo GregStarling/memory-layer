@@ -299,10 +299,10 @@ describe('MCP server handler', () => {
 
     const result = await handler.callTool('memory_get_profile', {});
     expect(result.isError).toBeUndefined();
-    const profile = JSON.parse(result.content[0].text);
-    expect(profile.view).toBe('user');
-    expect(profile.sections).toBeDefined();
-    expect(profile.generatedAt).toBeDefined();
+    const body = JSON.parse(result.content[0].text);
+    expect(body.profile.view).toBe('user');
+    expect(body.profile.sections).toBeDefined();
+    expect(body.profile.generatedAt).toBeDefined();
   });
 
   it('memory_get_profile accepts view and sections params', async () => {
@@ -313,8 +313,8 @@ describe('MCP server handler', () => {
       sections: ['constraints', 'workflows'],
     });
     expect(result.isError).toBeUndefined();
-    const profile = JSON.parse(result.content[0].text);
-    expect(profile.view).toBe('workspace');
+    const body = JSON.parse(result.content[0].text);
+    expect(body.profile.view).toBe('workspace');
   });
 
   it('memory_search_episodes validates required fields', async () => {

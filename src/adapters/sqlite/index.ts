@@ -1437,6 +1437,23 @@ function createAdapterFromDatabase(
       return knowledge;
     },
 
+    deleteExpiredKnowledgeCandidates(scope, olderThan): number[] {
+      const rows = db
+        .prepare(
+          `SELECT id FROM knowledge_candidate
+           WHERE ${SCOPE_WHERE} AND promoted_knowledge_id IS NULL AND created_at < ?`,
+        )
+        .all(...scopeValues(scope), olderThan) as Array<{ id: number }>;
+      const ids = rows.map((r) => r.id);
+      if (ids.length > 0) {
+        db.prepare(
+          `DELETE FROM knowledge_candidate
+           WHERE ${SCOPE_WHERE} AND promoted_knowledge_id IS NULL AND created_at < ?`,
+        ).run(...scopeValues(scope), olderThan);
+      }
+      return ids;
+    },
+
     getKnowledgeMemoryById,
 
     getExistingKnowledgeMemoryIds(ids: number[]): number[] {
@@ -2208,6 +2225,14 @@ function createAdapterFromDatabase(
       return after;
     },
 
+    getWorkClaimById(claimId): WorkClaim | null {
+      const row = db
+        .prepare('SELECT * FROM work_claims_current WHERE id = ?')
+        .get(claimId) as Record<string, unknown> | undefined;
+      if (!row) return null;
+      return mapWorkClaim(row);
+    },
+
     getActiveWorkClaim(workItemId): WorkClaim | null {
       const row = db
         .prepare(
@@ -2399,6 +2424,14 @@ function createAdapterFromDatabase(
         created_at: createdAt,
       });
       return handoff;
+    },
+
+    getHandoffById(handoffId): HandoffRecord | null {
+      const row = db
+        .prepare('SELECT * FROM handoff_records WHERE id = ?')
+        .get(handoffId) as Record<string, unknown> | undefined;
+      if (!row) return null;
+      return mapHandoff(row);
     },
 
     acceptHandoff(handoffId, actor, reason): HandoffRecord | null {

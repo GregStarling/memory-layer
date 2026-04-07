@@ -448,6 +448,32 @@ export interface NewKnowledgeEvidence extends MemoryScope {
   created_at?: number;
 }
 
+export type SourceDocumentStatus = 'pending' | 'processed' | 'failed';
+
+export interface SourceDocument extends NormalizedMemoryScope {
+  id: number;
+  title: string;
+  content_hash: string;
+  mime_type: string;
+  url: string | null;
+  metadata: Record<string, string>;
+  status: SourceDocumentStatus;
+  fact_count: number;
+  token_estimate: number;
+  created_at: number;
+  processed_at: number | null;
+}
+
+export interface NewSourceDocument extends MemoryScope {
+  title: string;
+  content_hash: string;
+  mime_type?: string;
+  url?: string | null;
+  metadata?: Record<string, string>;
+  status?: SourceDocumentStatus;
+  token_estimate?: number;
+}
+
 export interface KnowledgeTrustAssessment {
   trust_score: number;
   state: KnowledgeState;

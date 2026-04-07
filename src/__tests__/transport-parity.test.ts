@@ -70,7 +70,9 @@ describe('transport parity — Phase 2 profiles', () => {
     try {
       const result = await handler.callTool('memory_get_profile', { view: 'user' });
       expect(result.isError).toBeUndefined();
-      const profile = JSON.parse(result.content[0].text);
+      const body = JSON.parse(result.content[0].text);
+      expect(body.profile).toBeDefined();
+      const profile = body.profile;
       expect(profile.view).toBe('user');
       expect(profile.sections).toBeDefined();
       for (const section of ['identity', 'preferences', 'communication', 'constraints', 'workflows']) {
