@@ -107,7 +107,7 @@
     "export:memory": "node scripts/export-memory.mjs",
     "import:memory": "node scripts/import-memory.mjs",
     "pack:check": "npm pack --dry-run",
-    "release:check": "npm run lint && npm run test:coverage && npm run eval:retrieval:enforce && npm run eval:gate && npm run eval:memory-quality:enforce && npm run eval:memory-quality:delta:enforce && npm run python:check && npm run eval:platform-quality:enforce && npm run pack:check",
+    "release:check": "npm run lint && npm run build && npm run test:coverage && npm run eval:retrieval:enforce && npm run eval:gate && npm run eval:memory-quality:enforce && npm run eval:memory-quality:delta:enforce && npm run python:check && npm run eval:platform-quality:enforce && npm run pack:check",
     "prepublishOnly": "npm run release:check"
   },
   "peerDependencies": {
