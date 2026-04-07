@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "memory-layer-client"
+name = "ai-memory-layer-client"
 version = "3.1.0"
 description = "Python REST client for the memory-layer server"
 readme = "README.md"
