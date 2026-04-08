@@ -157,6 +157,12 @@ ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS last_accessed_at INTEGER N
 ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS access_count INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS schema_version INTEGER NOT NULL DEFAULT 1;
 
+-- v13: Phase 5 field extensions for knowledge_memory
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS valid_from INTEGER;
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS valid_until INTEGER;
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS rationale TEXT;
+ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS tags JSONB NOT NULL DEFAULT '[]';
+
 DO $$
 DECLARE
   constraint_name TEXT;
@@ -459,6 +465,9 @@ CREATE TABLE IF NOT EXISTS playbooks (
 CREATE INDEX IF NOT EXISTS idx_pb_scope ON playbooks (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
 ALTER TABLE playbooks ADD COLUMN IF NOT EXISTS visibility_class TEXT NOT NULL DEFAULT 'private';
 
+-- v13: Phase 5 field extensions for playbooks
+ALTER TABLE playbooks ADD COLUMN IF NOT EXISTS rationale TEXT;
+
 -- Full-text search on playbooks
 ALTER TABLE playbooks ADD COLUMN IF NOT EXISTS search_vector TSVECTOR;
 CREATE INDEX IF NOT EXISTS idx_pb_fts ON playbooks USING GIN (search_vector);
@@ -511,9 +520,10 @@ CREATE TABLE IF NOT EXISTS associations (
   target_id INTEGER NOT NULL,
   association_type TEXT NOT NULL,
   visibility_class TEXT NOT NULL DEFAULT 'private',
-  confidence REAL NOT NULL DEFAULT 0.5,
+  confidence REAL NOT NULL DEFAULT 0.8,
   auto_generated BOOLEAN NOT NULL DEFAULT FALSE,
   created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER),
+  provenance TEXT NOT NULL DEFAULT 'inferred',
   UNIQUE (source_kind, source_id, target_kind, target_id, association_type)
 );
 
@@ -521,6 +531,11 @@ CREATE INDEX IF NOT EXISTS idx_assoc_source ON associations (source_kind, source
 CREATE INDEX IF NOT EXISTS idx_assoc_target ON associations (target_kind, target_id);
 CREATE INDEX IF NOT EXISTS idx_assoc_scope ON associations (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
 ALTER TABLE associations ADD COLUMN IF NOT EXISTS visibility_class TEXT NOT NULL DEFAULT 'private';
+
+-- v13: Phase 5 field extensions for associations
+ALTER TABLE associations ADD COLUMN IF NOT EXISTS provenance TEXT NOT NULL DEFAULT 'inferred';
+ALTER TABLE associations ALTER COLUMN confidence SET DEFAULT 0.8;
+UPDATE associations SET confidence = 0.8 WHERE confidence = 0.5;
 
 CREATE TABLE IF NOT EXISTS memory_event_log (
   event_id BIGSERIAL PRIMARY KEY,

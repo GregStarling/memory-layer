@@ -3,7 +3,8 @@ export interface MarkdownExportOptions {
   includeTrustMetadata?: boolean;
   includeChangelog?: boolean;
   changelogLimit?: number;
-  groupBy?: 'knowledge_class' | 'topic' | 'flat';
+  groupBy?: 'knowledge_class' | 'topic' | 'tag' | 'flat';
+  filterByTags?: string[];
   includeSourceDocuments?: boolean;
 }
 

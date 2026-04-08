@@ -1,4 +1,10 @@
-import type { AfterModelCallInput, BeforeModelCallInput, MemoryRuntime } from '../core/runtime.js';
+import type {
+  AfterModelCallInput,
+  BeforeModelCallInput,
+  MemoryRuntime,
+  RuntimeWorkItemSuggestion,
+} from '../core/runtime.js';
+import type { FormatOptions } from '../core/formatter.js';
 
 export interface VercelAIPreparedInput {
   system?: string;
@@ -15,6 +21,24 @@ export interface VercelAIWrapOptions {
    * runtime to be constructed with `snapshotMode: true`.
    */
   snapshotMode?: boolean;
+  /** Point-in-time query (epoch seconds) for temporal context retrieval. */
+  asOf?: number;
+  /** Include provisional knowledge in context. */
+  includeProvisionalKnowledge?: boolean;
+  /** Include disputed knowledge in context. */
+  includeDisputedKnowledge?: boolean;
+  /** Format options for context rendering. */
+  format?: FormatOptions;
+  /** Work items to record after model call. */
+  workItems?: RuntimeWorkItemSuggestion[];
+  /** Include core memory bundle in bootstrap prompt. */
+  includeCoreMemory?: boolean;
+  /** Include graph report summary in bootstrap prompt. */
+  includeGraphReport?: boolean;
+  /** Tag filter for knowledge retrieval. */
+  tags?: string[];
+  /** Alias map override for this call. */
+  aliasMap?: import('../contracts/aliases.js').AliasMap;
 }
 
 function toTextResult(result: unknown): string {
@@ -53,19 +77,43 @@ export function wrapVercelAIModel<TInput extends string | BeforeModelCallInput, 
   options: VercelAIWrapOptions = {},
 ): (input: TInput) => Promise<{ result: TResult; responseText: string }> {
   return async (input) => {
-    const runtimeInput = options.mapInput ? options.mapInput(input) : input;
+    const rawInput = options.mapInput ? options.mapInput(input) : input;
+    // Merge Phase 5 options into the input
+    const runtimeInput: BeforeModelCallInput = typeof rawInput === 'string'
+      ? {
+          input: rawInput,
+          asOf: options.asOf,
+          includeProvisionalKnowledge: options.includeProvisionalKnowledge,
+          includeDisputedKnowledge: options.includeDisputedKnowledge,
+          format: options.format,
+          includeCoreMemory: options.includeCoreMemory,
+          includeGraphReport: options.includeGraphReport,
+          tags: options.tags,
+          aliasMap: options.aliasMap,
+        }
+      : {
+          ...rawInput,
+          asOf: rawInput.asOf ?? options.asOf,
+          includeProvisionalKnowledge: rawInput.includeProvisionalKnowledge ?? options.includeProvisionalKnowledge,
+          includeDisputedKnowledge: rawInput.includeDisputedKnowledge ?? options.includeDisputedKnowledge,
+          format: rawInput.format ?? options.format,
+          includeCoreMemory: rawInput.includeCoreMemory ?? options.includeCoreMemory,
+          includeGraphReport: rawInput.includeGraphReport ?? options.includeGraphReport,
+          tags: rawInput.tags ?? options.tags,
+          aliasMap: rawInput.aliasMap ?? options.aliasMap,
+        };
     if (options.snapshotMode && runtime.getSnapshot() == null) {
-      const relevanceQuery = typeof runtimeInput === 'string' ? undefined : runtimeInput.relevanceQuery;
-      await runtime.refreshSnapshot(relevanceQuery);
+      await runtime.refreshSnapshot(runtimeInput.relevanceQuery);
     }
     const prepared = await prepareVercelAIInput(runtime, runtimeInput);
     const result = await modelCall(prepared);
     const responseText = options.mapOutput ? options.mapOutput(result) : toTextResult(result);
-    const resolvedInput = typeof runtimeInput === 'string' ? runtimeInput : runtimeInput.input;
+    const resolvedInput = runtimeInput.input;
     await runtime.afterModelCall({
       userInput: resolvedInput,
       assistantOutput: responseText,
       actors: options.actors,
+      workItems: options.workItems,
     });
     return { result, responseText };
   };

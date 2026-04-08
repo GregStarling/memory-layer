@@ -31,6 +31,20 @@
     "associationRetrievalBoost": 1,
     "snapshotStability": 1,
     "snapshotLiveWrites": 1,
-    "snapshotRefresh": 1
+    "snapshotRefresh": 1,
+    "discoverSurpriseQuality": 1,
+    "edgeProvenanceRanking": 1,
+    "graphReportTokenBudget": 1,
+    "temporalExtractionAccuracy": 1,
+    "factsAtFastPath": 1,
+    "timeFormattingQuality": 1,
+    "rationaleExtractionAccuracy": 1,
+    "reflectionPatternQuality": 1,
+    "derivedOutputAccuracy": 1,
+    "curationCompleteness": 1,
+    "coreMemoryTokenBudget": 1,
+    "tagFilteringAccuracy": 1,
+    "aliasResolutionQuality": 0.6666666666666666,
+    "clusterCoherence": 1
   }
 }

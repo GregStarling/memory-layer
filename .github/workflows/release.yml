@@ -19,6 +19,21 @@ jobs:
       id-token: write
     env:
       RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+      POSTGRES_TEST_URL: postgres://postgres:postgres@localhost:5432/memory_layer_test
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: memory_layer_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d memory_layer_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,6 +44,7 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: npm
       - run: npm ci
+      - run: npm run test:postgres
       - run: npm run release:check
       - name: Publish to npm (skip if version exists)
         run: |

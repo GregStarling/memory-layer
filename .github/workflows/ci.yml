@@ -48,9 +48,37 @@ jobs:
       - run: .venv/bin/python -m build
         working-directory: clients/python
 
+  postgres-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: memory_layer_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d memory_layer_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      POSTGRES_TEST_URL: postgres://postgres:postgres@localhost:5432/memory_layer_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run test:postgres
+
   platform-proof:
     runs-on: ubuntu-latest
-    needs: [test, python-client]
+    needs: [test, python-client, postgres-integration]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

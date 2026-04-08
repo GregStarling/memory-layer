@@ -1,5 +1,5 @@
 import type { MemoryManager } from '../core/manager.js';
-import { formatContextForPrompt } from '../core/formatter.js';
+import { formatContextForPrompt, type FormatOptions } from '../core/formatter.js';
 import type { MemoryContext } from './../core/context.js';
 
 export interface MessageLike {
@@ -21,6 +21,20 @@ export interface MemoryMiddlewareOptions {
    * turn. Call the returned handler's `refreshSnapshot()` to invalidate.
    */
   snapshotMode?: boolean;
+  /** Include provisional knowledge in context. */
+  includeProvisionalKnowledge?: boolean;
+  /** Include disputed knowledge in context. */
+  includeDisputedKnowledge?: boolean;
+  /** Format options for context rendering. */
+  format?: FormatOptions;
+  /** Include core memory bundle in context. */
+  includeCoreMemory?: boolean;
+  /** Include graph report summary in context. */
+  includeGraphReport?: boolean;
+  /** Tag filter for knowledge retrieval. */
+  tags?: string[];
+  /** Alias map override. */
+  aliasMap?: import('../contracts/aliases.js').AliasMap;
 }
 
 export function wrapWithMemory(
@@ -50,9 +64,15 @@ export function wrapWithMemory(
       } else {
         context = await memory.getContext(query);
       }
+      const formatOpts: FormatOptions = {
+        includeCitations: true,
+        ...options.format,
+      };
+      if (options.includeProvisionalKnowledge) formatOpts.includeProvisionalKnowledge = true;
+      if (options.includeDisputedKnowledge) formatOpts.includeDisputedKnowledge = true;
       const memoryMessage = {
         role: 'system',
-        content: formatContextForPrompt(context, { includeCitations: true }),
+        content: formatContextForPrompt(context, formatOpts),
       };
       nextMessages =
         options.contextPosition === 'prepend'

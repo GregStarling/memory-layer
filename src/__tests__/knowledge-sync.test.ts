@@ -101,4 +101,60 @@ describe('knowledge sync', () => {
 
     expect(batches.flat()).toContain('Use the shared rollout checklist.');
   });
+
+  it('listKnowledgeChanges advances by cursor without duplicating the boundary item and includes retirements', async () => {
+    const adapter = createInMemoryAdapter();
+    const writer = createMemoryManager({
+      adapter,
+      scope: makeScope({
+        system_id: 'planner',
+        collaboration_id: 'factory-4',
+        scope_id: 'planner-task',
+      }),
+      sessionId: 'writer',
+      summarizer: async () => ({ summary: '', key_entities: [], topic_tags: [] }),
+      autoCompact: false,
+      autoExtract: false,
+    });
+    const reader = createMemoryManager({
+      adapter,
+      scope: makeScope({
+        system_id: 'executor',
+        collaboration_id: 'factory-4',
+        scope_id: 'executor-task',
+      }),
+      sessionId: 'reader',
+      summarizer: async () => ({ summary: '', key_entities: [], topic_tags: [] }),
+      autoCompact: false,
+      autoExtract: false,
+      crossScopeLevel: 'workspace',
+    });
+    managers.push(writer, reader);
+
+    const startCursor = await reader.resolveChangeStreamCursor();
+    const created = await writer.learnFact('Shared runbook lives here.', 'reference', 'high');
+
+    const createdPage = await reader.listKnowledgeChanges({
+      cursor: startCursor,
+      scopeLevel: 'workspace',
+    });
+    expect(createdPage.changes).toHaveLength(1);
+    expect(createdPage.changes[0].event_type).toBe('knowledge.created');
+    expect(createdPage.changes[0].knowledge.id).toBe(created.id);
+
+    const emptyPage = await reader.listKnowledgeChanges({
+      cursor: createdPage.nextCursor,
+      scopeLevel: 'workspace',
+    });
+    expect(emptyPage.changes).toHaveLength(0);
+
+    adapter.retireKnowledgeMemory(created.id);
+    const retiredPage = await reader.listKnowledgeChanges({
+      cursor: createdPage.nextCursor,
+      scopeLevel: 'workspace',
+    });
+    expect(retiredPage.changes).toHaveLength(1);
+    expect(retiredPage.changes[0].event_type).toBe('knowledge.retired');
+    expect(retiredPage.changes[0].knowledge.retired_at).not.toBeNull();
+  });
 });

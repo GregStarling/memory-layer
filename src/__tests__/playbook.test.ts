@@ -38,6 +38,17 @@ function createMockClient(): StructuredGenerationClient {
   };
 }
 
+function createNoisyMockClient(): StructuredGenerationClient {
+  return {
+    async generate() {
+      return `Here is the playbook:
+{"instructions":"1. Run npm test","references":["package.json"],"templates":[],"scripts":[],"rationale":null}
+
+Trailing note }`;
+    },
+  };
+}
+
 describe('playbook core', () => {
   let adapter: StorageAdapter;
   let asyncAdapter: AsyncStorageAdapter;
@@ -109,6 +120,20 @@ describe('playbook core', () => {
 
       expect(playbook.id).toBeGreaterThan(0);
       expect(playbook.instructions).toBeTruthy();
+    });
+
+    it('extracts the balanced JSON object when model output has trailing braces in prose', async () => {
+      const playbook = await createPlaybookFromTask(
+        { adapter: asyncAdapter, scope: s, client: createNoisyMockClient() },
+        {
+          title: 'Noisy output playbook',
+          description: 'LLM output contains trailing prose',
+          sessionId: 'sess-1',
+        },
+      );
+
+      expect(playbook.instructions).toBe('1. Run npm test');
+      expect(playbook.references).toEqual(['package.json']);
     });
   });
 

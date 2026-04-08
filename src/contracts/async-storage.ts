@@ -246,6 +246,7 @@ export interface AsyncStorageAdapter {
       scripts?: string[];
       assets?: string[];
       tags?: string[];
+      rationale?: string | null;
       status?: Playbook['status'];
     },
   ): Promise<Playbook | null>;

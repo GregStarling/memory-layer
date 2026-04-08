@@ -26,11 +26,14 @@ Return strict JSON array with items shaped like:
 {
   "fact": "durable fact text",
   "factType": "preference | entity | decision | constraint | reference",
-  "confidence": "high | medium"
+  "confidence": "high | medium",
+  "sourceText": "verbatim excerpt that supports this fact, or null",
+  "rationale": "why this fact holds (only when text clearly explains reasoning), or null"
 }
 Rules:
 - Only return facts that are likely to stay useful beyond the immediate turn.
 - Prefer explicit user preferences, durable project facts, important decisions, and constraints.
+- Only populate rationale when the source text clearly explains reasoning (e.g. 'because...', 'in order to...').
 - Return JSON only.`;
 
 export const EPISODIC_RECAP_PROMPT_VERSION = 'v1';
@@ -158,6 +161,8 @@ export function parseExtractionResponse(text: string): ExtractedFact[] {
         fact: item.fact,
         factType: item.factType as ExtractedFact['factType'],
         confidence: (item.confidence ?? 'medium') as ExtractedFact['confidence'],
+        sourceText: typeof item.sourceText === 'string' ? item.sourceText : null,
+        rationale: typeof item.rationale === 'string' ? item.rationale : null,
       };
     });
 }

@@ -381,10 +381,15 @@ class CompactionLogListResponse:
 @dataclass(slots=True)
 class ChangeListResponse:
     changes: list[dict[str, Any]]
+    next_cursor: Optional[str] = None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ChangeListResponse":
-        return cls(changes=list(payload.get("changes", [])))
+        next_cursor = payload.get("nextCursor")
+        return cls(
+            changes=list(payload.get("changes", [])),
+            next_cursor=str(next_cursor) if next_cursor is not None else None,
+        )
 
 
 @dataclass(slots=True)
@@ -961,3 +966,314 @@ class RuntimeTurnResult:
     prepared: PreparedMemoryTurn
     response_text: str
     exchange: StoredExchange
+
+
+# --- Phase 5 models ---
+
+
+@dataclass(slots=True)
+class SurpriseResult:
+    source_id: int
+    target_id: int
+    score: float
+    explanation: str
+    bridge_type: str
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "SurpriseResult":
+        return cls(
+            source_id=int(payload.get("sourceId", 0)),
+            target_id=int(payload.get("targetId", 0)),
+            score=float(payload.get("score", 0)),
+            explanation=str(payload.get("explanation", "")),
+            bridge_type=str(payload.get("bridgeType", "")),
+        )
+
+
+@dataclass(slots=True)
+class GraphStats:
+    total_nodes: int
+    total_edges: int
+    avg_degree: float
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "GraphStats":
+        return cls(
+            total_nodes=int(payload.get("totalNodes", 0)),
+            total_edges=int(payload.get("totalEdges", 0)),
+            avg_degree=float(payload.get("avgDegree", 0)),
+        )
+
+
+@dataclass(slots=True)
+class DiscoveryReport:
+    surprises: list[SurpriseResult]
+    graph_stats: GraphStats
+    timestamp: int
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "DiscoveryReport":
+        return cls(
+            surprises=[SurpriseResult.from_dict(s) for s in payload.get("surprises", [])],
+            graph_stats=GraphStats.from_dict(payload.get("graphStats", {})),
+            timestamp=int(payload.get("timestamp", 0)),
+        )
+
+
+@dataclass(slots=True)
+class GraphReportSection:
+    title: str
+    content: str
+    priority: int
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "GraphReportSection":
+        return cls(
+            title=str(payload.get("title", "")),
+            content=str(payload.get("content", "")),
+            priority=int(payload.get("priority", 0)),
+        )
+
+
+@dataclass(slots=True)
+class GraphReport:
+    sections: list[GraphReportSection]
+    token_estimate: int
+    generated_at: str
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "GraphReport":
+        return cls(
+            sections=[GraphReportSection.from_dict(s) for s in payload.get("sections", [])],
+            token_estimate=int(payload.get("tokenEstimate", 0)),
+            generated_at=str(payload.get("generatedAt", "")),
+        )
+
+
+@dataclass(slots=True)
+class FactsAtResult:
+    facts: list[dict[str, Any]]
+    query_timestamp: int
+    used_fast_path: bool
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "FactsAtResult":
+        return cls(
+            facts=list(payload.get("facts", [])),
+            query_timestamp=int(payload.get("queryTimestamp", 0)),
+            used_fast_path=bool(payload.get("usedFastPath", False)),
+        )
+
+
+@dataclass(slots=True)
+class ReflectionFact:
+    fact: str
+    fact_type: str
+    knowledge_class: str
+    knowledge_state: str
+    confidence: str
+    confidence_score: float
+    grounding_strength: str
+    evidence_source: str
+    source_memory_ids: list[int]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ReflectionFact":
+        return cls(
+            fact=str(payload.get("fact", "")),
+            fact_type=str(payload.get("factType", "")),
+            knowledge_class=str(payload.get("knowledgeClass", "")),
+            knowledge_state=str(payload.get("knowledgeState", "provisional")),
+            confidence=str(payload.get("confidence", "")),
+            confidence_score=float(payload.get("confidenceScore", 0)),
+            grounding_strength=str(payload.get("groundingStrength", "weak")),
+            evidence_source=str(payload.get("evidenceSource", "reflection")),
+            source_memory_ids=[int(i) for i in payload.get("sourceMemoryIds", [])],
+        )
+
+
+@dataclass(slots=True)
+class ReflectionPattern:
+    name: str
+    description: str
+    occurrences: int
+    related_fact_indices: list[int]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ReflectionPattern":
+        return cls(
+            name=str(payload.get("name", "")),
+            description=str(payload.get("description", "")),
+            occurrences=int(payload.get("occurrences", 0)),
+            related_fact_indices=[int(i) for i in payload.get("relatedFactIndices", [])],
+        )
+
+
+@dataclass(slots=True)
+class AliasCandidate:
+    entity1: str
+    entity2: str
+    similarity: float
+    suggested_canonical: str
+    confirmed: bool
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "AliasCandidate":
+        return cls(
+            entity1=str(payload.get("entity1", "")),
+            entity2=str(payload.get("entity2", "")),
+            similarity=float(payload.get("similarity", 0)),
+            suggested_canonical=str(payload.get("suggestedCanonical", "")),
+            confirmed=bool(payload.get("confirmed", False)),
+        )
+
+
+@dataclass(slots=True)
+class KnowledgeReflectionResult:
+    new_facts: list[ReflectionFact]
+    patterns_found: list[ReflectionPattern]
+    sessions_analyzed: int
+    source_memory_ids: list[int]
+    alias_candidates: list[AliasCandidate]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "KnowledgeReflectionResult":
+        return cls(
+            new_facts=[ReflectionFact.from_dict(f) for f in payload.get("newFacts", [])],
+            patterns_found=[ReflectionPattern.from_dict(p) for p in payload.get("patternsFound", [])],
+            sessions_analyzed=int(payload.get("sessionsAnalyzed", 0)),
+            source_memory_ids=[int(i) for i in payload.get("sourceMemoryIds", [])],
+            alias_candidates=[AliasCandidate.from_dict(c) for c in payload.get("aliasCandidates", [])],
+        )
+
+
+@dataclass(slots=True)
+class DerivedOutput:
+    type: str
+    content: str
+    confidence: float
+    source_knowledge_ids: list[int]
+    rationale: str
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "DerivedOutput":
+        return cls(
+            type=str(payload.get("type", "")),
+            content=str(payload.get("content", "")),
+            confidence=float(payload.get("confidence", 0)),
+            source_knowledge_ids=[int(i) for i in payload.get("sourceKnowledgeIds", [])],
+            rationale=str(payload.get("rationale", "")),
+        )
+
+
+@dataclass(slots=True)
+class CurationAction:
+    action_type: str
+    affected_entities: list[str]
+    explanation: str
+    timestamp: int
+    source: str
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "CurationAction":
+        return cls(
+            action_type=str(payload.get("actionType", "")),
+            affected_entities=[str(e) for e in payload.get("affectedEntities", [])],
+            explanation=str(payload.get("explanation", "")),
+            timestamp=int(payload.get("timestamp", 0)),
+            source=str(payload.get("source", "")),
+        )
+
+
+@dataclass(slots=True)
+class CurationSummary:
+    actions: list[CurationAction]
+    period: dict[str, int]
+    maintenance_ref: Optional[str]
+    reflection_ref: Optional[str]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "CurationSummary":
+        period = payload.get("period", {})
+        return cls(
+            actions=[CurationAction.from_dict(a) for a in payload.get("actions", [])],
+            period={"start": int(period.get("start", 0)), "end": int(period.get("end", 0))},
+            maintenance_ref=payload.get("maintenanceRef"),
+            reflection_ref=payload.get("reflectionRef"),
+        )
+
+
+@dataclass(slots=True)
+class CoreMemoryBundle:
+    identity: list[dict[str, Any]]
+    constraints: list[dict[str, Any]]
+    norms: list[dict[str, Any]]
+    work_items: list[dict[str, Any]]
+    top_playbook: Optional[dict[str, Any]]
+    token_estimate: int
+    generated_at: int
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "CoreMemoryBundle":
+        return cls(
+            identity=list(payload.get("identity", [])),
+            constraints=list(payload.get("constraints", [])),
+            norms=list(payload.get("norms", [])),
+            work_items=list(payload.get("workItems", [])),
+            top_playbook=payload.get("topPlaybook"),
+            token_estimate=int(payload.get("tokenEstimate", 0)),
+            generated_at=int(payload.get("generatedAt", 0)),
+        )
+
+
+@dataclass(slots=True)
+class ExportBundleResult:
+    bundle: dict[str, Any]
+    fact_count: int
+    playbook_count: int
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ExportBundleResult":
+        return cls(
+            bundle=dict(payload.get("bundle", {})),
+            fact_count=int(payload.get("factCount", 0)),
+            playbook_count=int(payload.get("playbookCount", 0)),
+        )
+
+
+@dataclass(slots=True)
+class ImportBundleResult:
+    imported: int
+    skipped: int
+    overwritten: int
+    merged: int
+    playbooks_imported: int
+    playbooks_skipped: int
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ImportBundleResult":
+        return cls(
+            imported=int(payload.get("imported", 0)),
+            skipped=int(payload.get("skipped", 0)),
+            overwritten=int(payload.get("overwritten", 0)),
+            merged=int(payload.get("merged", 0)),
+            playbooks_imported=int(payload.get("playbooksImported", 0)),
+            playbooks_skipped=int(payload.get("playbooksSkipped", 0)),
+        )
+
+
+@dataclass(slots=True)
+class RefreshResult:
+    unchanged: list[dict[str, Any]]
+    changed: list[dict[str, Any]]
+    invalidated_fact_count: int
+    re_ingested_fact_count: int
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "RefreshResult":
+        return cls(
+            unchanged=list(payload.get("unchanged", [])),
+            changed=list(payload.get("changed", [])),
+            invalidated_fact_count=int(payload.get("invalidatedFactCount", 0)),
+            re_ingested_fact_count=int(payload.get("reIngestedFactCount", 0)),
+        )

@@ -45,6 +45,14 @@ export interface BeforeModelCallInput {
   asOf?: number;
   includeProvisionalKnowledge?: boolean;
   includeDisputedKnowledge?: boolean;
+  /** Include core memory bundle in the bootstrap prompt. */
+  includeCoreMemory?: boolean;
+  /** Include graph report summary in the bootstrap prompt. */
+  includeGraphReport?: boolean;
+  /** Tag filter for knowledge retrieval. */
+  tags?: string[];
+  /** Alias map override for this call. */
+  aliasMap?: import('../contracts/aliases.js').AliasMap;
 }
 
 export interface BeforeModelCallResult {

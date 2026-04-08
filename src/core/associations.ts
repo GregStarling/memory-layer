@@ -208,6 +208,7 @@ export async function autoDetectAssociations(
         target_kind: 'knowledge',
         target_id: targetId,
         association_type: relationType,
+        provenance: 'inferred',
         confidence: similarity,
         auto_generated: true,
       });

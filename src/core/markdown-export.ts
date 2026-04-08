@@ -4,6 +4,39 @@ import type { MarkdownExportOptions, MarkdownExportResult } from '../contracts/e
 import { normalizeScope } from '../contracts/identity.js';
 import type { KnowledgeMemory } from '../contracts/types.js';
 
+function formatValidityWindow(km: KnowledgeMemory): string | null {
+  const from = km.valid_from;
+  const until = km.valid_until;
+  if (from == null && until == null) return null;
+
+  const formatDate = (epoch: number): string => new Date(epoch * 1000).toISOString().slice(0, 10);
+
+  if (from != null && until != null) {
+    return `valid: ${formatDate(from)} – ${formatDate(until)}`;
+  }
+  if (from != null) {
+    return `valid from: ${formatDate(from)}`;
+  }
+  return `valid until: ${formatDate(until!)}`;
+}
+
+function sanitizeMarkdownUrl(rawUrl: string): string | null {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return null;
+  if (/^(?:javascript|data):/i.test(trimmed)) {
+    return null;
+  }
+  try {
+    return encodeURI(trimmed)
+      .replaceAll('(', '%28')
+      .replaceAll(')', '%29')
+      .replaceAll('[', '%5B')
+      .replaceAll(']', '%5D');
+  } catch {
+    return null;
+  }
+}
+
 export async function exportAsMarkdown(
   adapter: AsyncStorageAdapter,
   scope: MemoryScope,
@@ -15,11 +48,20 @@ export async function exportAsMarkdown(
     includeChangelog: options?.includeChangelog ?? false,
     changelogLimit: options?.changelogLimit ?? 50,
     groupBy: options?.groupBy ?? 'knowledge_class',
+    filterByTags: options?.filterByTags ?? [],
     includeSourceDocuments: options?.includeSourceDocuments ?? false,
   };
 
   const normalizedScope = normalizeScope(scope);
-  const allKnowledge = await adapter.getActiveKnowledgeMemory(scope);
+  let allKnowledge = await adapter.getActiveKnowledgeMemory(scope);
+
+  // Filter by tags when specified
+  if (opts.filterByTags && opts.filterByTags.length > 0) {
+    const tagSet = new Set(opts.filterByTags);
+    allKnowledge = allKnowledge.filter((km) =>
+      km.tags.some((tag) => tagSet.has(tag)),
+    );
+  }
 
   const files = new Map<string, string>();
   let totalAssociations = 0;
@@ -42,6 +84,22 @@ export async function exportAsMarkdown(
       const list = groups.get(topic) ?? [];
       list.push(km);
       groups.set(topic, list);
+    }
+  } else if (opts.groupBy === 'tag') {
+    for (const km of allKnowledge) {
+      if (km.tags.length === 0) {
+        const list = groups.get('_untagged') ?? [];
+        list.push(km);
+        groups.set('_untagged', list);
+      } else {
+        for (const tag of km.tags) {
+          // Sanitize tag for safe use as a filename/group key
+          const safeTag = tag.replace(/[^a-zA-Z0-9_-]/g, '_') || '_empty';
+          const list = groups.get(safeTag) ?? [];
+          list.push(km);
+          groups.set(safeTag, list);
+        }
+      }
     }
   } else {
     for (const km of allKnowledge) {
@@ -120,12 +178,18 @@ export async function exportAsMarkdown(
 
     for (const km of items) {
       let bullet = `- ${km.fact}`;
+      const metaParts: string[] = [];
       if (opts.includeTrustMetadata) {
-        const parts: string[] = [];
-        parts.push(`trust: ${km.trust_score.toFixed(2)}`);
-        parts.push(`state: ${km.knowledge_state}`);
-        parts.push(`evidence: ${km.evidence_count}`);
-        bullet += ` (${parts.join(', ')})`;
+        metaParts.push(`trust: ${km.trust_score.toFixed(2)}`);
+        metaParts.push(`state: ${km.knowledge_state}`);
+        metaParts.push(`evidence: ${km.evidence_count}`);
+      }
+      const validityPart = formatValidityWindow(km);
+      if (validityPart) {
+        metaParts.push(validityPart);
+      }
+      if (metaParts.length > 0) {
+        bullet += ` (${metaParts.join(', ')})`;
       }
       lines.push(bullet);
 
@@ -183,7 +247,8 @@ export async function exportAsMarkdown(
         lines.push('No source documents.');
       } else {
         for (const doc of result.items) {
-          const urlPart = doc.url ? ` — [link](${doc.url})` : '';
+          const safeUrl = doc.url ? sanitizeMarkdownUrl(doc.url) : null;
+          const urlPart = safeUrl ? ` — [link](${safeUrl})` : '';
           lines.push(`- **${doc.title}**${urlPart}`);
           lines.push(`  - Status: ${doc.status}, Facts: ${doc.fact_count}`);
         }

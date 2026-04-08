@@ -14,6 +14,10 @@ import { runLongHorizonEvals } from './long-horizon.mjs';
 import { runPlatformQualityEval } from '../platform-quality/index.mjs';
 import { runQualityModeReport } from './quality-modes.mjs';
 import { runRetentionEvals } from './retention.mjs';
+import { runDiscoveryEvals } from './discovery.mjs';
+import { runTemporalEvals } from './temporal.mjs';
+import { runReflectionEvals } from './reflection.mjs';
+import { runIntelligenceEvals } from './intelligence.mjs';
 import { buildDiagnosticReport, mergeScenarioOutputs } from './shared.mjs';
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
@@ -37,6 +41,10 @@ export async function runMemoryQualityEvals(options = {}) {
     runPlaybookEvals({ diagnostic }),
     runAssociationEvals({ diagnostic }),
     runSnapshotEvals({ diagnostic }),
+    runDiscoveryEvals({ diagnostic }),
+    runTemporalEvals({ diagnostic }),
+    runReflectionEvals({ diagnostic }),
+    runIntelligenceEvals({ diagnostic }),
   ]);
   const merged = mergeScenarioOutputs(outputs);
   const result = {

@@ -27,6 +27,22 @@ function formatHeading(label: string, options?: FormatOptions): string {
   return options?.headingLevel === 'markdown' ? `## ${label}` : `${label}:`;
 }
 
+function formatTemporalQualifier(knowledge: KnowledgeMemory): string | null {
+  const from = knowledge.valid_from;
+  const until = knowledge.valid_until;
+  if (from == null && until == null) return null;
+
+  const formatDate = (epoch: number): string => new Date(epoch * 1000).toISOString().slice(0, 10);
+
+  if (from != null && until != null) {
+    return `Valid ${formatDate(from)} – ${formatDate(until)}`;
+  }
+  if (from != null) {
+    return `In effect starting ${formatDate(from)}`;
+  }
+  return `Valid until ${formatDate(until!)}`;
+}
+
 function formatKnowledgeLine(knowledge: KnowledgeMemory, options?: FormatOptions): string {
   const suffix: string[] = [];
   if (options?.includeTrustMetadata) {
@@ -43,6 +59,10 @@ function formatKnowledgeLine(knowledge: KnowledgeMemory, options?: FormatOptions
   }
   if (options?.includeCitations) {
     suffix.push(`memory:${knowledge.id}`);
+  }
+  const temporal = formatTemporalQualifier(knowledge);
+  if (temporal) {
+    suffix.push(temporal);
   }
   return suffix.length > 0 ? `- ${knowledge.fact} [${suffix.join(', ')}]` : `- ${knowledge.fact}`;
 }
@@ -132,9 +152,11 @@ export function formatContextForPrompt(
     sections.push(
       '',
       formatHeading('Related Knowledge (via associations)', options),
-      ...context.associatedKnowledge.map(
-        (k) => `- [${k.knowledge_class}] ${k.fact} (trust: ${k.trust_score.toFixed(2)})`,
-      ),
+      ...context.associatedKnowledge.map((k) => {
+        const temporal = formatTemporalQualifier(k);
+        const suffix = temporal ? ` [${temporal}]` : '';
+        return `- [${k.knowledge_class}] ${k.fact} (trust: ${k.trust_score.toFixed(2)})${suffix}`;
+      }),
     );
   }
 

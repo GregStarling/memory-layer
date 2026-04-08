@@ -43,6 +43,7 @@ export interface ContextAssemblyOptions {
   onEvent?: EventHook;
   tokenEstimator?: TokenEstimator;
   asOf?: number;
+  /** @deprecated No longer used — all associations are included, ordered by confidence. */
   associationMinConfidence?: number;
   view?: ContextViewPolicy;
   viewer?: ActorRef;
@@ -875,7 +876,6 @@ export async function buildMemoryContext(
     : relevantPlaybooks;
 
   // Single-hop association expansion via supports + related_to edges
-  const associationMinConfidence = options?.associationMinConfidence ?? 0.3;
   const maxAssociationSeedItems = options?.maxAssociationSeedItems ?? DEFAULT_MAX_ASSOCIATION_SEED_ITEMS;
   const maxAssociatedKnowledgeItems =
     options?.maxAssociatedKnowledgeItems ?? DEFAULT_MAX_ASSOCIATED_KNOWLEDGE_ITEMS;
@@ -902,16 +902,23 @@ export async function buildMemoryContext(
       }),
     );
     const expandScores = new Map<number, number>();
+    // Provenance weight: extracted edges rank highest, inferred next, ambiguous lowest.
+    // All edges are included — provenance influences ranking, not inclusion.
+    const provenanceWeight = (provenance: string): number => {
+      if (provenance === 'extracted') return 1.0;
+      if (provenance === 'inferred') return 0.7;
+      return 0.5; // ambiguous or unknown
+    };
     // Outbound: current node is source, neighbor is target
     for (const { from: assocs } of associationResults) {
       for (const a of assocs) {
         if (
           (a.association_type === 'supports' || a.association_type === 'related_to') &&
           a.target_kind === 'knowledge' &&
-          a.confidence >= associationMinConfidence &&
           !selectedIds.has(a.target_id)
         ) {
-          expandScores.set(a.target_id, Math.max(expandScores.get(a.target_id) ?? 0, a.confidence));
+          const weighted = a.confidence * provenanceWeight(a.provenance);
+          expandScores.set(a.target_id, Math.max(expandScores.get(a.target_id) ?? 0, weighted));
         }
       }
     }
@@ -921,10 +928,10 @@ export async function buildMemoryContext(
         if (
           (a.association_type === 'supports' || a.association_type === 'related_to') &&
           a.source_kind === 'knowledge' &&
-          a.confidence >= associationMinConfidence &&
           !selectedIds.has(a.source_id)
         ) {
-          expandScores.set(a.source_id, Math.max(expandScores.get(a.source_id) ?? 0, a.confidence));
+          const weighted = a.confidence * provenanceWeight(a.provenance);
+          expandScores.set(a.source_id, Math.max(expandScores.get(a.source_id) ?? 0, weighted));
         }
       }
     }

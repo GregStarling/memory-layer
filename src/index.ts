@@ -30,7 +30,20 @@ export {
   createClaudeMemoryManager,
   createOpenAIMemoryManager,
 } from './core/provider-managers.js';
-export { createRegexExtractor } from './core/extractor.js';
+export { createRegexExtractor, extractTemporalWindow, extractRationale } from './core/extractor.js';
+export { discover } from './core/discover.js';
+export { getGraphReport } from './core/graph-report.js';
+export { getFactsAt } from './core/temporal.js';
+export { lintKnowledge } from './core/knowledge-lint.js';
+export { computeClusters, formatClustersAsSection, expandFromClusters } from './core/cluster.js';
+export { resolveAliases, discoverAliasCandidates } from './core/aliases.js';
+export { getCoreMemory } from './core/core-memory.js';
+export { reflectOnKnowledge } from './core/reflection.js';
+export { exportBundle, importBundle } from './core/bundles.js';
+export { refreshDocuments } from './core/corpus-refresh.js';
+export { validateExtractedFacts, checkOntologyViolations } from './core/ontology.js';
+export { derive, registerDerivationHandler, unregisterDerivationHandler } from './core/derived.js';
+export { getCurationSummary, type CurationInput } from './core/curation.js';
 export { MEMORY_MANAGER_PRESETS, resolveMemoryManagerPreset } from './core/presets.js';
 
 export { createSQLiteAdapter, createSQLiteAdapterWithEmbeddings } from './adapters/sqlite/index.js';
@@ -200,6 +213,66 @@ export type {
   NewAssociation,
 } from './contracts/types.js';
 export { EPISODE_DETAIL_LEVELS, ASSOCIATION_TYPES, ASSOCIATION_TARGET_KINDS } from './contracts/types.js';
+export type { AssociationProvenance } from './contracts/types.js';
+export type {
+  DiscoverOptions,
+  BridgeType,
+  SurpriseResult,
+  GraphStats,
+  DiscoveryReport,
+} from './contracts/discovery.js';
+export { DISCOVER_DEFAULTS } from './contracts/discovery.js';
+export type {
+  GraphReportSection,
+  GraphReportOptions,
+  GraphReport,
+} from './contracts/graph-report.js';
+export { GRAPH_REPORT_DEFAULTS } from './contracts/graph-report.js';
+export type {
+  TemporalQueryOptions,
+  FactsAtResult,
+} from './contracts/temporal-query.js';
+export type {
+  ReflectOnKnowledgeOptions,
+  ReflectionFact,
+  ReflectionPattern,
+  KnowledgeReflectionResult,
+} from './contracts/reflection.js';
+export type {
+  DerivedOutputType,
+  DerivedOutput,
+  DeriveOptions,
+} from './contracts/derived.js';
+export type {
+  CurationActionType,
+  CurationSource,
+  CurationAction,
+  CurationSummary,
+  CurationOptions,
+} from './contracts/curation.js';
+export type {
+  OverflowStrategy,
+  RefreshPolicy,
+  CoreMemoryBundle,
+  CoreMemoryOptions,
+} from './contracts/core-memory.js';
+export type {
+  AliasMap,
+  AliasConfig,
+  AliasCandidate,
+} from './contracts/aliases.js';
+export type {
+  EntityTypeDefinition,
+  RelationshipConstraint,
+  ValidationRule,
+  OntologyConfig,
+} from './contracts/ontology.js';
+export type {
+  MemoryBundle,
+  BundleExportOptions,
+  BundleConflictResolution,
+  BundleImportOptions,
+} from './contracts/bundles.js';
 export type {
   CompactionAction,
   DriftSignalType,
@@ -251,6 +324,8 @@ export type {
 export type { ExtractedFact, Extractor, DomainGroups } from './core/extractor.js';
 export type { TokenEstimator } from './core/tokens.js';
 export type {
+  KnowledgeChangeRecord,
+  KnowledgeChangeResult,
   MemoryManager,
   MemoryManagerConfig,
 } from './core/manager.js';

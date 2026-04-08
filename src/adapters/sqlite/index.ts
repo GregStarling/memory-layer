@@ -5,7 +5,11 @@ import { createRequire } from 'module';
 import type Database from 'better-sqlite3';
 
 import type { EmbeddingAdapter } from '../../contracts/embedding.js';
-import { normalizeScope, scopeValues, type ScopeLevel } from '../../contracts/identity.js';
+import {
+  normalizeScope,
+  scopeValues as baseScopeValues,
+  type ScopeLevel,
+} from '../../contracts/identity.js';
 import type {
   ActorRef,
   HandoffQuery,
@@ -119,8 +123,20 @@ import { createSQLiteEmbeddingAdapter } from './embeddings.js';
 import { createSQLiteSchema } from './schema.js';
 
 const SCOPE_WHERE =
-  'tenant_id = ? AND system_id = ? AND workspace_id = ? AND collaboration_id = ? AND scope_id = ?';
+  `tenant_id = ? AND system_id = ? AND workspace_id = ? ` +
+  `AND (collaboration_id = ? OR (? = '' AND collaboration_id = 'default')) AND scope_id = ?`;
 const require = createRequire(import.meta.url);
+
+function normalizeStoredCollaborationId(value: unknown): string {
+  const normalized = value == null ? '' : String(value);
+  return normalized === 'default' ? '' : normalized;
+}
+
+function scopeValues(scope: Parameters<typeof normalizeScope>[0]): string[] {
+  const normalized = normalizeScope(scope);
+  const values = baseScopeValues(normalized);
+  return [values[0], values[1], values[2], values[3], values[3], values[4]];
+}
 
 type BetterSqliteConstructor = typeof import('better-sqlite3');
 
@@ -235,6 +251,7 @@ function resolveSearchOptions(options?: SearchOptions): Required<SearchOptions> 
     minimumTrustScore: options?.minimumTrustScore ?? 0,
     knowledgeStates: options?.knowledgeStates ?? [],
     knowledgeClasses: options?.knowledgeClasses ?? [],
+    tags: options?.tags ?? [],
     preferLocalTrusted: options?.preferLocalTrusted ?? false,
     preferLineageMemory: options?.preferLineageMemory ?? false,
   };
@@ -628,7 +645,7 @@ function createAdapterFromDatabase(
       tenant_id: String(row.tenant_id),
       system_id: String(row.system_id),
       workspace_id: String(row.workspace_id ?? ''),
-      collaboration_id: String(row.collaboration_id ?? ''),
+      collaboration_id: normalizeStoredCollaborationId(row.collaboration_id),
       scope_id: String(row.scope_id),
       work_item_id: Number(row.work_item_id),
       actor: parseActorRef(row),
@@ -651,7 +668,7 @@ function createAdapterFromDatabase(
       tenant_id: String(row.tenant_id),
       system_id: String(row.system_id),
       workspace_id: String(row.workspace_id ?? ''),
-      collaboration_id: String(row.collaboration_id ?? ''),
+      collaboration_id: normalizeStoredCollaborationId(row.collaboration_id),
       scope_id: String(row.scope_id),
       work_item_id: Number(row.work_item_id),
       from_actor: parseActorRef(row, 'from_'),
@@ -678,7 +695,7 @@ function createAdapterFromDatabase(
       tenant_id: String(row.tenant_id ?? ''),
       system_id: String(row.system_id ?? ''),
       workspace_id: String(row.workspace_id ?? ''),
-      collaboration_id: String(row.collaboration_id ?? ''),
+      collaboration_id: normalizeStoredCollaborationId(row.collaboration_id),
       scope_id: String(row.scope_id ?? ''),
       title: String(row.title),
       content_hash: String(row.content_hash),
@@ -834,8 +851,9 @@ function createAdapterFromDatabase(
            next_reverification_at, last_confirmed_at, confirmation_count,
            source_system_id, source_scope_id, source_collaboration_id, source_working_memory_id,
            source_turn_ids, successful_use_count, failed_use_count, disputed_at, dispute_reason,
-           contradiction_score, superseded_at, retired_at, created_at, last_accessed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           contradiction_score, superseded_at, retired_at, valid_from, valid_until, rationale, tags,
+           created_at, last_accessed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         scope.tenant_id,
@@ -877,6 +895,10 @@ function createAdapterFromDatabase(
         input.contradiction_score ?? 0,
         input.superseded_at ?? null,
         input.retired_at ?? null,
+        input.valid_from ?? null,
+        input.valid_until ?? null,
+        input.rationale ?? null,
+        JSON.stringify(input.tags ?? []),
         createdAt,
         createdAt,
       );
@@ -2062,191 +2084,209 @@ function createAdapterFromDatabase(
     },
 
     claimWorkItem(input: NewWorkClaimInput): WorkClaim {
-      assertActorRef(input.actor);
-      const workItemRow = db.prepare('SELECT * FROM work_items WHERE id = ?').get(input.work_item_id) as
-        | WorkItem
-        | undefined;
-      if (!workItemRow) throw new ConflictError(`Work item ${input.work_item_id} does not exist`);
-      const workItem = rowToWorkItem(workItemRow);
-      if (workItem.status === 'done') throw new ConflictError(`Work item ${input.work_item_id} is done`);
-      const now = input.claimed_at ?? nowSeconds();
-      const existingRow = db
-        .prepare('SELECT * FROM work_claims_current WHERE work_item_id = ?')
-        .get(input.work_item_id) as Record<string, unknown> | undefined;
-      if (existingRow) {
-        const existing = mapWorkClaim(existingRow);
-        if (existing.status === 'active' && existing.expires_at > now) {
-          if (
-            existing.actor.actor_kind !== input.actor.actor_kind ||
-            existing.actor.actor_id !== input.actor.actor_id
-          ) {
-            throw new ConflictError(`Work item ${input.work_item_id} is already claimed`);
+      const tx = db.transaction((): WorkClaim => {
+        assertActorRef(input.actor);
+        const workItemRow = db.prepare('SELECT * FROM work_items WHERE id = ?').get(input.work_item_id) as
+          | WorkItem
+          | undefined;
+        if (!workItemRow) throw new ConflictError(`Work item ${input.work_item_id} does not exist`);
+        const workItem = rowToWorkItem(workItemRow);
+        if (workItem.status === 'done') throw new ConflictError(`Work item ${input.work_item_id} is done`);
+        const now = input.claimed_at ?? nowSeconds();
+        const existingRow = db
+          .prepare('SELECT * FROM work_claims_current WHERE work_item_id = ?')
+          .get(input.work_item_id) as Record<string, unknown> | undefined;
+        if (existingRow) {
+          const existing = mapWorkClaim(existingRow);
+          if (existing.status === 'active' && existing.expires_at > now) {
+            if (
+              existing.actor.actor_kind !== input.actor.actor_kind ||
+              existing.actor.actor_id !== input.actor.actor_id
+            ) {
+              throw new ConflictError(`Work item ${input.work_item_id} is already claimed`);
+            }
+            return this.renewWorkClaim(existing.id, input.actor, input.lease_seconds ?? 300)!;
           }
-          return this.renewWorkClaim(existing.id, input.actor, input.lease_seconds ?? 300)!;
+          db.prepare(
+            `UPDATE work_claims_current
+             SET status = 'expired', released_at = ?, release_reason = 'expired', version = version + 1
+             WHERE id = ?`,
+          ).run(now, existing.id);
+          const expired = mapWorkClaim(
+            db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(existing.id) as Record<string, unknown>,
+          );
+          insertMemoryEventInternal({
+            ...normalizeScope(expired),
+            session_id: expired.session_id,
+            actor_id: expired.actor.actor_id,
+            actor_kind: expired.actor.actor_kind,
+            actor_system_id: expired.actor.system_id,
+            actor_display_name: expired.actor.display_name,
+            actor_metadata: expired.actor.metadata,
+            entity_kind: 'work_claim',
+            entity_id: String(expired.id),
+            event_type: 'work_claim.expired',
+            payload: { after: cloneValue(expired) },
+            created_at: now,
+          });
         }
-        db.prepare(
-          `UPDATE work_claims_current
-           SET status = 'expired', released_at = ?, release_reason = 'expired', version = version + 1
-           WHERE id = ?`,
-        ).run(now, existing.id);
-        const expired = mapWorkClaim(
-          db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(existing.id) as Record<string, unknown>,
+        const normalized = normalizeScope(input);
+        const actorParts = serializeActorMetadata(input.actor);
+        const claimToken = `claim-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        const result = db.prepare(
+          `INSERT INTO work_claims_current
+            (tenant_id, system_id, workspace_id, collaboration_id, scope_id, work_item_id, session_id,
+             actor_kind, actor_id, actor_system_id, actor_display_name, actor_metadata,
+             claim_token, status, claimed_at, expires_at, visibility_class, version)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, 1)`,
+        ).run(
+          normalized.tenant_id,
+          normalized.system_id,
+          normalized.workspace_id,
+          normalized.collaboration_id,
+          normalized.scope_id,
+          input.work_item_id,
+          input.session_id ?? null,
+          ...actorParts,
+          claimToken,
+          now,
+          now + (input.lease_seconds ?? 300),
+          input.visibility_class,
+        );
+        const claim = mapWorkClaim(
+          db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(Number(result.lastInsertRowid)) as Record<string, unknown>,
         );
         insertMemoryEventInternal({
-          ...normalizeScope(expired),
-          session_id: expired.session_id,
-          actor_id: expired.actor.actor_id,
-          actor_kind: expired.actor.actor_kind,
-          actor_system_id: expired.actor.system_id,
-          actor_display_name: expired.actor.display_name,
-          actor_metadata: expired.actor.metadata,
+          ...normalized,
+          session_id: claim.session_id,
+          actor_id: claim.actor.actor_id,
+          actor_kind: claim.actor.actor_kind,
+          actor_system_id: claim.actor.system_id,
+          actor_display_name: claim.actor.display_name,
+          actor_metadata: claim.actor.metadata,
           entity_kind: 'work_claim',
-          entity_id: String(expired.id),
-          event_type: 'work_claim.expired',
-          payload: { after: cloneValue(expired) },
+          entity_id: String(claim.id),
+          event_type: 'work_claim.claimed',
+          payload: { after: cloneValue(claim) },
           created_at: now,
         });
-      }
-      const normalized = normalizeScope(input);
-      const actorParts = serializeActorMetadata(input.actor);
-      const claimToken = `claim-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-      const result = db.prepare(
-        `INSERT INTO work_claims_current
-          (tenant_id, system_id, workspace_id, collaboration_id, scope_id, work_item_id, session_id,
-           actor_kind, actor_id, actor_system_id, actor_display_name, actor_metadata,
-           claim_token, status, claimed_at, expires_at, visibility_class, version)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, 1)`,
-      ).run(
-        normalized.tenant_id,
-        normalized.system_id,
-        normalized.workspace_id,
-        normalized.collaboration_id,
-        normalized.scope_id,
-        input.work_item_id,
-        input.session_id ?? null,
-        ...actorParts,
-        claimToken,
-        now,
-        now + (input.lease_seconds ?? 300),
-        input.visibility_class,
-      );
-      const claim = mapWorkClaim(
-        db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(Number(result.lastInsertRowid)) as Record<string, unknown>,
-      );
-      insertMemoryEventInternal({
-        ...normalized,
-        session_id: claim.session_id,
-        actor_id: claim.actor.actor_id,
-        actor_kind: claim.actor.actor_kind,
-        actor_system_id: claim.actor.system_id,
-        actor_display_name: claim.actor.display_name,
-        actor_metadata: claim.actor.metadata,
-        entity_kind: 'work_claim',
-        entity_id: String(claim.id),
-        event_type: 'work_claim.claimed',
-        payload: { after: cloneValue(claim) },
-        created_at: now,
+        return claim;
       });
-      return claim;
+      try {
+        return tx();
+      } catch (error) {
+        if (
+          error &&
+          typeof error === 'object' &&
+          (error as { code?: string }).code === 'SQLITE_CONSTRAINT_UNIQUE'
+        ) {
+          throw new ConflictError(`Work item ${input.work_item_id} is already claimed`);
+        }
+        throw error;
+      }
     },
 
     renewWorkClaim(claimId, actor, leaseSeconds = 300): WorkClaim | null {
-      assertActorRef(actor);
-      const before = db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(claimId) as Record<string, unknown> | undefined;
-      if (!before) return null;
-      const claim = mapWorkClaim(before);
-      if (claim.actor.actor_kind !== actor.actor_kind || claim.actor.actor_id !== actor.actor_id) {
-        throw new ConflictError(`Claim ${claimId} is owned by another actor`);
-      }
-      const now = nowSeconds();
-      if (claim.status !== 'active') {
-        throw new ConflictError(`Claim ${claimId} is no longer active`);
-      }
-      if (claim.expires_at <= now) {
+      return db.transaction(() => {
+        assertActorRef(actor);
+        const before = db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(claimId) as Record<string, unknown> | undefined;
+        if (!before) return null;
+        const claim = mapWorkClaim(before);
+        if (claim.actor.actor_kind !== actor.actor_kind || claim.actor.actor_id !== actor.actor_id) {
+          throw new ConflictError(`Claim ${claimId} is owned by another actor`);
+        }
+        const now = nowSeconds();
+        if (claim.status !== 'active') {
+          throw new ConflictError(`Claim ${claimId} is no longer active`);
+        }
+        if (claim.expires_at <= now) {
+          db.prepare(
+            `UPDATE work_claims_current
+             SET status = 'expired', released_at = ?, release_reason = 'expired', version = version + 1
+             WHERE id = ?`,
+          ).run(now, claimId);
+          const expired = mapWorkClaim(
+            db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(claimId) as Record<string, unknown>,
+          );
+          insertMemoryEventInternal({
+            ...normalizeScope(expired),
+            session_id: expired.session_id,
+            actor_id: expired.actor.actor_id,
+            actor_kind: expired.actor.actor_kind,
+            actor_system_id: expired.actor.system_id,
+            actor_display_name: expired.actor.display_name,
+            actor_metadata: expired.actor.metadata,
+            entity_kind: 'work_claim',
+            entity_id: String(expired.id),
+            event_type: 'work_claim.expired',
+            payload: { before: cloneValue(claim), after: cloneValue(expired) },
+            created_at: now,
+          });
+          return null;
+        }
         db.prepare(
           `UPDATE work_claims_current
-           SET status = 'expired', released_at = ?, release_reason = 'expired', version = version + 1
+           SET expires_at = ?, version = version + 1
            WHERE id = ?`,
-        ).run(now, claimId);
-        const expired = mapWorkClaim(
+        ).run(Math.max(claim.expires_at, now) + leaseSeconds, claimId);
+        const after = mapWorkClaim(
           db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(claimId) as Record<string, unknown>,
         );
         insertMemoryEventInternal({
-          ...normalizeScope(expired),
-          session_id: expired.session_id,
-          actor_id: expired.actor.actor_id,
-          actor_kind: expired.actor.actor_kind,
-          actor_system_id: expired.actor.system_id,
-          actor_display_name: expired.actor.display_name,
-          actor_metadata: expired.actor.metadata,
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          actor_id: after.actor.actor_id,
+          actor_kind: after.actor.actor_kind,
+          actor_system_id: after.actor.system_id,
+          actor_display_name: after.actor.display_name,
+          actor_metadata: after.actor.metadata,
           entity_kind: 'work_claim',
-          entity_id: String(expired.id),
-          event_type: 'work_claim.expired',
-          payload: { before: cloneValue(claim), after: cloneValue(expired) },
+          entity_id: String(after.id),
+          event_type: 'work_claim.renewed',
+          payload: { before: cloneValue(claim), after: cloneValue(after) },
           created_at: now,
         });
-        return null;
-      }
-      db.prepare(
-        `UPDATE work_claims_current
-         SET expires_at = ?, version = version + 1
-         WHERE id = ?`,
-      ).run(Math.max(claim.expires_at, now) + leaseSeconds, claimId);
-      const after = mapWorkClaim(
-        db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(claimId) as Record<string, unknown>,
-      );
-      insertMemoryEventInternal({
-        ...normalizeScope(after),
-        session_id: after.session_id,
-        actor_id: after.actor.actor_id,
-        actor_kind: after.actor.actor_kind,
-        actor_system_id: after.actor.system_id,
-        actor_display_name: after.actor.display_name,
-        actor_metadata: after.actor.metadata,
-        entity_kind: 'work_claim',
-        entity_id: String(after.id),
-        event_type: 'work_claim.renewed',
-        payload: { before: cloneValue(claim), after: cloneValue(after) },
-        created_at: now,
-      });
-      return after;
+        return after;
+      })();
     },
 
     releaseWorkClaim(claimId, actor, reason): WorkClaim | null {
-      assertActorRef(actor);
-      const before = db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(claimId) as Record<string, unknown> | undefined;
-      if (!before) return null;
-      const claim = mapWorkClaim(before);
-      if (claim.actor.actor_kind !== actor.actor_kind || claim.actor.actor_id !== actor.actor_id) {
-        throw new ConflictError(`Claim ${claimId} is owned by another actor`);
-      }
-      if (claim.status !== 'active') {
-        throw new ConflictError(`Claim ${claimId} is no longer active`);
-      }
-      const now = nowSeconds();
-      db.prepare(
-        `UPDATE work_claims_current
-         SET status = 'released', released_at = ?, release_reason = ?, version = version + 1
-         WHERE id = ?`,
-      ).run(now, reason ?? null, claimId);
-      const after = mapWorkClaim(
-        db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(claimId) as Record<string, unknown>,
-      );
-      insertMemoryEventInternal({
-        ...normalizeScope(after),
-        session_id: after.session_id,
-        actor_id: after.actor.actor_id,
-        actor_kind: after.actor.actor_kind,
-        actor_system_id: after.actor.system_id,
-        actor_display_name: after.actor.display_name,
-        actor_metadata: after.actor.metadata,
-        entity_kind: 'work_claim',
-        entity_id: String(after.id),
-        event_type: 'work_claim.released',
-        payload: { before: cloneValue(claim), after: cloneValue(after) },
-        created_at: now,
-      });
-      return after;
+      return db.transaction(() => {
+        assertActorRef(actor);
+        const before = db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(claimId) as Record<string, unknown> | undefined;
+        if (!before) return null;
+        const claim = mapWorkClaim(before);
+        if (claim.actor.actor_kind !== actor.actor_kind || claim.actor.actor_id !== actor.actor_id) {
+          throw new ConflictError(`Claim ${claimId} is owned by another actor`);
+        }
+        if (claim.status !== 'active') {
+          throw new ConflictError(`Claim ${claimId} is no longer active`);
+        }
+        const now = nowSeconds();
+        db.prepare(
+          `UPDATE work_claims_current
+           SET status = 'released', released_at = ?, release_reason = ?, version = version + 1
+           WHERE id = ?`,
+        ).run(now, reason ?? null, claimId);
+        const after = mapWorkClaim(
+          db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(claimId) as Record<string, unknown>,
+        );
+        insertMemoryEventInternal({
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          actor_id: after.actor.actor_id,
+          actor_kind: after.actor.actor_kind,
+          actor_system_id: after.actor.system_id,
+          actor_display_name: after.actor.display_name,
+          actor_metadata: after.actor.metadata,
+          entity_kind: 'work_claim',
+          entity_id: String(after.id),
+          event_type: 'work_claim.released',
+          payload: { before: cloneValue(claim), after: cloneValue(after) },
+          created_at: now,
+        });
+        return after;
+      })();
     },
 
     getWorkClaimById(claimId): WorkClaim | null {
@@ -2459,205 +2499,211 @@ function createAdapterFromDatabase(
     },
 
     acceptHandoff(handoffId, actor, reason): HandoffRecord | null {
-      assertActorRef(actor);
-      const before = db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown> | undefined;
-      if (!before) return null;
-      const handoff = mapHandoff(before);
-      if (handoff.to_actor.actor_kind !== actor.actor_kind || handoff.to_actor.actor_id !== actor.actor_id) {
-        throw new ConflictError(`Handoff ${handoffId} is assigned to another actor`);
-      }
-      const now = nowSeconds();
-      if (handoff.status !== 'pending') {
-        throw new ConflictError(`Handoff ${handoffId} is no longer pending`);
-      }
-      if (handoff.expires_at != null && handoff.expires_at <= now) {
+      return db.transaction(() => {
+        assertActorRef(actor);
+        const before = db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown> | undefined;
+        if (!before) return null;
+        const handoff = mapHandoff(before);
+        if (handoff.to_actor.actor_kind !== actor.actor_kind || handoff.to_actor.actor_id !== actor.actor_id) {
+          throw new ConflictError(`Handoff ${handoffId} is assigned to another actor`);
+        }
+        const now = nowSeconds();
+        if (handoff.status !== 'pending') {
+          throw new ConflictError(`Handoff ${handoffId} is no longer pending`);
+        }
+        if (handoff.expires_at != null && handoff.expires_at <= now) {
+          db.prepare(
+            `UPDATE handoff_records
+             SET status = 'expired', decision_reason = 'expired', version = version + 1
+             WHERE id = ?`,
+          ).run(handoffId);
+          const expired = mapHandoff(
+            db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown>,
+          );
+          insertMemoryEventInternal({
+            ...normalizeScope(expired),
+            session_id: expired.session_id,
+            actor_id: expired.to_actor.actor_id,
+            actor_kind: expired.to_actor.actor_kind,
+            actor_system_id: expired.to_actor.system_id,
+            actor_display_name: expired.to_actor.display_name,
+            actor_metadata: expired.to_actor.metadata,
+            entity_kind: 'handoff',
+            entity_id: String(expired.id),
+            event_type: 'handoff.expired',
+            payload: { before: cloneValue(handoff), after: cloneValue(expired) },
+            created_at: now,
+          });
+          return null;
+        }
+        const activeClaim = this.getActiveWorkClaim(handoff.work_item_id);
+        if (activeClaim &&
+          !(activeClaim.actor.actor_kind === handoff.from_actor.actor_kind && activeClaim.actor.actor_id === handoff.from_actor.actor_id)
+        ) {
+          throw new ConflictError(`Work item ${handoff.work_item_id} has another active owner`);
+        }
+        if (activeClaim) {
+          this.releaseWorkClaim(activeClaim.id, handoff.from_actor, 'handoff_accepted');
+        }
+        this.claimWorkItem({
+          ...normalizeScope(handoff),
+          work_item_id: handoff.work_item_id,
+          actor,
+          session_id: handoff.session_id,
+          visibility_class: handoff.visibility_class,
+        });
         db.prepare(
           `UPDATE handoff_records
-           SET status = 'expired', decision_reason = 'expired', version = version + 1
+           SET status = 'accepted', accepted_at = ?, decision_reason = ?, version = version + 1
            WHERE id = ?`,
-        ).run(handoffId);
-        const expired = mapHandoff(
+        ).run(now, reason ?? null, handoffId);
+        const after = mapHandoff(
           db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown>,
         );
         insertMemoryEventInternal({
-          ...normalizeScope(expired),
-          session_id: expired.session_id,
-          actor_id: expired.to_actor.actor_id,
-          actor_kind: expired.to_actor.actor_kind,
-          actor_system_id: expired.to_actor.system_id,
-          actor_display_name: expired.to_actor.display_name,
-          actor_metadata: expired.to_actor.metadata,
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          actor_id: actor.actor_id,
+          actor_kind: actor.actor_kind,
+          actor_system_id: actor.system_id,
+          actor_display_name: actor.display_name,
+          actor_metadata: actor.metadata,
           entity_kind: 'handoff',
-          entity_id: String(expired.id),
-          event_type: 'handoff.expired',
-          payload: { before: cloneValue(handoff), after: cloneValue(expired) },
+          entity_id: String(after.id),
+          event_type: 'handoff.accepted',
+          payload: { before: cloneValue(handoff), after: cloneValue(after) },
           created_at: now,
         });
-        return null;
-      }
-      const activeClaim = this.getActiveWorkClaim(handoff.work_item_id);
-      if (activeClaim &&
-        !(activeClaim.actor.actor_kind === handoff.from_actor.actor_kind && activeClaim.actor.actor_id === handoff.from_actor.actor_id)
-      ) {
-        throw new ConflictError(`Work item ${handoff.work_item_id} has another active owner`);
-      }
-      if (activeClaim) {
-        this.releaseWorkClaim(activeClaim.id, handoff.from_actor, 'handoff_accepted');
-      }
-      this.claimWorkItem({
-        ...normalizeScope(handoff),
-        work_item_id: handoff.work_item_id,
-        actor,
-        session_id: handoff.session_id,
-        visibility_class: handoff.visibility_class,
-      });
-      db.prepare(
-        `UPDATE handoff_records
-         SET status = 'accepted', accepted_at = ?, decision_reason = ?, version = version + 1
-         WHERE id = ?`,
-      ).run(now, reason ?? null, handoffId);
-      const after = mapHandoff(
-        db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown>,
-      );
-      insertMemoryEventInternal({
-        ...normalizeScope(after),
-        session_id: after.session_id,
-        actor_id: actor.actor_id,
-        actor_kind: actor.actor_kind,
-        actor_system_id: actor.system_id,
-        actor_display_name: actor.display_name,
-        actor_metadata: actor.metadata,
-        entity_kind: 'handoff',
-        entity_id: String(after.id),
-        event_type: 'handoff.accepted',
-        payload: { before: cloneValue(handoff), after: cloneValue(after) },
-        created_at: now,
-      });
-      return after;
+        return after;
+      })();
     },
 
     rejectHandoff(handoffId, actor, reason): HandoffRecord | null {
-      assertActorRef(actor);
-      const before = db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown> | undefined;
-      if (!before) return null;
-      const handoff = mapHandoff(before);
-      if (handoff.to_actor.actor_kind !== actor.actor_kind || handoff.to_actor.actor_id !== actor.actor_id) {
-        throw new ConflictError(`Handoff ${handoffId} is assigned to another actor`);
-      }
-      const now = nowSeconds();
-      if (handoff.status !== 'pending') {
-        throw new ConflictError(`Handoff ${handoffId} is no longer pending`);
-      }
-      if (handoff.expires_at != null && handoff.expires_at <= now) {
+      return db.transaction(() => {
+        assertActorRef(actor);
+        const before = db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown> | undefined;
+        if (!before) return null;
+        const handoff = mapHandoff(before);
+        if (handoff.to_actor.actor_kind !== actor.actor_kind || handoff.to_actor.actor_id !== actor.actor_id) {
+          throw new ConflictError(`Handoff ${handoffId} is assigned to another actor`);
+        }
+        const now = nowSeconds();
+        if (handoff.status !== 'pending') {
+          throw new ConflictError(`Handoff ${handoffId} is no longer pending`);
+        }
+        if (handoff.expires_at != null && handoff.expires_at <= now) {
+          db.prepare(
+            `UPDATE handoff_records
+             SET status = 'expired', decision_reason = 'expired', version = version + 1
+             WHERE id = ?`,
+          ).run(handoffId);
+          const expired = mapHandoff(
+            db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown>,
+          );
+          insertMemoryEventInternal({
+            ...normalizeScope(expired),
+            session_id: expired.session_id,
+            actor_id: expired.to_actor.actor_id,
+            actor_kind: expired.to_actor.actor_kind,
+            actor_system_id: expired.to_actor.system_id,
+            actor_display_name: expired.to_actor.display_name,
+            actor_metadata: expired.to_actor.metadata,
+            entity_kind: 'handoff',
+            entity_id: String(expired.id),
+            event_type: 'handoff.expired',
+            payload: { before: cloneValue(handoff), after: cloneValue(expired) },
+            created_at: now,
+          });
+          return null;
+        }
         db.prepare(
           `UPDATE handoff_records
-           SET status = 'expired', decision_reason = 'expired', version = version + 1
+           SET status = 'rejected', rejected_at = ?, decision_reason = ?, version = version + 1
            WHERE id = ?`,
-        ).run(handoffId);
-        const expired = mapHandoff(
+        ).run(now, reason ?? null, handoffId);
+        const after = mapHandoff(
           db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown>,
         );
         insertMemoryEventInternal({
-          ...normalizeScope(expired),
-          session_id: expired.session_id,
-          actor_id: expired.to_actor.actor_id,
-          actor_kind: expired.to_actor.actor_kind,
-          actor_system_id: expired.to_actor.system_id,
-          actor_display_name: expired.to_actor.display_name,
-          actor_metadata: expired.to_actor.metadata,
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          actor_id: actor.actor_id,
+          actor_kind: actor.actor_kind,
+          actor_system_id: actor.system_id,
+          actor_display_name: actor.display_name,
+          actor_metadata: actor.metadata,
           entity_kind: 'handoff',
-          entity_id: String(expired.id),
-          event_type: 'handoff.expired',
-          payload: { before: cloneValue(handoff), after: cloneValue(expired) },
+          entity_id: String(after.id),
+          event_type: 'handoff.rejected',
+          payload: { before: cloneValue(handoff), after: cloneValue(after) },
           created_at: now,
         });
-        return null;
-      }
-      db.prepare(
-        `UPDATE handoff_records
-         SET status = 'rejected', rejected_at = ?, decision_reason = ?, version = version + 1
-         WHERE id = ?`,
-      ).run(now, reason ?? null, handoffId);
-      const after = mapHandoff(
-        db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown>,
-      );
-      insertMemoryEventInternal({
-        ...normalizeScope(after),
-        session_id: after.session_id,
-        actor_id: actor.actor_id,
-        actor_kind: actor.actor_kind,
-        actor_system_id: actor.system_id,
-        actor_display_name: actor.display_name,
-        actor_metadata: actor.metadata,
-        entity_kind: 'handoff',
-        entity_id: String(after.id),
-        event_type: 'handoff.rejected',
-        payload: { before: cloneValue(handoff), after: cloneValue(after) },
-        created_at: now,
-      });
-      return after;
+        return after;
+      })();
     },
 
     cancelHandoff(handoffId, actor, reason): HandoffRecord | null {
-      assertActorRef(actor);
-      const before = db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown> | undefined;
-      if (!before) return null;
-      const handoff = mapHandoff(before);
-      if (handoff.from_actor.actor_kind !== actor.actor_kind || handoff.from_actor.actor_id !== actor.actor_id) {
-        throw new ConflictError(`Handoff ${handoffId} was created by another actor`);
-      }
-      const now = nowSeconds();
-      if (handoff.status !== 'pending') {
-        throw new ConflictError(`Handoff ${handoffId} is no longer pending`);
-      }
-      if (handoff.expires_at != null && handoff.expires_at <= now) {
+      return db.transaction(() => {
+        assertActorRef(actor);
+        const before = db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown> | undefined;
+        if (!before) return null;
+        const handoff = mapHandoff(before);
+        if (handoff.from_actor.actor_kind !== actor.actor_kind || handoff.from_actor.actor_id !== actor.actor_id) {
+          throw new ConflictError(`Handoff ${handoffId} was created by another actor`);
+        }
+        const now = nowSeconds();
+        if (handoff.status !== 'pending') {
+          throw new ConflictError(`Handoff ${handoffId} is no longer pending`);
+        }
+        if (handoff.expires_at != null && handoff.expires_at <= now) {
+          db.prepare(
+            `UPDATE handoff_records
+             SET status = 'expired', decision_reason = 'expired', version = version + 1
+             WHERE id = ?`,
+          ).run(handoffId);
+          const expired = mapHandoff(
+            db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown>,
+          );
+          insertMemoryEventInternal({
+            ...normalizeScope(expired),
+            session_id: expired.session_id,
+            actor_id: expired.from_actor.actor_id,
+            actor_kind: expired.from_actor.actor_kind,
+            actor_system_id: expired.from_actor.system_id,
+            actor_display_name: expired.from_actor.display_name,
+            actor_metadata: expired.from_actor.metadata,
+            entity_kind: 'handoff',
+            entity_id: String(expired.id),
+            event_type: 'handoff.expired',
+            payload: { before: cloneValue(handoff), after: cloneValue(expired) },
+            created_at: now,
+          });
+          return null;
+        }
         db.prepare(
           `UPDATE handoff_records
-           SET status = 'expired', decision_reason = 'expired', version = version + 1
+           SET status = 'canceled', canceled_at = ?, decision_reason = ?, version = version + 1
            WHERE id = ?`,
-        ).run(handoffId);
-        const expired = mapHandoff(
+        ).run(now, reason ?? null, handoffId);
+        const after = mapHandoff(
           db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown>,
         );
         insertMemoryEventInternal({
-          ...normalizeScope(expired),
-          session_id: expired.session_id,
-          actor_id: expired.from_actor.actor_id,
-          actor_kind: expired.from_actor.actor_kind,
-          actor_system_id: expired.from_actor.system_id,
-          actor_display_name: expired.from_actor.display_name,
-          actor_metadata: expired.from_actor.metadata,
+          ...normalizeScope(after),
+          session_id: after.session_id,
+          actor_id: actor.actor_id,
+          actor_kind: actor.actor_kind,
+          actor_system_id: actor.system_id,
+          actor_display_name: actor.display_name,
+          actor_metadata: actor.metadata,
           entity_kind: 'handoff',
-          entity_id: String(expired.id),
-          event_type: 'handoff.expired',
-          payload: { before: cloneValue(handoff), after: cloneValue(expired) },
+          entity_id: String(after.id),
+          event_type: 'handoff.canceled',
+          payload: { before: cloneValue(handoff), after: cloneValue(after) },
           created_at: now,
         });
-        return null;
-      }
-      db.prepare(
-        `UPDATE handoff_records
-         SET status = 'canceled', canceled_at = ?, decision_reason = ?, version = version + 1
-         WHERE id = ?`,
-      ).run(now, reason ?? null, handoffId);
-      const after = mapHandoff(
-        db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(handoffId) as Record<string, unknown>,
-      );
-      insertMemoryEventInternal({
-        ...normalizeScope(after),
-        session_id: after.session_id,
-        actor_id: actor.actor_id,
-        actor_kind: actor.actor_kind,
-        actor_system_id: actor.system_id,
-        actor_display_name: actor.display_name,
-        actor_metadata: actor.metadata,
-        entity_kind: 'handoff',
-        entity_id: String(after.id),
-        event_type: 'handoff.canceled',
-        payload: { before: cloneValue(handoff), after: cloneValue(after) },
-        created_at: now,
-      });
-      return after;
+        return after;
+      })();
     },
 
     listHandoffs(scope, options?: HandoffQuery): HandoffRecord[] {
@@ -2973,15 +3019,15 @@ function createAdapterFromDatabase(
         .prepare(
           `INSERT INTO playbooks
             (tenant_id, system_id, workspace_id, collaboration_id, scope_id, title, description, instructions,
-             references_json, templates, scripts, assets, tags, status, source_session_id, source_working_memory_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             references_json, templates, scripts, assets, tags, rationale, status, source_session_id, source_working_memory_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           scope.tenant_id, scope.system_id, scope.workspace_id, scope.collaboration_id, scope.scope_id,
           input.title, input.description, input.instructions,
           serializeStringArray(input.references ?? []), serializeStringArray(input.templates ?? []),
           serializeStringArray(input.scripts ?? []), serializeStringArray(input.assets ?? []),
-          serializeStringArray(input.tags ?? []), input.status ?? 'draft',
+          serializeStringArray(input.tags ?? []), input.rationale ?? null, input.status ?? 'draft',
           input.source_session_id ?? null, input.source_working_memory_id ?? null,
           input.created_at ?? now, now,
         );
@@ -3080,6 +3126,7 @@ function createAdapterFromDatabase(
       if (patch.scripts != null) { sets.push('scripts = ?'); values.push(serializeStringArray(patch.scripts)); }
       if (patch.assets != null) { sets.push('assets = ?'); values.push(serializeStringArray(patch.assets)); }
       if (patch.tags != null) { sets.push('tags = ?'); values.push(serializeStringArray(patch.tags)); }
+      if (patch.rationale !== undefined) { sets.push('rationale = ?'); values.push(patch.rationale); }
       if (patch.status != null) { sets.push('status = ?'); values.push(patch.status); }
       if (sets.length === 0) return this.getPlaybookById(id);
       sets.push('updated_at = ?');
@@ -3179,14 +3226,14 @@ function createAdapterFromDatabase(
           .prepare(
             `INSERT INTO associations
               (tenant_id, system_id, workspace_id, collaboration_id, scope_id,
-               source_kind, source_id, target_kind, target_id, association_type, confidence, auto_generated, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               source_kind, source_id, target_kind, target_id, association_type, provenance, confidence, auto_generated, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             scope.tenant_id, scope.system_id, scope.workspace_id, scope.collaboration_id, scope.scope_id,
             input.source_kind, input.source_id, input.target_kind, input.target_id,
-            input.association_type, input.confidence ?? 0.5, input.auto_generated ? 1 : 0,
-            input.created_at ?? now,
+            input.association_type, input.provenance ?? 'inferred', input.confidence ?? 0.8,
+            input.auto_generated ? 1 : 0, input.created_at ?? now,
           );
       } catch (err) {
         if (
@@ -3205,6 +3252,8 @@ function createAdapterFromDatabase(
       const association = {
         ...row,
         collaboration_id: row.collaboration_id ?? row.workspace_id,
+        visibility_class: row.visibility_class ?? 'private',
+        provenance: row.provenance ?? 'inferred',
         auto_generated: row.auto_generated === 1,
       };
       insertMemoryEventInternal({

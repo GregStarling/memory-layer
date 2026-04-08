@@ -164,6 +164,59 @@ describe('HTTP server', () => {
       )}&scope_level=workspace&tenant_id=acme&system_id=assistant&workspace_id=shared&scope_id=thread-b`,
     ).then((res) => res.json());
     expect(changes.changes[0].fact).toContain('Shared deployment memory');
+    expect(typeof changes.nextCursor).toBe('string');
+  });
+
+  it('returns cursor-based knowledge changes without duplicating the boundary item', async () => {
+    const base = await setup(13112);
+
+    const create = await fetch(`${base}/v1/facts`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-memory-tenant': 'acme',
+        'x-memory-system': 'planner',
+        'x-memory-workspace': 'shared',
+        'x-memory-scope': 'thread-a',
+      },
+      body: JSON.stringify({
+        fact: 'Cursor-safe shared fact',
+        factType: 'reference',
+      }),
+    }).then((res) => res.json());
+
+    const firstPage = await fetch(
+      `${base}/v1/changes?since=${encodeURIComponent(
+        '1970-01-01T00:00:00.000Z',
+      )}&scope_level=workspace&tenant_id=acme&system_id=assistant&workspace_id=shared&scope_id=thread-b`,
+    ).then((res) => res.json());
+    expect(firstPage.changes.some((change: Record<string, unknown>) => change.fact === 'Cursor-safe shared fact')).toBe(true);
+    expect(typeof firstPage.nextCursor).toBe('string');
+
+    const secondPage = await fetch(
+      `${base}/v1/changes?cursor=${firstPage.nextCursor}&scope_level=workspace&tenant_id=acme&system_id=assistant&workspace_id=shared&scope_id=thread-b`,
+    ).then((res) => res.json());
+    expect(secondPage.changes).toEqual([]);
+
+    await fetch(`${base}/v1/facts`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-memory-tenant': 'acme',
+        'x-memory-system': 'assistant',
+        'x-memory-workspace': 'shared',
+        'x-memory-scope': 'thread-a',
+      },
+      body: JSON.stringify({
+        fact: 'Second cursor-safe shared fact',
+        factType: 'reference',
+      }),
+    });
+
+    const afterUpdate = await fetch(
+      `${base}/v1/changes?cursor=${firstPage.nextCursor}&scope_level=workspace&tenant_id=acme&system_id=assistant&workspace_id=shared&scope_id=thread-b`,
+    ).then((res) => res.json());
+    expect(afterUpdate.changes.some((change: Record<string, unknown>) => change.fact === 'Second cursor-safe shared fact')).toBe(true);
   });
 
   it('shares hosted workspace memory across systems inside a collaboration', async () => {

@@ -167,4 +167,23 @@ describe('OpenAPI contract validation — Phase 1-3 endpoints', () => {
     expect(body.sessionState).toBeTruthy();
     assertMatchesOpenApi('/v1/context', 'get', '200', body);
   });
+
+  it('GET /v1/changes 200 response matches the documented schema', async () => {
+    const base = await setup(13807);
+    await fetch(`${base}/v1/facts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fact: 'Contract-safe shared fact',
+        factType: 'reference',
+      }),
+    });
+
+    const res = await fetch(
+      `${base}/v1/changes?since=${encodeURIComponent('1970-01-01T00:00:00.000Z')}`,
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    assertMatchesOpenApi('/v1/changes', 'get', '200', body);
+  });
 });

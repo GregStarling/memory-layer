@@ -53,6 +53,8 @@ import { emitMemoryEvent } from './telemetry.js';
 import { assessCandidateTrust, buildKnowledgeConflict } from './trust.js';
 import { getNativeSyncAdapter } from '../adapters/sync-to-async.js';
 import { autoDetectAssociations } from './associations.js';
+import type { AliasMap } from '../contracts/aliases.js';
+import { resolveAliases } from './aliases.js';
 
 export interface CompactionResult {
   workingMemory: WorkingMemory;
@@ -201,6 +203,9 @@ function buildKnowledgeInput(
     source_turn_ids: options.sourceTurnIds,
     contradiction_score: options.contradictionScore ?? 0,
     dispute_reason: options.disputeReason ?? null,
+    valid_from: fact.valid_from ?? null,
+    valid_until: fact.valid_until ?? null,
+    rationale: fact.rationale ?? null,
   };
 }
 
@@ -1003,6 +1008,7 @@ export async function extractKnowledge(
     onEvent?: EventHook;
     policy?: ExtractionPolicy;
     verifier?: KnowledgeVerifier;
+    aliasMap?: AliasMap;
   },
 ): Promise<KnowledgeMemory[]> {
   const startedAt = Date.now();
@@ -1071,11 +1077,21 @@ export async function extractKnowledge(
   )
     .map(normalizeExtractedFact)
     .filter((fact) => ['constraint', 'preference'].includes(fact.factType));
-  const recoveredFacts = mergeRecoveredFacts(
+  const mergedFacts = mergeRecoveredFacts(
     extracted,
     recoveredFromTurns,
     policy.maxFactsPerExtraction,
   );
+  const { facts: recoveredFacts, resolutions: aliasResolutions } = resolveAliases(
+    mergedFacts,
+    options?.aliasMap,
+  );
+  if (aliasResolutions.length > 0 && options?.logger) {
+    options.logger.info(
+      `Alias resolution applied ${aliasResolutions.length} mapping(s)`,
+      { resolutions: aliasResolutions },
+    );
+  }
   const sourceTurnIds = sourceTurns.map((turn) => turn.id);
 
   const activeKnowledge = await adapter.getActiveKnowledgeMemory(normalizedScope);
@@ -1468,6 +1484,45 @@ export async function extractKnowledge(
 
     // Auto-detect associations between the new fact and all known knowledge (including batch-created)
     await autoDetectAssociations(adapter, normalizedScope, createdFact, [...activeKnowledge, ...created.slice(0, -1)]);
+  }
+
+  // Create associations between alias-resolved facts and the canonical entity's knowledge facts
+  if (aliasResolutions.length > 0 && created.length > 0) {
+    const allKnowledge = [...activeKnowledge, ...created];
+    for (const createdFact of created) {
+      const factResolutions = aliasResolutions.filter((r) =>
+        createdFact.fact.toLowerCase().includes(r.canonical.toLowerCase()),
+      );
+      for (const resolution of factResolutions) {
+        // Find an existing knowledge fact about the canonical entity
+        // Entity facts use fact_subject='entity' with the name in fact_value,
+        // while other fact types use fact_subject directly
+        const canonicalLower = resolution.canonical.toLowerCase();
+        const canonicalFact = allKnowledge.find(
+          (k) =>
+            k.id !== createdFact.id &&
+            (k.fact_subject?.toLowerCase() === canonicalLower ||
+             k.fact_value?.toLowerCase() === canonicalLower),
+        );
+        if (!canonicalFact) continue;
+        try {
+          await adapter.insertAssociation({
+            ...normalizedScope,
+            source_kind: 'knowledge',
+            source_id: createdFact.id,
+            target_kind: 'knowledge',
+            target_id: canonicalFact.id,
+            association_type: 'alias_resolution',
+            provenance: 'inferred',
+            confidence: 1.0,
+            auto_generated: true,
+          });
+        } catch (e: unknown) {
+          if (e instanceof UniqueConstraintError) continue;
+          throw e;
+        }
+      }
+    }
   }
 
   emitMemoryEvent('extraction', normalizedScope, options, Date.now() - startedAt, {

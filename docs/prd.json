@@ -1,5 +1,5 @@
 {
-  "goal": "Implement the Ultimate Memory Layer Roadmap: 7 features across 4 phases — episodic recall, cognitive taxonomy, materialized profiles, workspace onboarding, procedural playbooks, typed associations, and session snapshots. Source of truth: docs/ULTIMATE_MEMORY_LAYER_ROADMAP.md.",
+  "goal": "Implement the Ultimate Memory Layer Roadmap: 7 features across 4 phases (complete) + Phase 5 Knowledge Intelligence across 6 sub-phases \u2014 graph intelligence, temporal truth, reflective memory, core memory & domain shaping, entity intelligence, and advanced capabilities. Source of truth: docs/ULTIMATE_MEMORY_LAYER_ROADMAP.md (Phases 1-4), docs/PHASE_5_ROADMAP.md (Phase 5).",
   "fast_checks_default": [
     "npm run lint",
     "npm run test",
@@ -1489,6 +1489,1044 @@
         "t59"
       ],
       "priority": 36,
+      "lane": "verification",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": true
+    },
+    {
+      "id": "t61",
+      "desc": "Phase 5 field extensions to existing contract types: add provenance ('extracted'|'inferred'|'ambiguous') and confidence (0.0-1.0) to Association; add nullable valid_from and valid_until (epoch seconds) to KnowledgeMemory and NewKnowledgeMemory; add nullable rationale text to KnowledgeMemory and Playbook; add optional tags string array to KnowledgeMemory and NewKnowledgeMemory; add 'reflection' to EvidenceSourceType union.",
+      "acceptance_criteria": [
+        "Association type includes provenance: 'extracted' | 'inferred' | 'ambiguous' field",
+        "Association type includes confidence: number field (0.0-1.0)",
+        "KnowledgeMemory and NewKnowledgeMemory include nullable valid_from and valid_until fields (number | null)",
+        "KnowledgeMemory and Playbook include nullable rationale text field",
+        "KnowledgeMemory and NewKnowledgeMemory include optional tags: string[] field",
+        "EvidenceSourceType union includes 'reflection'",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/contracts/types.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [],
+      "priority": 37,
+      "lane": "contracts",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": true
+    },
+    {
+      "id": "t62",
+      "desc": "Create src/contracts/discovery.ts with DiscoverOptions (scope filters, maxResults, minSurpriseScore), SurpriseResult (sourceId, targetId, score, explanation, bridgeType), and DiscoveryReport (surprises array, graphStats, timestamp) types.",
+      "acceptance_criteria": [
+        "New file src/contracts/discovery.ts with all 3 types exported",
+        "DiscoverOptions includes optional scope, maxResults (default 10), minSurpriseScore fields",
+        "SurpriseResult includes sourceId, targetId, score, explanation, bridgeType fields",
+        "DiscoveryReport includes surprises array, graphStats summary, and timestamp",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/contracts/discovery.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [],
+      "priority": 37,
+      "lane": "contracts",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t63",
+      "desc": "Create src/contracts/graph-report.ts with GraphReport (sections array, tokenEstimate, generatedAt), GraphReportSection (title, content, priority), and GraphReportOptions (tokenBudget default 2000, includeSections filter) types.",
+      "acceptance_criteria": [
+        "New file src/contracts/graph-report.ts with all 3 types exported",
+        "GraphReport includes sections, tokenEstimate (target under 2000), generatedAt",
+        "GraphReportSection includes title, content, priority for ordering",
+        "GraphReportOptions includes tokenBudget (default 2000) and includeSections filter",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/contracts/graph-report.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [],
+      "priority": 37,
+      "lane": "contracts",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t64",
+      "desc": "Create src/contracts/temporal-query.ts with TemporalQueryOptions (timestamp epoch seconds, scope, knowledgeClass filter, fallbackToReplay boolean) and FactsAtResult (facts array, queryTimestamp, usedFastPath indicator) types.",
+      "acceptance_criteria": [
+        "New file src/contracts/temporal-query.ts with both types exported",
+        "TemporalQueryOptions includes timestamp, optional scope and knowledgeClass filter, fallbackToReplay boolean",
+        "FactsAtResult includes facts array, queryTimestamp, and usedFastPath indicator",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/contracts/temporal-query.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [],
+      "priority": 37,
+      "lane": "contracts",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t65",
+      "desc": "Create src/contracts/reflection.ts with ReflectOnKnowledgeOptions (scope, maxFacts, includePlaybooks, rateLimitKey) and KnowledgeReflectionResult (newFacts array tagged source='reflection', patternsFound, sessionsAnalyzed, sourceMemoryIds) types.",
+      "acceptance_criteria": [
+        "New file src/contracts/reflection.ts with both types exported",
+        "ReflectOnKnowledgeOptions includes scope, maxFacts, includePlaybooks, rateLimitKey fields",
+        "KnowledgeReflectionResult includes newFacts with provisional trust status, patternsFound, sessionsAnalyzed",
+        "newFacts typed to carry source: 'reflection' evidence",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/contracts/reflection.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [],
+      "priority": 37,
+      "lane": "contracts",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t66",
+      "desc": "Create src/contracts/derived.ts with DerivedOutputType ('playbook_candidate'|'coding_rule'|'anti_pattern'|'project_summary'), DerivedOutput (type, content, confidence, sourceKnowledgeIds, rationale), and DeriveOptions (outputTypes filter, scope, maxOutputs) types.",
+      "acceptance_criteria": [
+        "New file src/contracts/derived.ts with all 3 types exported",
+        "DerivedOutputType is union of 4 artifact types",
+        "DerivedOutput includes provenance back to source knowledge IDs",
+        "DeriveOptions allows filtering which output types to generate",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/contracts/derived.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [],
+      "priority": 37,
+      "lane": "contracts",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t67",
+      "desc": "Create src/contracts/curation.ts with CurationAction (actionType covering retired/expired/demoted/reflected/merged/derived, affectedEntities, explanation, timestamp, source), CurationSummary (actions array, period, maintenanceRef, reflectionRef), and CurationOptions (since timestamp, actionTypes filter, limit) types.",
+      "acceptance_criteria": [
+        "New file src/contracts/curation.ts with all 3 types exported",
+        "CurationAction.actionType covers: retired, expired, demoted, reflected, merged, derived",
+        "CurationAction.source identifies: maintenance, reflection, ontology, derived_pipeline",
+        "CurationSummary aggregates across all source types",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/contracts/curation.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [],
+      "priority": 37,
+      "lane": "contracts",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t68",
+      "desc": "Create src/contracts/core-memory.ts with CoreMemoryBundle (identity, constraints, norms, workItems, topPlaybook sections in deterministic order, tokenEstimate, generatedAt) and CoreMemoryOptions (tokenBudget default 1500, includeClasses, refreshPolicy) types.",
+      "acceptance_criteria": [
+        "New file src/contracts/core-memory.ts with both types exported",
+        "CoreMemoryBundle sections follow deterministic order: identity, constraints, norms, work, playbook",
+        "CoreMemoryOptions includes tokenBudget with 1500 default and overflow strategy",
+        "Bundle includes tokenEstimate for prompt injection sizing",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/contracts/core-memory.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [],
+      "priority": 37,
+      "lane": "contracts",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t69",
+      "desc": "Create src/contracts/aliases.ts with AliasMap (Record<string, string[]> mapping canonical name to alias arrays), AliasConfig (aliases map, scopeId), and AliasCandidate (entity1, entity2, similarity score, suggestedCanonical, confirmed boolean) types.",
+      "acceptance_criteria": [
+        "New file src/contracts/aliases.ts with all 3 types exported",
+        "AliasMap maps canonical name to array of alias strings",
+        "AliasConfig supports per-scope alias storage",
+        "AliasCandidate includes similarity score and confirmation status",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/contracts/aliases.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [],
+      "priority": 37,
+      "lane": "contracts",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t70",
+      "desc": "Create src/contracts/ontology.ts with OntologyConfig (entityTypes, relationshipConstraints, validationRules), EntityTypeDefinition (name, description, allowedRelationships), and RelationshipConstraint (sourceType, targetType, relationshipType, bidirectional) types.",
+      "acceptance_criteria": [
+        "New file src/contracts/ontology.ts with all 4 types exported",
+        "OntologyConfig is optional \u2014 system works without it",
+        "EntityTypeDefinition extends beyond built-in knowledge_class",
+        "RelationshipConstraint validates which entity types can connect via which edge types",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/contracts/ontology.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [],
+      "priority": 37,
+      "lane": "contracts",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t71",
+      "desc": "Create src/contracts/bundles.ts with MemoryBundle (name, version, facts, playbooks, metadata, exportedAt), BundleExportOptions (scope, includeTags, knowledgeClassFilter), and BundleImportOptions (conflictResolution strategy, targetScope, preserveTrust) types.",
+      "acceptance_criteria": [
+        "New file src/contracts/bundles.ts with all 3 types exported",
+        "MemoryBundle is a portable, versioned collection of knowledge and playbooks",
+        "BundleExportOptions supports filtering by scope, tags, knowledge class",
+        "BundleImportOptions includes conflictResolution strategy using existing trust pipeline",
+        "npm run lint passes"
+      ],
+      "files": [
+        "src/contracts/bundles.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [],
+      "priority": 37,
+      "lane": "contracts",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t72",
+      "desc": "Combined Phase 5 schema migration: add provenance VARCHAR DEFAULT 'inferred' and confidence REAL DEFAULT 0.8 to associations table; add valid_from INTEGER, valid_until INTEGER, rationale TEXT, tags TEXT to knowledge table; add rationale TEXT to playbooks table. Apply across SQLite, Postgres, and in-memory adapters.",
+      "acceptance_criteria": [
+        "Schema version bumped in src/adapters/sqlite/schema.ts",
+        "SQLite migration adds all columns with correct types and defaults",
+        "Postgres schema.sql includes all new columns with correct types and defaults",
+        "In-memory adapter types updated to include all new optional fields",
+        "Existing associations default to provenance='inferred', confidence=0.8",
+        "All new knowledge/playbook columns are nullable",
+        "Existing tests still pass"
+      ],
+      "files": [
+        "src/adapters/sqlite/schema.ts",
+        "src/adapters/postgres/schema.sql",
+        "src/adapters/memory/index.ts"
+      ],
+      "fast_checks": [
+        "npm run test"
+      ],
+      "dependencies": [
+        "t61"
+      ],
+      "priority": 38,
+      "lane": "adapters",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": true
+    },
+    {
+      "id": "t73",
+      "desc": "Core discover module: betweenness centrality over association graph, cross-class bridge detection (edges connecting different knowledge_class groups), composite surprise scoring (cross-class bonus, cross-scope bonus, low-to-high-degree bonus, weak-confidence bonus), explanation generation for each surprise result.",
+      "acceptance_criteria": [
+        "New file src/core/discover.ts with discover() async function",
+        "Betweenness centrality computed over association graph to identify bridge nodes",
+        "Cross-class bridges detected and scored with composite formula",
+        "Each SurpriseResult includes human-readable explanation of why it is surprising",
+        "Computation bounded: configurable max graph traversal depth, max results cap",
+        "Read-only analysis \u2014 no mutations to knowledge or associations",
+        "Unit tests in src/__tests__/discover.test.ts"
+      ],
+      "files": [
+        "src/core/discover.ts",
+        "src/__tests__/discover.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t62",
+        "t72"
+      ],
+      "priority": 39,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t74",
+      "desc": "Core edge provenance: update autoDetectAssociations to tag output as provenance='inferred' with computed confidence; update explicit addAssociation to default to provenance='extracted', confidence=1.0. Backward-compatible: existing associations without provenance treated as inferred/0.8.",
+      "acceptance_criteria": [
+        "autoDetectAssociations tags new associations as inferred with computed confidence",
+        "addAssociation defaults to extracted/1.0 for explicitly created associations",
+        "Existing associations without provenance treated as inferred/0.8",
+        "Association type ontology unchanged (related_to, supports, contradicts, etc.)",
+        "Existing association tests still pass"
+      ],
+      "files": [
+        "src/core/associations.ts"
+      ],
+      "fast_checks": [
+        "npm run test"
+      ],
+      "dependencies": [
+        "t61",
+        "t72"
+      ],
+      "priority": 39,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t75",
+      "desc": "Core temporal extraction: update extraction pipeline to detect temporal language ('starting Monday', 'as of Q3', 'until the migration completes', 'effective March 1st') and populate valid_from/valid_until on extracted knowledge facts. Conservative: only populate when text is unambiguous.",
+      "acceptance_criteria": [
+        "Extraction pipeline detects unambiguous temporal language in source text",
+        "valid_from populated when text indicates a start date",
+        "valid_until populated when text indicates an end date",
+        "Ambiguous temporal references are not populated (conservative extraction)",
+        "Facts without temporal language have null validity windows (behave as before)",
+        "Unit tests covering various temporal language patterns"
+      ],
+      "files": [
+        "src/core/extractor.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t61",
+        "t72"
+      ],
+      "priority": 39,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t76",
+      "desc": "Core getFactsAt: fast temporal query that filters by valid_from <= timestamp AND (valid_until IS NULL OR valid_until > timestamp). Falls back to existing getContextAt() replay when validity windows are not set. Returns FactsAtResult with usedFastPath indicator.",
+      "acceptance_criteria": [
+        "getFactsAt(timestamp, options?) function implemented in src/core/temporal.ts",
+        "Fast path: SQL/filter by validity windows when present",
+        "Fallback: delegates to getContextAt() replay when windows not set",
+        "FactsAtResult.usedFastPath correctly indicates which path was taken",
+        "Does not remove or replace existing temporal replay system",
+        "Unit tests in src/__tests__/temporal-query.test.ts for fast path, fallback, and mixed"
+      ],
+      "files": [
+        "src/core/temporal.ts",
+        "src/__tests__/temporal-query.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t64",
+        "t72"
+      ],
+      "priority": 39,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t77",
+      "desc": "Core reflection module: reflectOnKnowledge() reads recent working memory summaries + active knowledge + active playbooks, runs extractor over combined text looking for recurring themes, implicit constraints, emerging strategies, and cross-session connections. Produces new knowledge tagged source='reflection' with provisional trust status.",
+      "acceptance_criteria": [
+        "New file src/core/reflection.ts with reflectOnKnowledge() async function",
+        "Reads and combines: recent summaries, active knowledge, active playbooks",
+        "Runs extractor over combined text for pattern detection",
+        "New facts tagged with source: 'reflection' evidence type",
+        "Reflection-sourced facts start as provisional (lower initial trust than extraction)",
+        "Clearly separated from existing episodic reflect() API",
+        "Rate-limiting support via rateLimitKey option",
+        "Unit tests in src/__tests__/reflection.test.ts"
+      ],
+      "files": [
+        "src/core/reflection.ts",
+        "src/__tests__/reflection.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t65",
+        "t72"
+      ],
+      "priority": 39,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t78",
+      "desc": "Core getCoreMemory: builds token-budgeted bundle from identity facts (trusted, knowledge_class='identity'), active constraints, workspace norms, active work items, and top active playbook. Deterministic ordering: identity \u2192 constraints \u2192 norms \u2192 work \u2192 playbook. Overflow trims by class priority, keeping identity and constraints.",
+      "acceptance_criteria": [
+        "New file src/core/core-memory.ts with getCoreMemory() async function",
+        "Bundle built from existing getProfile() and getContext() internals \u2014 not a new storage layer",
+        "Deterministic section ordering: identity, constraints, norms, work, playbook",
+        "Token budget cap (default 1500) enforced with overflow trimming by class priority",
+        "Identity and constraints preserved even when over budget",
+        "Stable across turns within a session (cacheable)",
+        "Unit tests in src/__tests__/core-memory.test.ts"
+      ],
+      "files": [
+        "src/core/core-memory.ts",
+        "src/__tests__/core-memory.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t68"
+      ],
+      "priority": 39,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t79",
+      "desc": "Core alias resolution: config-driven canonical name mapping applied during extraction. Before deduplication, extracted entity names resolved against AliasMap. Matched entities get canonical name; unmatched pass through unchanged. Creates extracted associations between canonical entity and alias occurrence contexts.",
+      "acceptance_criteria": [
+        "New file src/core/aliases.ts with resolveAliases() and alias management functions",
+        "AliasMap config accepted on MemoryManagerConfig (optional)",
+        "Extraction pipeline applies alias resolution before deduplication",
+        "Canonical names replace alias variants in extracted facts",
+        "Extracted associations link canonical entities to alias occurrence contexts",
+        "System works identically without alias config",
+        "Unit tests in src/__tests__/aliases.test.ts"
+      ],
+      "files": [
+        "src/core/aliases.ts",
+        "src/__tests__/aliases.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t69"
+      ],
+      "priority": 39,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t80",
+      "desc": "Core memory bundles: exportBundle() creates named, versioned collection of knowledge facts and playbooks filtered by scope/tags/class. importBundle() merges bundle into target scope with conflict resolution via existing trust pipeline.",
+      "acceptance_criteria": [
+        "New file src/core/bundles.ts with exportBundle() and importBundle() functions",
+        "exportBundle filters by scope, tags, knowledge class per BundleExportOptions",
+        "importBundle resolves conflicts using existing trust pipeline",
+        "Bundle is portable (JSON-serializable) with version metadata",
+        "Bundles can be workspace-scoped or tenant-scoped for sharing",
+        "Unit tests in src/__tests__/bundles.test.ts for export, import, and conflict resolution"
+      ],
+      "files": [
+        "src/core/bundles.ts",
+        "src/__tests__/bundles.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t71"
+      ],
+      "priority": 39,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t81",
+      "desc": "Core incremental corpus refresh: refreshDocuments() re-ingests only documents whose content hash has changed since last ingestion. Selective fact invalidation marks facts linked to changed documents for re-extraction. Unchanged documents and their facts left untouched.",
+      "acceptance_criteria": [
+        "New file src/core/corpus-refresh.ts with refreshDocuments() function",
+        "Compares current content hashes against stored hashes from document ingestion",
+        "Only re-ingests documents with changed content",
+        "Facts linked to changed documents marked for re-extraction",
+        "Unchanged documents and their facts left untouched",
+        "Unit tests for change detection, selective re-ingestion, and fact invalidation"
+      ],
+      "files": [
+        "src/core/corpus-refresh.ts",
+        "src/__tests__/corpus-refresh.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t72"
+      ],
+      "priority": 39,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t82",
+      "desc": "Core graph report: getGraphReport() produces compact orientation artifact combining top 5 discover surprises, top 5 lint issues, top 10 high-degree knowledge facts, knowledge gaps, active contradictions, recent changes summary, and soon-to-expire temporal facts. Token-budgeted under 2000 tokens.",
+      "acceptance_criteria": [
+        "New file src/core/graph-report.ts with getGraphReport() function",
+        "Calls discover() and lint internally for data aggregation",
+        "Combines sections: surprises, issues, high-degree facts, gaps, contradictions, changes, expiring",
+        "Total output under 2000 tokens (configurable via GraphReportOptions.tokenBudget)",
+        "Structured markdown suitable for system prompt injection",
+        "Top 5/5/10 limits enforced per section",
+        "Unit tests in src/__tests__/graph-report.test.ts"
+      ],
+      "files": [
+        "src/core/graph-report.ts",
+        "src/__tests__/graph-report.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t63",
+        "t73",
+        "t74"
+      ],
+      "priority": 40,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t83",
+      "desc": "Core time-aware formatting: context assembly appends temporal qualifiers to time-bounded facts ('Valid until 2026-09-30', 'In effect starting 2026-04-01'). Markdown export renders validity windows in fact metadata. Only qualifies facts with explicit validity windows.",
+      "acceptance_criteria": [
+        "Context assembly includes concise temporal qualifiers for time-bounded facts",
+        "Markdown export shows validity windows in fact metadata sections",
+        "Facts without validity windows render exactly as before (no qualifiers added)",
+        "Qualifiers are concise \u2014 one short suffix, not a paragraph",
+        "Existing formatter and export tests still pass"
+      ],
+      "files": [
+        "src/core/formatter.ts",
+        "src/core/markdown-export.ts"
+      ],
+      "fast_checks": [
+        "npm run test"
+      ],
+      "dependencies": [
+        "t75",
+        "t76"
+      ],
+      "priority": 40,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t84",
+      "desc": "Core rationale capture: update extraction pipeline to detect causal language ('because', 'in order to', 'the reason is', 'this ensures') and populate rationale field on extracted knowledge facts and playbooks. Conservative: only populate when text clearly explains reasoning.",
+      "acceptance_criteria": [
+        "Extraction pipeline detects causal language patterns in source text",
+        "rationale field populated on knowledge facts when causal language found",
+        "rationale field populated on playbooks when reasoning is present",
+        "Ambiguous causal references are not populated (conservative extraction)",
+        "learnFact() and createPlaybook() accept optional rationale parameter",
+        "Existing extraction tests still pass"
+      ],
+      "files": [
+        "src/core/extractor.ts"
+      ],
+      "fast_checks": [
+        "npm run test"
+      ],
+      "dependencies": [
+        "t75"
+      ],
+      "priority": 40,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t85",
+      "desc": "Core context assembly provenance weighting: update association expansion during context assembly to prefer high-confidence edges. Confidence influences retrieval ranking but does not gate inclusion \u2014 all associations included, ordered by confidence.",
+      "acceptance_criteria": [
+        "Context assembly's association expansion weights results by edge confidence",
+        "High-confidence (extracted) edges ranked above low-confidence (inferred) edges",
+        "No edges excluded solely by confidence \u2014 all included but ordered",
+        "Existing context assembly tests still pass",
+        "New tests verifying provenance-aware ordering"
+      ],
+      "files": [
+        "src/core/context.ts"
+      ],
+      "fast_checks": [
+        "npm run test"
+      ],
+      "dependencies": [
+        "t74"
+      ],
+      "priority": 40,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t86",
+      "desc": "Core derived pipeline framework: produces typed outputs from reflection results \u2014 playbook candidates from repeated workflows, coding rule candidates from repeated constraints, anti-pattern candidates from failure patterns, project summaries from trusted hub facts. Each output is a draft requiring confirmation before trust pipeline promotion.",
+      "acceptance_criteria": [
+        "New file src/core/derived.ts with derive() function",
+        "Supports 4 output types: playbook_candidate, coding_rule, anti_pattern, project_summary",
+        "Each output carries provenance back to source knowledge IDs",
+        "Outputs enter trust pipeline as candidates, not automatic promotions",
+        "Pipeline framework extensible for custom derivation types",
+        "Clearly separated from reflection pass (reflection discovers, derivation materializes)",
+        "Unit tests in src/__tests__/derived.test.ts"
+      ],
+      "files": [
+        "src/core/derived.ts",
+        "src/__tests__/derived.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t66",
+        "t77"
+      ],
+      "priority": 40,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t87",
+      "desc": "Core custom facets: add tag filtering to retrieval search options, tag-based groupBy in markdown export, tag scoping in lint and graph report analysis. Tags are freeform strings supplementing knowledge_class, not replacing it.",
+      "acceptance_criteria": [
+        "Retrieval accepts optional tags filter in search options",
+        "Markdown export supports groupBy: 'tag' option",
+        "Lint report can scope analysis to specific tags",
+        "Graph report can scope analysis to specific tags",
+        "Tags do not affect trust scoring or lifecycle",
+        "System works identically when tags are absent"
+      ],
+      "files": [
+        "src/core/retrieval.ts",
+        "src/core/markdown-export.ts"
+      ],
+      "fast_checks": [
+        "npm run test"
+      ],
+      "dependencies": [
+        "t72",
+        "t83"
+      ],
+      "priority": 41,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t88",
+      "desc": "Core incremental alias discovery: during reflection pass, compare entity names across knowledge facts using normalized string similarity. Surface high-similarity pairs as AliasCandidate merge suggestions for operator confirmation. Conservative threshold to minimize false positives.",
+      "acceptance_criteria": [
+        "Alias discovery integrated into reflection pass (or callable independently)",
+        "Normalized string similarity comparison across entity names in knowledge base",
+        "High-similarity pairs surfaced as AliasCandidate suggestions",
+        "Candidates require operator/agent confirmation before adding to alias map",
+        "Conservative similarity threshold minimizes false positives",
+        "Unit tests for similarity detection and candidate generation"
+      ],
+      "files": [
+        "src/core/aliases.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t79"
+      ],
+      "priority": 41,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t89",
+      "desc": "Core ontology packs: optional OntologyConfig on MemoryManagerConfig with entity type definitions extending knowledge_class, relationship constraints validated during extraction, and validation rules surfaced in lint reports. Ontology relationships injected as extracted associations with confidence 1.0.",
+      "acceptance_criteria": [
+        "New file src/core/ontology.ts with ontology validation and application functions",
+        "OntologyConfig accepted on MemoryManagerConfig (optional)",
+        "Entity type definitions extend beyond built-in knowledge_class values",
+        "Relationship constraints validated during extraction",
+        "Violations surfaced in lint reports as warnings",
+        "Ontology shareable across scopes (workspace-level config)",
+        "System fully functional without ontology config",
+        "Unit tests in src/__tests__/ontology.test.ts"
+      ],
+      "files": [
+        "src/core/ontology.ts",
+        "src/__tests__/ontology.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t70",
+        "t79"
+      ],
+      "priority": 41,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t90",
+      "desc": "Core curation view: getCurationSummary() aggregates recent actions from maintenance (retired, expired, demoted), reflection (new patterns, promoted facts), ontology (merged entities, resolved aliases), and derived pipelines (produced candidates). Structured timeline with action type, affected entities, and explanation.",
+      "acceptance_criteria": [
+        "New file src/core/curation.ts with getCurationSummary() function",
+        "Aggregates actions from maintenance, reflection, ontology, and derived pipeline sources",
+        "Structured timeline format with action type, affected entities, explanation",
+        "Does not duplicate MaintenanceReport \u2014 extends and references it",
+        "Useful even before reflection and ontology are enabled (maintenance-only mode)",
+        "Compact enough for agent consumption, detailed enough for operator review",
+        "Unit tests in src/__tests__/curation.test.ts"
+      ],
+      "files": [
+        "src/core/curation.ts",
+        "src/__tests__/curation.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t67",
+        "t77",
+        "t86"
+      ],
+      "priority": 41,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t91",
+      "desc": "Core cluster summaries: community detection over association graph (Leiden or label propagation), per-cluster summary with top facts, cohesion score, and inter-cluster relationships. Surfaced as optional section in graph report. Clusters are computed on each analysis pass, not persisted.",
+      "acceptance_criteria": [
+        "New file src/core/cluster.ts with computeClusters() function",
+        "Community detection algorithm applied to association graph",
+        "Per-cluster summary includes top facts, cohesion score, inter-cluster relationships",
+        "Integrated as optional section in graph report output",
+        "Clusters computed on each pass (not persisted as durable identifiers)",
+        "Can inform retrieval expansion (related facts from same cluster)",
+        "Unit tests in src/__tests__/cluster.test.ts"
+      ],
+      "files": [
+        "src/core/cluster.ts",
+        "src/__tests__/cluster.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t82"
+      ],
+      "priority": 41,
+      "lane": "core",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t92",
+      "desc": "Wire all Phase 5 methods into MemoryManager interface and implementation: discover(), getGraphReport(), getFactsAt(), reflectOnKnowledge(), derive(), getCurationSummary(), getCoreMemory(), setAliases(), getAliases(), getAliasCandidates(), setOntology(), getOntology(), exportBundle(), importBundle(), refreshDocuments(). Delegation to respective core modules.",
+      "acceptance_criteria": [
+        "All 15+ new methods added to MemoryManager interface in src/core/manager.ts",
+        "Implementation delegates to respective core modules (discover.ts, graph-report.ts, temporal.ts, reflection.ts, derived.ts, curation.ts, core-memory.ts, aliases.ts, ontology.ts, bundles.ts, corpus-refresh.ts)",
+        "Existing MemoryManager tests still pass",
+        "New methods have unit test coverage for correct delegation"
+      ],
+      "files": [
+        "src/core/manager.ts",
+        "src/__tests__/manager.test.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t82",
+        "t83",
+        "t84",
+        "t85",
+        "t86",
+        "t87",
+        "t88",
+        "t89",
+        "t90",
+        "t91",
+        "t78",
+        "t80",
+        "t81"
+      ],
+      "priority": 42,
+      "lane": "core",
+      "parallel_safe": false,
+      "tranche_safe": false,
+      "done": true
+    },
+    {
+      "id": "t93",
+      "desc": "Phase 5 HTTP endpoints: GET /v1/discover, GET /v1/report, GET /v1/facts-at, POST /v1/reflect-knowledge, POST /v1/derive, GET /v1/curation, GET /v1/core-memory, POST /v1/aliases, GET /v1/aliases, GET /v1/alias-candidates, POST /v1/ontology, GET /v1/ontology, POST /v1/bundles/export, POST /v1/bundles/import, POST /v1/refresh-documents. Add tags query parameter to existing search/filter endpoints.",
+      "acceptance_criteria": [
+        "All 15+ new HTTP routes registered and functional",
+        "Tags parameter accepted on existing search and filter endpoints",
+        "Request validation and error handling consistent with existing endpoint patterns",
+        "Existing HTTP endpoint tests still pass",
+        "New endpoints return appropriate status codes and error messages"
+      ],
+      "files": [
+        "src/server/http-server.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t92"
+      ],
+      "priority": 43,
+      "lane": "server",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t94",
+      "desc": "Phase 5 MCP tools: memory_discover, memory_get_report, memory_get_facts_at, memory_reflect_knowledge, memory_derive, memory_get_curation, memory_get_core_memory, memory_set_aliases, memory_get_aliases, memory_get_alias_candidates, memory_set_ontology, memory_get_ontology, memory_export_bundle, memory_import_bundle, memory_refresh_documents. Add tags parameter to existing search tools.",
+      "acceptance_criteria": [
+        "All 15+ new MCP tools registered with correct parameter schemas",
+        "Tags parameter accepted on existing search and filter tools",
+        "Tool descriptions and parameter schemas follow existing MCP tool conventions",
+        "Existing MCP tool tests still pass"
+      ],
+      "files": [
+        "src/server/mcp-server.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t92"
+      ],
+      "priority": 43,
+      "lane": "server",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t95",
+      "desc": "OpenAPI spec updates for all Phase 5 endpoints: discover, report, facts-at, reflect-knowledge, derive, curation, core-memory, aliases, alias-candidates, ontology, bundles/export, bundles/import, refresh-documents. Add tags parameter to existing endpoint schemas.",
+      "acceptance_criteria": [
+        "All Phase 5 endpoints documented in openapi.yaml with request/response schemas",
+        "Request and response schemas match implementation types",
+        "Tags parameter documented on applicable existing endpoints",
+        "OpenAPI spec validates without errors"
+      ],
+      "files": [
+        "openapi.yaml"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t93"
+      ],
+      "priority": 44,
+      "lane": "docs",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t96",
+      "desc": "Phase 5 evals: discovery metrics (discover_surprise_quality, edge_provenance_ranking, graph_report_token_budget), temporal metrics (temporal_extraction_accuracy, facts_at_fast_path, time_formatting_quality), reflection metrics (reflection_pattern_quality, rationale_extraction_accuracy, derived_output_accuracy, curation_completeness), intelligence metrics (core_memory_token_budget, tag_filtering_accuracy, alias_resolution_quality, cluster_coherence).",
+      "acceptance_criteria": [
+        "New files: evals/memory-quality/discovery.mjs, temporal.mjs, reflection.mjs, intelligence.mjs",
+        "Discovery: surprise cross-class quality, provenance ranking, report under 2000 tokens",
+        "Temporal: extraction accuracy on temporal text, fast path usage, formatting correctness",
+        "Reflection: pattern discovery quality, rationale extraction, derived output accuracy, curation completeness",
+        "Intelligence: core memory under 1500 tokens, tag filtering, alias resolution, cluster coherence",
+        "All ~12 metrics registered in index.mjs, baselines updated in baseline.json"
+      ],
+      "files": [
+        "evals/memory-quality/discovery.mjs",
+        "evals/memory-quality/temporal.mjs",
+        "evals/memory-quality/reflection.mjs",
+        "evals/memory-quality/intelligence.mjs",
+        "evals/memory-quality/index.mjs",
+        "evals/memory-quality/baseline.json"
+      ],
+      "fast_checks": [
+        "npm run eval:memory-quality"
+      ],
+      "dependencies": [
+        "t82",
+        "t83",
+        "t84",
+        "t85",
+        "t86",
+        "t87",
+        "t88",
+        "t90",
+        "t91",
+        "t78"
+      ],
+      "priority": 44,
+      "lane": "evals",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t97",
+      "desc": "Export Phase 5 types from src/index.ts: DiscoverOptions, DiscoveryReport, SurpriseResult, GraphReport, GraphReportOptions, TemporalQueryOptions, FactsAtResult, ReflectOnKnowledgeOptions, KnowledgeReflectionResult, DerivedOutput, DeriveOptions, CurationSummary, CurationOptions, CoreMemoryBundle, CoreMemoryOptions, AliasMap, AliasConfig, AliasCandidate, OntologyConfig, MemoryBundle, BundleExportOptions, BundleImportOptions.",
+      "acceptance_criteria": [
+        "All Phase 5 contract types exported from src/index.ts",
+        "Imports reference the correct new contract files",
+        "npm run lint passes",
+        "No circular dependency issues"
+      ],
+      "files": [
+        "src/index.ts"
+      ],
+      "fast_checks": [
+        "npm run lint"
+      ],
+      "dependencies": [
+        "t61",
+        "t62",
+        "t63",
+        "t64",
+        "t65",
+        "t66",
+        "t67",
+        "t68",
+        "t69",
+        "t70",
+        "t71"
+      ],
+      "priority": 44,
+      "lane": "contracts",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t98",
+      "desc": "Framework integration passthrough for Phase 5 features: pass discover, report, reflection, core-memory, and alias options through claude-agent, vercel-ai, and middleware integrations.",
+      "acceptance_criteria": [
+        "Phase 5 options accepted and passed through in claude-agent.ts",
+        "Phase 5 options accepted and passed through in vercel-ai.ts",
+        "Phase 5 options accepted and passed through in middleware.ts",
+        "Existing integration tests still pass"
+      ],
+      "files": [
+        "src/integrations/claude-agent.ts",
+        "src/integrations/vercel-ai.ts",
+        "src/integrations/middleware.ts"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t92"
+      ],
+      "priority": 44,
+      "lane": "integrations",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t99",
+      "desc": "Python client for Phase 5 APIs: discover, get_report, get_facts_at, reflect_on_knowledge, derive, get_curation_summary, get_core_memory, set_aliases, get_aliases, get_alias_candidates, set_ontology, get_ontology, export_bundle, import_bundle, refresh_documents methods on client classes.",
+      "acceptance_criteria": [
+        "Phase 5 Pydantic models added to models.py",
+        "15+ methods on MemoryRuntimeClient and AsyncMemoryRuntimeClient",
+        "Methods hit correct HTTP endpoints defined in t93",
+        "Python lint passes"
+      ],
+      "files": [
+        "clients/python/memory_layer_client/models.py",
+        "clients/python/memory_layer_client/client.py",
+        "clients/python/memory_layer_client/runtime.py"
+      ],
+      "fast_checks": null,
+      "dependencies": [
+        "t93",
+        "t94"
+      ],
+      "priority": 45,
+      "lane": "python",
+      "parallel_safe": true,
+      "tranche_safe": true,
+      "done": true
+    },
+    {
+      "id": "t100",
+      "desc": "Phase 5 final verification + release gate: all tests, all evals (~38 metrics), platform quality, memory quality delta, full release:check.",
+      "acceptance_criteria": [
+        "npm run test passes (all existing + Phase 5 unit tests)",
+        "npm run eval:memory-quality passes (~38 metrics all green)",
+        "npm run eval:memory-quality:delta shows no regression from baseline",
+        "npm run eval:platform-quality passes",
+        "npm run release:check passes (full gate)"
+      ],
+      "files": [],
+      "fast_checks": [
+        "npm run release:check"
+      ],
+      "dependencies": [
+        "t93",
+        "t94",
+        "t95",
+        "t96",
+        "t97",
+        "t98",
+        "t99"
+      ],
+      "priority": 46,
       "lane": "verification",
       "parallel_safe": false,
       "tranche_safe": false,

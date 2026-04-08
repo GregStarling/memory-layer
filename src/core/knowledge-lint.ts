@@ -2,6 +2,8 @@ import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type { MemoryScope } from '../contracts/identity.js';
 import type { KnowledgeMemory } from '../contracts/types.js';
 import type { LintOptions, LintReport, LintIssue, LintCategory } from '../contracts/lint.js';
+import type { OntologyConfig } from '../contracts/ontology.js';
+import { checkOntologyViolations } from './ontology.js';
 
 const DEFAULT_MAX_ISSUES = 100;
 const DEFAULT_MIN_ORPHAN_AGE_DAYS = 7;
@@ -210,6 +212,7 @@ export async function lintKnowledge(
   adapter: AsyncStorageAdapter,
   scope: MemoryScope,
   options?: LintOptions,
+  ontology?: OntologyConfig,
 ): Promise<LintReport> {
   const maxIssues = options?.maxIssues ?? DEFAULT_MAX_ISSUES;
   const minOrphanAgeDays = options?.minOrphanAgeDays ?? DEFAULT_MIN_ORPHAN_AGE_DAYS;
@@ -217,8 +220,14 @@ export async function lintKnowledge(
 
   const shouldRun = (cat: LintCategory) => !categories || categories.includes(cat);
 
-  // Fetch all active knowledge
-  const knowledge = await adapter.getActiveKnowledgeMemory(scope);
+  // Fetch all active knowledge, optionally scoped by tags
+  let knowledge = await adapter.getActiveKnowledgeMemory(scope);
+  if (options?.filterByTags && options.filterByTags.length > 0) {
+    const tagFilter = options.filterByTags;
+    knowledge = knowledge.filter((km) =>
+      tagFilter.some((tag) => km.tags.includes(tag)),
+    );
+  }
   const stats = computeStats(knowledge);
 
   let allIssues: LintIssue[] = [];
@@ -255,6 +264,11 @@ export async function lintKnowledge(
 
   if (shouldRun('stale_provisional')) {
     allIssues.push(...checkStaleProvisional(knowledge));
+  }
+
+  if (shouldRun('ontology_violation') && ontology) {
+    const associations = await adapter.listAssociations(scope);
+    allIssues.push(...checkOntologyViolations(knowledge, associations, ontology));
   }
 
   // Apply category filter (in case we fetched associations for contradictions but not orphans)

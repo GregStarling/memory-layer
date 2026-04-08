@@ -1019,10 +1019,10 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           return;
         }
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const results = await requestManager.search(
-          query.q,
-          query.limit ? { limit: parseLimit(query.limit) } : undefined,
-        );
+        const searchOpts: import('../contracts/types.js').SearchOptions = {};
+        if (query.limit) searchOpts.limit = parseLimit(query.limit);
+        if (query.tags) searchOpts.tags = query.tags.split(',');
+        const results = await requestManager.search(query.q, searchOpts);
         writeJson(res, 200, {
           turns: results.turns.map((r) => ({
             id: r.item.id,
@@ -1052,10 +1052,13 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           'system',
           'tenant',
         ]) ?? 'workspace';
+        const crossOpts: import('../contracts/types.js').SearchOptions = {};
+        if (query.limit) crossOpts.limit = parseLimit(query.limit);
+        if (query.tags) crossOpts.tags = query.tags.split(',');
         const results = await requestManager.searchCrossScope(
           query.q,
           scopeLevel,
-          query.limit ? { limit: parseLimit(query.limit) } : undefined,
+          crossOpts,
         );
         writeJson(res, 200, {
           knowledge: results.knowledge.map((r) => ({
@@ -1490,24 +1493,38 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // GET /v1/changes
       if (path === '/v1/changes' && req.method === 'GET') {
         const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const cursor = parseOptionalTemporalId(query.cursor);
         const sinceValue = query.since ? new Date(query.since) : new Date(0);
-        if (Number.isNaN(sinceValue.valueOf())) {
+        if (cursor == null && Number.isNaN(sinceValue.valueOf())) {
           writeError(res, 400, 'Invalid since parameter');
           return;
         }
-        const changes = await requestManager.pollForChanges(sinceValue, {
+        const page = await requestManager.listKnowledgeChanges({
+          cursor,
+          since: cursor == null ? sinceValue : undefined,
           scopeLevel: parseScopeLevel(query.scope_level, 'scope_level') ?? 'scope',
         });
         writeJson(res, 200, {
-          changes: changes.map((knowledge) => ({
-            id: knowledge.id,
-            fact: knowledge.fact,
-            fact_type: knowledge.fact_type,
-            knowledge_state: knowledge.knowledge_state,
-            scope_id: knowledge.scope_id,
-            collaboration_id: knowledge.collaboration_id,
-            created_at: knowledge.created_at,
+          changes: page.changes.map((change) => ({
+            event_id: change.event_id,
+            event_type: change.event_type,
+            change_at: change.created_at,
+            id: change.knowledge.id,
+            fact: change.knowledge.fact,
+            fact_type: change.knowledge.fact_type,
+            knowledge_state: change.knowledge.knowledge_state,
+            verification_status: change.knowledge.verification_status,
+            trust_score: change.knowledge.trust_score,
+            workspace_id: change.knowledge.workspace_id,
+            scope_id: change.knowledge.scope_id,
+            retired_at: change.knowledge.retired_at,
+            superseded_at: change.knowledge.superseded_at,
+            superseded_by_id: change.knowledge.superseded_by_id,
+            created_at: change.knowledge.created_at,
+            last_accessed_at: change.knowledge.last_accessed_at,
+            collaboration_id: change.knowledge.collaboration_id,
           })),
+          nextCursor: page.nextCursor,
         });
         return;
       }
@@ -1926,6 +1943,207 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         touchSnapshot(`${scopeKey}:${sessionId}`, snapshot);
         const { scopeKey: _scopeKey, ...publicSnapshot } = snapshot;
         writeJson(res, 200, { snapshot: { ...publicSnapshot, sessionId } });
+        return;
+      }
+
+      // ========= Phase 5 Endpoints =========
+
+      // GET /v1/discover
+      if (path === '/v1/discover' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const maxResults = parseOptionalFiniteInteger(query.max_results, { name: 'max_results', min: 0 }, failHttpValidation);
+        const minScore = parseOptionalFiniteNumber(query.min_score, { name: 'min_score' }, failHttpValidation);
+        const maxDepth = parseOptionalFiniteInteger(query.max_depth, { name: 'max_depth', min: 0 }, failHttpValidation);
+        const report = await requestManager.discover({
+          maxResults: maxResults ?? undefined,
+          minSurpriseScore: minScore ?? undefined,
+          maxDepth: maxDepth ?? undefined,
+        });
+        writeJson(res, 200, report);
+        return;
+      }
+
+      // GET /v1/report
+      if (path === '/v1/report' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const report = await requestManager.getGraphReport({
+          tokenBudget: parseOptionalInteger(query.token_budget) ?? undefined,
+          includeSections: query.sections ? query.sections.split(',') : undefined,
+          filterByTags: query.tags ? query.tags.split(',') : undefined,
+        });
+        writeJson(res, 200, report);
+        return;
+      }
+
+      // GET /v1/facts-at
+      if (path === '/v1/facts-at' && req.method === 'GET') {
+        const timestamp = parseOptionalFiniteNumber(query.timestamp, { name: 'timestamp' }, failHttpValidation);
+        if (timestamp == null) {
+          writeError(res, 400, 'Missing or invalid timestamp parameter');
+          return;
+        }
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const result = await requestManager.getFactsAt(timestamp);
+        writeJson(res, 200, result);
+        return;
+      }
+
+      // POST /v1/reflect-knowledge
+      if (path === '/v1/reflect-knowledge' && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const result = await requestManager.reflectOnKnowledge({
+          maxFacts: typeof body.maxFacts === 'number' ? body.maxFacts : undefined,
+          includePlaybooks: typeof body.includePlaybooks === 'boolean' ? body.includePlaybooks : undefined,
+          rateLimitKey: typeof body.rateLimitKey === 'string' ? body.rateLimitKey : undefined,
+        });
+        writeJson(res, 200, result);
+        return;
+      }
+
+      // POST /v1/derive
+      if (path === '/v1/derive' && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const outputs = await requestManager.derive({
+          outputTypes: Array.isArray(body.outputTypes) ? body.outputTypes : undefined,
+          maxOutputs: typeof body.maxOutputs === 'number' ? body.maxOutputs : undefined,
+        });
+        writeJson(res, 200, { outputs });
+        return;
+      }
+
+      // GET /v1/curation
+      if (path === '/v1/curation' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const summary = await requestManager.getCurationSummary(undefined, {
+          since: parseOptionalFiniteNumber(query.since, { name: 'since' }, failHttpValidation) ?? undefined,
+          limit: parseOptionalInteger(query.limit) ?? undefined,
+          actionTypes: query.action_types ? query.action_types.split(',') as import('../contracts/curation.js').CurationActionType[] : undefined,
+        });
+        writeJson(res, 200, summary);
+        return;
+      }
+
+      // GET /v1/core-memory
+      if (path === '/v1/core-memory' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const bundle = await requestManager.getCoreMemory({
+          tokenBudget: parseOptionalInteger(query.token_budget) ?? undefined,
+        });
+        writeJson(res, 200, bundle);
+        return;
+      }
+
+      // POST /v1/aliases
+      if (path === '/v1/aliases' && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        if (!isRecord(body.aliasMap)) {
+          writeError(res, 400, 'Missing or invalid field: aliasMap');
+          return;
+        }
+        requestManager.setAliases(body.aliasMap as import('../contracts/aliases.js').AliasMap);
+        writeJson(res, 200, { ok: true });
+        return;
+      }
+
+      // GET /v1/aliases
+      if (path === '/v1/aliases' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const aliases = requestManager.getAliases();
+        writeJson(res, 200, { aliasMap: aliases ?? {} });
+        return;
+      }
+
+      // GET /v1/alias-candidates
+      if (path === '/v1/alias-candidates' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const candidates = await requestManager.getAliasCandidates({
+          threshold: parseOptionalFiniteNumber(query.min_similarity, { name: 'min_similarity' }, failHttpValidation) ?? undefined,
+          maxCandidates: parseOptionalInteger(query.max_candidates) ?? undefined,
+        });
+        writeJson(res, 200, { candidates });
+        return;
+      }
+
+      // POST /v1/ontology
+      if (path === '/v1/ontology' && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        if (!isRecord(body.ontology)) {
+          writeError(res, 400, 'Missing or invalid field: ontology');
+          return;
+        }
+        requestManager.setOntology(body.ontology as unknown as import('../contracts/ontology.js').OntologyConfig);
+        writeJson(res, 200, { ok: true });
+        return;
+      }
+
+      // GET /v1/ontology
+      if (path === '/v1/ontology' && req.method === 'GET') {
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const ontology = requestManager.getOntology();
+        writeJson(res, 200, { ontology: ontology ?? null });
+        return;
+      }
+
+      // POST /v1/bundles/export
+      if (path === '/v1/bundles/export' && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const name = requireString(body.name, 'name');
+        const result = requestManager.exportBundle(name, {
+          knowledgeClassFilter: Array.isArray(body.knowledgeClassFilter) ? body.knowledgeClassFilter : undefined,
+          includeTags: Array.isArray(body.includeTags) ? body.includeTags : undefined,
+        });
+        writeJson(res, 200, result);
+        return;
+      }
+
+      // POST /v1/bundles/import
+      if (path === '/v1/bundles/import' && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        if (!isRecord(body.bundle)) {
+          writeError(res, 400, 'Missing or invalid field: bundle');
+          return;
+        }
+        const resolution = requireEnum(
+          body.conflictResolution ?? 'skip',
+          ['skip', 'overwrite', 'merge', 'trust_higher'],
+          'conflictResolution',
+        );
+        const result = requestManager.importBundle(
+          body.bundle as unknown as import('../contracts/bundles.js').MemoryBundle,
+          {
+            conflictResolution: resolution as import('../contracts/bundles.js').BundleConflictResolution,
+            targetScope: resolveRequestScope(config.scope, req, query, body) as MemoryScope,
+            preserveTrust: body.preserveTrust === true,
+          },
+        );
+        writeJson(res, 200, result);
+        return;
+      }
+
+      // POST /v1/refresh-documents
+      if (path === '/v1/refresh-documents' && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        if (!Array.isArray(body.documents)) {
+          writeError(res, 400, 'Missing or invalid field: documents');
+          return;
+        }
+        const documents = body.documents.map((d: unknown) => {
+          if (!isRecord(d)) throw new HttpRequestError(400, 'Each document must be an object');
+          return {
+            title: requireString(d.title, 'documents[].title'),
+            contentHash: requireString(d.contentHash, 'documents[].contentHash'),
+            content: typeof d.content === 'string' ? d.content : undefined,
+          };
+        });
+        const result = requestManager.refreshDocuments(documents);
+        writeJson(res, 200, result);
         return;
       }
 

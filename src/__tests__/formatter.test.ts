@@ -148,4 +148,46 @@ describe('formatter helpers', () => {
     expect(text).toContain('status=verified');
     expect(text).toContain('state=trusted');
   });
+
+  it('appends temporal qualifier for fact with valid_from', () => {
+    const ctx = makeContext();
+    // epoch for 2025-03-01 UTC
+    const march1 = Math.floor(Date.UTC(2025, 2, 1) / 1000);
+    (ctx.trustedCoreMemory[0] as Record<string, unknown>).valid_from = march1;
+    (ctx.trustedCoreMemory[0] as Record<string, unknown>).valid_until = null;
+    const text = formatContextForPrompt(ctx);
+    expect(text).toContain('In effect starting 2025-03-01');
+  });
+
+  it('appends temporal qualifier for fact with valid_until', () => {
+    const ctx = makeContext();
+    const dec31 = Math.floor(Date.UTC(2025, 11, 31) / 1000);
+    (ctx.trustedCoreMemory[0] as Record<string, unknown>).valid_from = null;
+    (ctx.trustedCoreMemory[0] as Record<string, unknown>).valid_until = dec31;
+    const text = formatContextForPrompt(ctx);
+    expect(text).toContain('Valid until 2025-12-31');
+  });
+
+  it('appends temporal qualifier for fact with both valid_from and valid_until', () => {
+    const ctx = makeContext();
+    const march1 = Math.floor(Date.UTC(2025, 2, 1) / 1000);
+    const june30 = Math.floor(Date.UTC(2025, 5, 30) / 1000);
+    (ctx.trustedCoreMemory[0] as Record<string, unknown>).valid_from = march1;
+    (ctx.trustedCoreMemory[0] as Record<string, unknown>).valid_until = june30;
+    const text = formatContextForPrompt(ctx);
+    expect(text).toContain('Valid 2025-03-01');
+    expect(text).toContain('2025-06-30');
+  });
+
+  it('does not append temporal qualifier when both are null', () => {
+    const ctx = makeContext();
+    (ctx.trustedCoreMemory[0] as Record<string, unknown>).valid_from = null;
+    (ctx.trustedCoreMemory[0] as Record<string, unknown>).valid_until = null;
+    const text = formatContextForPrompt(ctx);
+    expect(text).not.toContain('Valid until');
+    expect(text).not.toContain('In effect');
+    // Fact should render without brackets (no other options enabled)
+    expect(text).toContain('- The project uses sqlite');
+    expect(text).not.toContain('[');
+  });
 });

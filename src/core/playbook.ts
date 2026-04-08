@@ -28,6 +28,7 @@ export interface CreatePlaybookFromTaskInput {
   description: string;
   sessionId: string;
   tags?: string[];
+  rationale?: string | null;
   sourceWorkingMemoryId?: number | null;
 }
 
@@ -37,7 +38,8 @@ Return strict JSON matching this shape:
   "instructions": "step-by-step instructions for repeating this task",
   "references": ["files, commands, URLs, or tools referenced"],
   "templates": ["reusable templates or patterns identified"],
-  "scripts": ["commands or scripts used"]
+  "scripts": ["commands or scripts used"],
+  "rationale": "why this procedure works (only when reasoning is clearly present), or null"
 }
 Rules:
 - instructions should be a clear, numbered step-by-step procedure.
@@ -45,19 +47,70 @@ Rules:
 - References should be specific (file paths, URLs, command names).
 - Templates should be reusable patterns, not one-off details.
 - Scripts should be exact commands that could be re-run.
+- Only populate rationale when the task context clearly explains reasoning.
 - Return JSON only.`;
 
 function extractJsonPayload(text: string): string {
   const trimmed = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
-  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-    return trimmed;
-  }
-  const objectStart = text.indexOf('{');
-  const objectEnd = text.lastIndexOf('}');
-  if (objectStart !== -1 && objectEnd > objectStart) {
-    return text.slice(objectStart, objectEnd + 1);
+  const exactCandidate = extractBalancedJson(trimmed);
+  if (exactCandidate) {
+    return exactCandidate;
   }
   throw new Error('Playbook: response did not contain JSON');
+}
+
+function extractBalancedJson(text: string): string | null {
+  let startIndex = -1;
+  let opening = '';
+  let closing = '';
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === '{' || text[i] === '[') {
+      startIndex = i;
+      opening = text[i];
+      closing = opening === '{' ? '}' : ']';
+      break;
+    }
+  }
+  if (startIndex === -1) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = startIndex; i < text.length; i += 1) {
+    const char = text[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === opening) {
+      depth += 1;
+      continue;
+    }
+    if (char === closing) {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(startIndex, i + 1);
+      }
+    }
+  }
+  return null;
 }
 
 interface PlaybookExtraction {
@@ -65,6 +118,7 @@ interface PlaybookExtraction {
   references: string[];
   templates: string[];
   scripts: string[];
+  rationale: string | null;
 }
 
 function parsePlaybookExtraction(text: string): PlaybookExtraction {
@@ -78,6 +132,7 @@ function parsePlaybookExtraction(text: string): PlaybookExtraction {
     references: Array.isArray(raw.references) ? raw.references.filter((r: unknown) => typeof r === 'string' && r.trim()).map(String) : [],
     templates: Array.isArray(raw.templates) ? raw.templates.filter((t: unknown) => typeof t === 'string' && t.trim()).map(String) : [],
     scripts: Array.isArray(raw.scripts) ? raw.scripts.filter((s: unknown) => typeof s === 'string' && s.trim()).map(String) : [],
+    rationale: typeof raw.rationale === 'string' && raw.rationale.trim() ? raw.rationale.trim() : null,
   };
 }
 
@@ -146,6 +201,7 @@ export async function createPlaybookFromTask(
     templates: extraction.templates,
     scripts: extraction.scripts,
     tags: input.tags,
+    rationale: input.rationale ?? extraction.rationale ?? null,
     status: 'active',
     source_session_id: input.sessionId,
     source_working_memory_id: input.sourceWorkingMemoryId ?? null,

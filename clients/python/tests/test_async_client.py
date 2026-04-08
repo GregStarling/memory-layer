@@ -45,7 +45,7 @@ async def test_async_client_can_stream_events(httpx_mock) -> None:
     httpx_mock.add_response(
         method="GET",
         url="http://test/v1/events?event_types=knowledge_change&scope_level=workspace&tenant_id=acme&system_id=executor&scope_id=run-b&workspace_id=factory&collaboration_id=release-42",
-        text='data: {"type":"knowledge_change","scope":{"tenant_id":"acme"},"timestamp":1,"durationMs":0,"meta":{"action":"promote"}}\n\n',
+        text='data: {"type":"connected"}\n\ndata: {"type":"knowledge_change","scope":{"tenant_id":"acme"},"timestamp":1,"durationMs":0,"meta":{"action":"promote"}}\n\n',
         headers={"content-type": "text/event-stream"},
     )
 
@@ -59,6 +59,32 @@ async def test_async_client_can_stream_events(httpx_mock) -> None:
 
     assert events[0].type == "knowledge_change"
     assert events[0].meta["action"] == "promote"
+
+
+@pytest.mark.asyncio
+async def test_async_client_can_poll_changes_by_cursor(httpx_mock) -> None:
+    scope = _scope()
+    httpx_mock.add_response(
+        method="GET",
+        url="http://test/v1/changes?cursor=23&scope_level=workspace&tenant_id=acme&system_id=executor&scope_id=run-b&workspace_id=factory&collaboration_id=release-42",
+        json={
+            "changes": [
+                {
+                    "event_id": "24",
+                    "event_type": "knowledge.updated",
+                    "id": 9,
+                    "fact": "rollback",
+                }
+            ],
+            "nextCursor": "24",
+        },
+    )
+
+    async with AsyncMemoryClient("http://test", default_scope=scope) as client:
+        changes = await client.poll_changes(cursor=23, scope_level="workspace")
+
+    assert changes.changes[0]["event_type"] == "knowledge.updated"
+    assert changes.next_cursor == "24"
 
 
 @pytest.mark.asyncio

@@ -1,3 +1,5 @@
+import type { AliasMap } from '../contracts/aliases.js';
+import type { OntologyConfig } from '../contracts/ontology.js';
 import type { EmbeddingAdapter, EmbeddingGenerator } from '../contracts/embedding.js';
 import type {
   ActorRef,
@@ -133,7 +135,27 @@ import {
   normalizeReplayedTemporalState,
   normalizeHandoffAt,
   normalizeWorkClaimAt,
+  getFactsAt,
 } from './temporal.js';
+import { discover } from './discover.js';
+import { getGraphReport } from './graph-report.js';
+import { reflectOnKnowledge } from './reflection.js';
+import { derive } from './derived.js';
+import { getCurationSummary, type CurationInput } from './curation.js';
+import { getCoreMemory } from './core-memory.js';
+import { discoverAliasCandidates } from './aliases.js';
+import { exportBundle, importBundle, type ExportBundleResult, type ImportBundleResult } from './bundles.js';
+import { refreshDocuments, type DocumentDescriptor, type RefreshResult } from './corpus-refresh.js';
+import type { DiscoverOptions, DiscoveryReport } from '../contracts/discovery.js';
+import type { GraphReportOptions, GraphReport } from '../contracts/graph-report.js';
+import type { TemporalQueryOptions, FactsAtResult } from '../contracts/temporal-query.js';
+import type { ReflectOnKnowledgeOptions, KnowledgeReflectionResult } from '../contracts/reflection.js';
+import type { DeriveOptions, DerivedOutput } from '../contracts/derived.js';
+import type { CurationOptions, CurationSummary } from '../contracts/curation.js';
+import type { CoreMemoryOptions, CoreMemoryBundle } from '../contracts/core-memory.js';
+import type { AliasCandidate } from '../contracts/aliases.js';
+import type { BundleExportOptions, BundleImportOptions, MemoryBundle } from '../contracts/bundles.js';
+import type { DiscoverAliasCandidatesOptions } from './aliases.js';
 
 export interface MemoryManagerConfig {
   /** Synchronous storage adapter (SQLite, in-memory). Mutually exclusive with asyncAdapter. */
@@ -169,6 +191,20 @@ export interface MemoryManagerConfig {
   redactText?: (input: { kind: 'turn' | 'fact' | 'work_item'; text: string }) => string;
   structuredClient?: StructuredGenerationClient;
   closeAdapter?: boolean;
+  aliasMap?: AliasMap;
+  ontology?: OntologyConfig;
+}
+
+export interface KnowledgeChangeRecord {
+  event_id: TemporalId;
+  event_type: MemoryEventRecord['event_type'];
+  created_at: number;
+  knowledge: KnowledgeMemory;
+}
+
+export interface KnowledgeChangeResult {
+  changes: KnowledgeChangeRecord[];
+  nextCursor: TemporalId;
 }
 
 export interface MemoryManager {
@@ -285,9 +321,15 @@ export interface MemoryManager {
     level: ScopeLevel,
     options?: SearchOptions,
   ): Promise<{ knowledge: SearchResult<KnowledgeMemory>[] }>;
+  listKnowledgeChanges(options?: {
+    cursor?: TemporalIdInput;
+    since?: Date;
+    scopeLevel?: ScopeLevel;
+    limit?: number;
+  }): Promise<KnowledgeChangeResult>;
   pollForChanges(since: Date, options?: { scopeLevel?: ScopeLevel }): Promise<KnowledgeMemory[]>;
   forceCompact(): Promise<CompactionResult | null>;
-  learnFact(fact: string, factType: FactType, confidence?: FactConfidence): Promise<KnowledgeMemory>;
+  learnFact(fact: string, factType: FactType, confidence?: FactConfidence, rationale?: string | null): Promise<KnowledgeMemory>;
   trackWorkItem(
     title: string,
     kind?: WorkItem['kind'],
@@ -402,6 +444,24 @@ export interface MemoryManager {
   listSourceDocuments(options?: PaginationOptions): Promise<PaginatedResult<import('../contracts/types.js').SourceDocument>>;
   exportAsMarkdown(options?: import('../contracts/export.js').MarkdownExportOptions): Promise<import('../contracts/export.js').MarkdownExportResult>;
   promoteResponse(turnId: number, options?: { factTypes?: FactType[]; minConfidence?: FactConfidence }): Promise<KnowledgeMemory[]>;
+
+  // Phase 5 methods
+  discover(options?: DiscoverOptions): Promise<DiscoveryReport>;
+  getGraphReport(options?: GraphReportOptions): Promise<GraphReport>;
+  getFactsAt(timestamp: number, options?: Partial<Omit<TemporalQueryOptions, 'timestamp' | 'scope'>>): Promise<FactsAtResult>;
+  reflectOnKnowledge(options?: ReflectOnKnowledgeOptions): Promise<KnowledgeReflectionResult>;
+  derive(options?: DeriveOptions): Promise<DerivedOutput[]>;
+  getCurationSummary(input?: Partial<CurationInput>, options?: CurationOptions): Promise<CurationSummary>;
+  getCoreMemory(options?: CoreMemoryOptions): Promise<CoreMemoryBundle>;
+  setAliases(aliasMap: AliasMap): void;
+  getAliases(): AliasMap | undefined;
+  getAliasCandidates(options?: DiscoverAliasCandidatesOptions): Promise<AliasCandidate[]>;
+  setOntology(ontology: OntologyConfig): void;
+  getOntology(): OntologyConfig | undefined;
+  exportBundle(name: string, options?: Partial<BundleExportOptions>): ExportBundleResult;
+  importBundle(bundle: MemoryBundle, options: BundleImportOptions): ImportBundleResult;
+  refreshDocuments(documents: DocumentDescriptor[]): RefreshResult;
+
   close(): Promise<void>;
 }
 
@@ -571,6 +631,14 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     extractor: createCircuitBreaker(config.circuitBreaker?.extractor),
     embeddings: createCircuitBreaker(config.circuitBreaker?.embeddings),
   };
+
+  // Cache last maintenance/reflection results for curation summary auto-population
+  let lastMaintenanceReport: import('./maintenance.js').MaintenanceReport | undefined;
+  let lastMaintenanceTimestamp: number | undefined;
+  let lastReflectionResult: import('../contracts/reflection.js').KnowledgeReflectionResult | undefined;
+  let lastReflectionTimestamp: number | undefined;
+  let lastDerivedOutputs: import('../contracts/derived.js').DerivedOutput[] | undefined;
+  let lastDerivedTimestamp: number | undefined;
 
   const onEvent: EventHook = (event) => {
     config.onEvent?.(event);
@@ -1088,6 +1156,112 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     return (await asyncAdapter.getTemporalWatermark('temporal'))?.last_event_id ?? '0';
   }
 
+  function isKnowledgeChangeEvent(event: MemoryEventRecord): boolean {
+    return (
+      event.entity_kind === 'knowledge_memory' &&
+      event.event_type !== 'knowledge.touched'
+    );
+  }
+
+  function normalizeKnowledgeChangeSnapshot(knowledge: KnowledgeMemory): KnowledgeMemory {
+    return {
+      ...knowledge,
+      ...normalizeScope(knowledge),
+      source_collaboration_id:
+        knowledge.source_collaboration_id === 'default'
+          ? ''
+          : knowledge.source_collaboration_id,
+    };
+  }
+
+  async function materializeKnowledgeChanges(
+    events: MemoryEventRecord[],
+  ): Promise<KnowledgeChangeRecord[]> {
+    const changes: KnowledgeChangeRecord[] = [];
+    for (const event of events) {
+      if (!isKnowledgeChangeEvent(event)) continue;
+      const after =
+        event.payload.after &&
+        typeof event.payload.after === 'object' &&
+        !Array.isArray(event.payload.after)
+          ? (event.payload.after as KnowledgeMemory)
+          : null;
+      const knowledge =
+        after ??
+        (Number.isInteger(Number(event.entity_id))
+          ? await asyncAdapter.getKnowledgeMemoryById(Number(event.entity_id))
+          : null);
+      if (!knowledge) continue;
+      changes.push({
+        event_id: event.event_id,
+        event_type: event.event_type,
+        created_at: event.created_at,
+        knowledge: normalizeKnowledgeChangeSnapshot(knowledge),
+      });
+    }
+    return changes;
+  }
+
+  async function listKnowledgeChangesInternal(options?: {
+    cursor?: TemporalIdInput;
+    since?: Date;
+    scopeLevel?: ScopeLevel;
+    limit?: number;
+  }): Promise<KnowledgeChangeResult> {
+    const scopeLevel = options?.scopeLevel ?? config.crossScopeLevel ?? 'scope';
+    const limit = options?.limit ?? 100;
+    const since = options?.since ? Math.floor(options.since.valueOf() / 1000) : undefined;
+    const explicitCursor = options?.cursor != null ? normalizeTemporalId(options.cursor) : null;
+
+    if (explicitCursor == null && since == null) {
+      return {
+        changes: [],
+        nextCursor: await resolveChangeStreamCursorInternal(),
+      };
+    }
+
+    let cursor = explicitCursor;
+    const changes: KnowledgeChangeRecord[] = [];
+
+    for (;;) {
+      const timeline =
+        scopeLevel === 'scope'
+          ? await asyncAdapter.listMemoryEvents(config.scope, {
+              cursor: cursor ?? undefined,
+              entityKind: 'knowledge_memory',
+              startAt: since,
+              limit,
+            })
+          : await asyncAdapter.listMemoryEventsCrossScope(config.scope, scopeLevel, {
+              cursor: cursor ?? undefined,
+              entityKind: 'knowledge_memory',
+              startAt: since,
+              limit,
+            });
+
+      const timelineCursor =
+        timeline.events[timeline.events.length - 1]?.event_id ??
+        timeline.nextCursor ??
+        cursor ??
+        (since != null ? await resolveChangeStreamCursorInternal() : '0');
+
+      changes.push(...(await materializeKnowledgeChanges(timeline.events)));
+
+      if (explicitCursor != null || timeline.nextCursor == null) {
+        return {
+          changes,
+          nextCursor: timelineCursor,
+        };
+      }
+
+      if (cursor != null && compareTemporalIds(timeline.nextCursor, cursor) <= 0) {
+        throw new ValidationError('Memory validation: change cursor did not advance');
+      }
+
+      cursor = timeline.nextCursor;
+    }
+  }
+
   async function buildReplayedContext(
     asOf: number,
     relevanceQuery?: string,
@@ -1253,6 +1427,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
               logger: config.logger,
               onEvent,
               policy: config.extractionPolicy,
+              aliasMap: config.aliasMap,
             },
           ),
         () => [] as KnowledgeMemory[],
@@ -1589,12 +1764,22 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       };
     },
 
+    async listKnowledgeChanges(options) {
+      return listKnowledgeChangesInternal(options);
+    },
+
     async pollForChanges(since, options) {
-      return asyncAdapter.getKnowledgeSince(
-        config.scope,
-        options?.scopeLevel ?? config.crossScopeLevel ?? 'scope',
-        Math.floor(since.valueOf() / 1000),
-      );
+      const result = await listKnowledgeChangesInternal({
+        since,
+        scopeLevel: options?.scopeLevel,
+        limit: 500,
+      });
+      const latestByKnowledgeId = new Map<number, KnowledgeMemory>();
+      for (const change of result.changes) {
+        latestByKnowledgeId.delete(change.knowledge.id);
+        latestByKnowledgeId.set(change.knowledge.id, change.knowledge);
+      }
+      return [...latestByKnowledgeId.values()];
     },
 
     async forceCompact() {
@@ -1626,7 +1811,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       );
     },
 
-    async learnFact(fact, factType, confidence = 'high') {
+    async learnFact(fact, factType, confidence = 'high', rationale) {
       const knowledge = await asyncAdapter.insertKnowledgeMemory({
         ...config.scope,
         fact: config.redactText ? config.redactText({ kind: 'fact', text: fact }) : fact,
@@ -1634,6 +1819,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         knowledge_class: manualKnowledgeClassForFactType(factType),
         source: 'manual',
         confidence,
+        rationale: rationale ?? null,
       });
       await maybeEmbedKnowledge([knowledge]);
       emitMemoryEvent('manager', config.scope, { logger: config.logger, onEvent }, 0, {
@@ -1980,6 +2166,8 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         demotedKnowledgeCount: report.demotedKnowledgeIds.length,
       });
       await refreshSessionStateProjection();
+      lastMaintenanceReport = report;
+      lastMaintenanceTimestamp = Math.floor(Date.now() / 1000);
       return report;
     },
 
@@ -2172,9 +2360,15 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       await assertAssociationEndpointInScope(
         asyncAdapter, norm, input.target_kind, input.target_id, 'target',
       );
+      // When the caller does not specify provenance, infer from auto_generated:
+      // user-created (non-auto) edges are 'extracted' with full confidence.
+      const provenance = input.provenance ?? (input.auto_generated ? 'inferred' : 'extracted');
+      const confidence = input.confidence ?? (input.auto_generated ? 0.8 : 1.0);
       return asyncAdapter.insertAssociation({
         ...input,
         ...norm,
+        provenance,
+        confidence,
       });
     },
 
@@ -2306,6 +2500,123 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       }
       await maybeEmbedKnowledge(created);
       return created;
+    },
+
+    // --- Phase 5 methods ---
+
+    async discover(options) {
+      if (!config.adapter) {
+        throw new ValidationError('discover() requires a synchronous adapter (config.adapter)');
+      }
+      return discover(config.adapter, config.scope, options);
+    },
+
+    async getGraphReport(options) {
+      if (!config.adapter) {
+        throw new ValidationError('getGraphReport() requires a synchronous adapter (config.adapter)');
+      }
+      return getGraphReport(config.adapter, config.scope, options);
+    },
+
+    async getFactsAt(timestamp, options) {
+      const queryOptions: TemporalQueryOptions = {
+        timestamp,
+        scope: config.scope,
+        knowledgeClass: options?.knowledgeClass,
+        fallbackToReplay: options?.fallbackToReplay ?? true,
+      };
+      const getContextAtFn = async (asOf: number) =>
+        (await buildReplayedContext(asOf)).context;
+      return getFactsAt(asyncAdapter, getContextAtFn, queryOptions);
+    },
+
+    async reflectOnKnowledge(options) {
+      const result = await reflectOnKnowledge(asyncAdapter, config.scope, {
+        ...options,
+        scope: options?.scope ?? normalizeScope(config.scope),
+        existingAliases: options?.existingAliases ?? config.aliasMap,
+      }, config.extractor);
+      lastReflectionResult = result;
+      lastReflectionTimestamp = Math.floor(Date.now() / 1000);
+      return result;
+    },
+
+    async derive(options) {
+      const deriveScope = options?.scope ?? config.scope;
+      const reflection = await reflectOnKnowledge(asyncAdapter, deriveScope, {
+        existingAliases: config.aliasMap,
+      }, config.extractor);
+      const activeKnowledge = await asyncAdapter.getActiveKnowledgeMemory(deriveScope);
+      const outputs = derive(reflection, activeKnowledge, options);
+      lastDerivedOutputs = outputs;
+      lastDerivedTimestamp = Math.floor(Date.now() / 1000);
+      return outputs;
+    },
+
+    async getCurationSummary(input, options) {
+      // Auto-populate from cached manager state when caller provides no input
+      const merged: import('./curation.js').CurationInput = {
+        maintenance: input?.maintenance ?? lastMaintenanceReport,
+        maintenanceTimestamp: input?.maintenanceTimestamp ?? lastMaintenanceTimestamp,
+        reflection: input?.reflection ?? lastReflectionResult,
+        reflectionTimestamp: input?.reflectionTimestamp ?? lastReflectionTimestamp,
+        derived: input?.derived ?? lastDerivedOutputs,
+        derivedTimestamp: input?.derivedTimestamp ?? lastDerivedTimestamp,
+        ontologyActions: input?.ontologyActions,
+      };
+      return getCurationSummary(merged, options);
+    },
+
+    async getCoreMemory(options) {
+      return getCoreMemory(asyncAdapter, config.scope, options);
+    },
+
+    setAliases(aliasMap) {
+      config.aliasMap = aliasMap;
+    },
+
+    getAliases() {
+      return config.aliasMap;
+    },
+
+    async getAliasCandidates(options) {
+      const knowledge = await asyncAdapter.getActiveKnowledgeMemory(config.scope);
+      return discoverAliasCandidates(knowledge, {
+        ...options,
+        existingAliases: options?.existingAliases ?? config.aliasMap,
+      });
+    },
+
+    setOntology(ontology) {
+      config.ontology = ontology;
+    },
+
+    getOntology() {
+      return config.ontology;
+    },
+
+    exportBundle(name, options) {
+      if (!config.adapter) {
+        throw new ValidationError('exportBundle() requires a synchronous adapter (config.adapter)');
+      }
+      return exportBundle(config.adapter, name, {
+        ...options,
+        scope: config.scope, // Always enforce manager's scope
+      });
+    },
+
+    importBundle(bundle, options) {
+      if (!config.adapter) {
+        throw new ValidationError('importBundle() requires a synchronous adapter (config.adapter)');
+      }
+      return importBundle(config.adapter, bundle, options);
+    },
+
+    refreshDocuments(documents) {
+      if (!config.adapter) {
+        throw new ValidationError('refreshDocuments() requires a synchronous adapter (config.adapter)');
+      }
+      return refreshDocuments(config.adapter, config.scope, documents);
     },
 
     async close() {

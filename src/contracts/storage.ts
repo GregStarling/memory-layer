@@ -236,6 +236,7 @@ export interface StorageAdapter {
       scripts?: string[];
       assets?: string[];
       tags?: string[];
+      rationale?: string | null;
       status?: Playbook['status'];
     },
   ): Playbook | null;

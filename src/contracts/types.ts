@@ -38,7 +38,8 @@ export type EvidenceSourceType =
   | 'human_feedback'
   | 'working_memory_summary'
   | 'manual'
-  | 'imported';
+  | 'imported'
+  | 'reflection';
 export type SupportPolarity = 'supports' | 'contradicts';
 export type GroundingStrength = 'weak' | 'moderate' | 'strong' | 'tool_verified';
 export type KnowledgeDecision =
@@ -71,7 +72,8 @@ export type AssociationType =
   | 'depends_on'
   | 'solves'
   | 'applies_to'
-  | 'derived_from';
+  | 'derived_from'
+  | 'alias_resolution';
 export type AssociationTargetKind = 'knowledge' | 'playbook' | 'working_memory' | 'work_item';
 
 export const TURN_ROLES: readonly TurnRole[] = ['user', 'assistant', 'system'];
@@ -122,6 +124,7 @@ export const EVIDENCE_SOURCE_TYPES: readonly EvidenceSourceType[] = [
   'working_memory_summary',
   'manual',
   'imported',
+  'reflection',
 ];
 export const SUPPORT_POLARITIES: readonly SupportPolarity[] = ['supports', 'contradicts'];
 export const GROUNDING_STRENGTHS: readonly GroundingStrength[] = [
@@ -187,6 +190,7 @@ export const ASSOCIATION_TYPES: readonly AssociationType[] = [
   'solves',
   'applies_to',
   'derived_from',
+  'alias_resolution',
 ];
 export const ASSOCIATION_TARGET_KINDS: readonly AssociationTargetKind[] = [
   'knowledge',
@@ -287,6 +291,10 @@ export interface KnowledgeMemory extends NormalizedMemoryScope {
   superseded_at: number | null;
   superseded_by_id: number | null;
   retired_at: number | null;
+  valid_from: number | null;
+  valid_until: number | null;
+  rationale: string | null;
+  tags: string[];
   created_at: number;
   last_accessed_at: number;
   access_count: number;
@@ -329,6 +337,10 @@ export interface NewKnowledgeMemory extends MemoryScope {
   contradiction_score?: number;
   superseded_at?: number | null;
   retired_at?: number | null;
+  valid_from?: number | null;
+  valid_until?: number | null;
+  rationale?: string | null;
+  tags?: string[];
 }
 
 export interface KnowledgeMemoryAudit extends NormalizedMemoryScope {
@@ -548,6 +560,7 @@ export interface SearchOptions {
   minimumTrustScore?: number;
   knowledgeStates?: KnowledgeState[];
   knowledgeClasses?: KnowledgeClass[];
+  tags?: string[];
   preferLocalTrusted?: boolean;
   preferLineageMemory?: boolean;
 }
@@ -658,6 +671,7 @@ export interface Playbook extends NormalizedMemoryScope {
   scripts: string[];
   assets: string[];
   tags: string[];
+  rationale: string | null;
   status: PlaybookStatus;
   source_session_id: string | null;
   source_working_memory_id: number | null;
@@ -679,6 +693,7 @@ export interface NewPlaybook extends MemoryScope {
   scripts?: string[];
   assets?: string[];
   tags?: string[];
+  rationale?: string | null;
   status?: PlaybookStatus;
   source_session_id?: string | null;
   source_working_memory_id?: number | null;
@@ -702,6 +717,8 @@ export interface NewPlaybookRevision extends MemoryScope {
   created_at?: number;
 }
 
+export type AssociationProvenance = 'extracted' | 'inferred' | 'ambiguous';
+
 export interface Association extends NormalizedMemoryScope {
   id: number;
   visibility_class: MemoryVisibilityClass;
@@ -710,6 +727,7 @@ export interface Association extends NormalizedMemoryScope {
   target_kind: AssociationTargetKind;
   target_id: number;
   association_type: AssociationType;
+  provenance: AssociationProvenance;
   confidence: number;
   auto_generated: boolean;
   created_at: number;
@@ -722,6 +740,7 @@ export interface NewAssociation extends MemoryScope {
   target_kind: AssociationTargetKind;
   target_id: number;
   association_type: AssociationType;
+  provenance?: AssociationProvenance;
   confidence?: number;
   auto_generated?: boolean;
   created_at?: number;

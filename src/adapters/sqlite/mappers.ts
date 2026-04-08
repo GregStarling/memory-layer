@@ -29,10 +29,11 @@ interface CompactionLogRow extends Omit<CompactionLog, 'model_call_made'> {
 }
 
 interface KnowledgeMemoryRow
-  extends Omit<KnowledgeMemory, 'is_negated' | 'source_turn_ids' | 'visibility_class'> {
+  extends Omit<KnowledgeMemory, 'is_negated' | 'source_turn_ids' | 'visibility_class' | 'tags'> {
   is_negated: number;
   source_turn_ids: string;
   visibility_class?: KnowledgeMemory['visibility_class'];
+  tags: string;
 }
 
 interface KnowledgeCandidateRow extends Omit<KnowledgeCandidate, 'source_summary' | 'source_turns'> {
@@ -98,6 +99,18 @@ function parseJsonObject(json: string | null): Record<string, unknown> | null {
   }
 }
 
+function normalizeLegacyCollaborationId(value: string | null | undefined): string {
+  const resolved = value ?? '';
+  return resolved === 'default' ? '' : resolved;
+}
+
+function normalizeOptionalLegacyCollaborationId(
+  value: string | null | undefined,
+): string | null {
+  if (value == null) return null;
+  return normalizeLegacyCollaborationId(value);
+}
+
 export function serializeStringArray(values: string[]): string {
   return JSON.stringify(values);
 }
@@ -125,7 +138,7 @@ function parseJsonNumberArray(json: string): number[] {
 export function rowToTurn(row: Turn): Turn {
   return {
     ...row,
-    collaboration_id: row.collaboration_id ?? row.workspace_id,
+    collaboration_id: normalizeLegacyCollaborationId(row.collaboration_id),
   };
 }
 
@@ -140,7 +153,7 @@ export function rowToWorkingMemory(row: WorkingMemoryRow): WorkingMemory {
   }
   return {
     ...row,
-    collaboration_id: row.collaboration_id ?? row.workspace_id,
+    collaboration_id: normalizeLegacyCollaborationId(row.collaboration_id),
     key_entities: parseJsonArray(row.key_entities),
     topic_tags: parseJsonArray(row.topic_tags),
     episode_recap: episodeRecap,
@@ -151,19 +164,24 @@ export function rowToWorkingMemory(row: WorkingMemoryRow): WorkingMemory {
 export function rowToKnowledgeMemory(row: KnowledgeMemoryRow): KnowledgeMemory {
   return {
     ...row,
-    collaboration_id: row.collaboration_id ?? row.workspace_id,
+    collaboration_id: normalizeLegacyCollaborationId(row.collaboration_id),
     source_collaboration_id:
-      row.source_collaboration_id ?? row.collaboration_id ?? row.workspace_id ?? null,
+      normalizeOptionalLegacyCollaborationId(row.source_collaboration_id) ??
+      normalizeLegacyCollaborationId(row.collaboration_id),
     visibility_class: row.visibility_class ?? 'private',
     is_negated: row.is_negated === 1,
     source_turn_ids: parseJsonNumberArray(row.source_turn_ids),
+    valid_from: row.valid_from ?? null,
+    valid_until: row.valid_until ?? null,
+    rationale: row.rationale ?? null,
+    tags: parseJsonArray(row.tags ?? '[]'),
   };
 }
 
 export function rowToKnowledgeCandidate(row: KnowledgeCandidateRow): KnowledgeCandidate {
   return {
     ...row,
-    collaboration_id: row.collaboration_id ?? row.workspace_id,
+    collaboration_id: normalizeLegacyCollaborationId(row.collaboration_id),
     source_summary: row.source_summary === 1,
     source_turns: row.source_turns === 1,
   };
@@ -172,7 +190,7 @@ export function rowToKnowledgeCandidate(row: KnowledgeCandidateRow): KnowledgeCa
 export function rowToKnowledgeEvidence(row: KnowledgeEvidenceRow): KnowledgeEvidence {
   return {
     ...row,
-    collaboration_id: row.collaboration_id ?? row.workspace_id,
+    collaboration_id: normalizeLegacyCollaborationId(row.collaboration_id),
     is_explicit: row.is_explicit === 1,
   };
 }
@@ -180,7 +198,7 @@ export function rowToKnowledgeEvidence(row: KnowledgeEvidenceRow): KnowledgeEvid
 export function rowToKnowledgeMemoryAudit(row: KnowledgeMemoryAuditRow): KnowledgeMemoryAudit {
   return {
     ...row,
-    collaboration_id: row.collaboration_id ?? row.workspace_id,
+    collaboration_id: normalizeLegacyCollaborationId(row.collaboration_id),
     is_negated: row.is_negated === 1,
   };
 }
@@ -189,7 +207,7 @@ export function rowToKnowledgeMemoryAudit(row: KnowledgeMemoryAuditRow): Knowled
 export function rowToContextMonitor(row: ContextMonitor): ContextMonitor {
   return {
     ...row,
-    collaboration_id: row.collaboration_id ?? row.workspace_id,
+    collaboration_id: normalizeLegacyCollaborationId(row.collaboration_id),
   };
 }
 
@@ -197,7 +215,7 @@ export function rowToContextMonitor(row: ContextMonitor): ContextMonitor {
 export function rowToWorkItem(row: WorkItem): WorkItem {
   return {
     ...row,
-    collaboration_id: row.collaboration_id ?? row.workspace_id,
+    collaboration_id: normalizeLegacyCollaborationId(row.collaboration_id),
     visibility_class: row.visibility_class ?? 'private',
     version: row.version ?? 1,
   };
@@ -206,7 +224,7 @@ export function rowToWorkItem(row: WorkItem): WorkItem {
 export function rowToCompactionLog(row: CompactionLogRow): CompactionLog {
   return {
     ...row,
-    collaboration_id: row.collaboration_id ?? row.workspace_id,
+    collaboration_id: normalizeLegacyCollaborationId(row.collaboration_id),
     model_call_made: row.model_call_made === 1,
   };
 }
@@ -222,8 +240,9 @@ interface PlaybookRow extends Omit<Playbook, 'references' | 'templates' | 'scrip
 export function rowToPlaybook(row: PlaybookRow): Playbook {
   return {
     ...row,
-    collaboration_id: row.collaboration_id ?? row.workspace_id,
+    collaboration_id: normalizeLegacyCollaborationId(row.collaboration_id),
     visibility_class: row.visibility_class ?? 'private',
+    rationale: row.rationale ?? null,
     references: parseJsonArray(row.references_json),
     templates: parseJsonArray(row.templates),
     scripts: parseJsonArray(row.scripts),
@@ -235,7 +254,7 @@ export function rowToPlaybook(row: PlaybookRow): Playbook {
 export function rowToPlaybookRevision(row: PlaybookRevision): PlaybookRevision {
   return {
     ...row,
-    collaboration_id: row.collaboration_id ?? row.workspace_id,
+    collaboration_id: normalizeLegacyCollaborationId(row.collaboration_id),
   };
 }
 
@@ -243,7 +262,7 @@ export function rowToMemoryEvent(row: MemoryEventRow): MemoryEventRecord {
   return {
     ...row,
     event_id: String(row.event_id),
-    collaboration_id: row.collaboration_id ?? row.workspace_id,
+    collaboration_id: normalizeLegacyCollaborationId(row.collaboration_id),
     session_id: row.session_id ?? null,
     actor_id: row.actor_id ?? null,
     actor_kind: row.actor_kind ?? null,
@@ -257,7 +276,7 @@ export function rowToMemoryEvent(row: MemoryEventRow): MemoryEventRecord {
 export function rowToSessionStateProjection(row: SessionStateProjectionRow): SessionStateProjection {
   return {
     ...row,
-    collaboration_id: row.collaboration_id ?? row.workspace_id,
+    collaboration_id: normalizeLegacyCollaborationId(row.collaboration_id),
     blockers: parseJsonArray(row.blockers),
     assumptions: parseJsonArray(row.assumptions),
     pendingDecisions: parseJsonArray(row.pending_decisions),
@@ -270,8 +289,10 @@ export function rowToSessionStateProjection(row: SessionStateProjectionRow): Ses
 export function rowToAssociation(row: Association): Association {
   return {
     ...row,
-    collaboration_id: row.collaboration_id ?? row.workspace_id,
+    collaboration_id: normalizeLegacyCollaborationId(row.collaboration_id),
     visibility_class: row.visibility_class ?? 'private',
+    provenance: row.provenance ?? 'inferred',
+    confidence: row.confidence ?? 0.8,
   };
 }
 

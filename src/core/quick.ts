@@ -88,6 +88,8 @@ export interface CreateMemoryOptions {
   structuredClient?: StructuredGenerationClient;
   /** Whether the created manager owns adapter shutdown. Defaults to true. */
   closeAdapter?: boolean;
+  /** Optional ontology configuration for entity type validation and relationship constraints. */
+  ontology?: import('../contracts/ontology.js').OntologyConfig;
 }
 
 export interface CreateMemoryAsyncOptions extends CreateMemoryOptions {
@@ -180,10 +182,6 @@ function resolveQualityMode(options: CreateMemoryOptions): MemoryQualityMode {
   }
 }
 
-function hasProviderEmbeddingEnv(): boolean {
-  return Boolean(process.env.OPENAI_API_KEY || process.env.VOYAGE_API_KEY);
-}
-
 function resolveScope(scope?: string | MemoryScope): MemoryScope {
   if (typeof scope === 'string') {
     return {
@@ -214,17 +212,8 @@ function resolveAdapter(
     return { adapter: memory, embeddingAdapter: memory.embeddings };
   }
   if (!adapter || adapter === 'sqlite') {
-    if (
-      !qualityTier ||
-      qualityTier === 'offline_default' ||
-      qualityTier === 'local_semantic' ||
-      qualityTier === 'provider_backed' ||
-      hasProviderEmbeddingEnv()
-    ) {
-      const sqlite = createSQLiteAdapterWithEmbeddings(path, { logger, onEvent });
-      return { adapter: sqlite, embeddingAdapter: sqlite.embeddings };
-    }
-    return { adapter: createSQLiteAdapter(path, { logger, onEvent }) };
+    const sqlite = createSQLiteAdapterWithEmbeddings(path, { logger, onEvent });
+    return { adapter: sqlite, embeddingAdapter: sqlite.embeddings };
   }
   if (adapter === 'memory') {
     const memory = createInMemoryAdapterWithEmbeddings({ logger, onEvent });
@@ -438,6 +427,7 @@ function createMemoryInternal(
     tokenEstimator: options.tokenEstimator,
     structuredClient: options.structuredClient ?? options.summarizerOptions?.client,
     closeAdapter: options.closeAdapter,
+    ontology: options.ontology,
   });
 
   emitMemoryEvent(

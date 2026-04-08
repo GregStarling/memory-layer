@@ -65,7 +65,7 @@ def test_change_and_reverification_methods(httpx_mock) -> None:
     httpx_mock.add_response(
         method="GET",
         url="http://test/v1/changes?since=2026-03-01T00%3A00%3A00Z&scope_level=workspace&tenant_id=acme&system_id=planner&scope_id=run-a&workspace_id=factory&collaboration_id=release-42",
-        json={"changes": [{"id": 5, "fact": "shared memory"}]},
+        json={"changes": [{"id": 5, "fact": "shared memory"}], "nextCursor": "17"},
     )
     httpx_mock.add_response(
         method="POST",
@@ -85,6 +85,7 @@ def test_change_and_reverification_methods(httpx_mock) -> None:
     client.close()
 
     assert changes.changes[0]["fact"] == "shared memory"
+    assert changes.next_cursor == "17"
     assert run.reverified_knowledge_ids == [1]
     assert single.state == "trusted"
 
@@ -94,7 +95,7 @@ def test_sync_client_can_stream_events(httpx_mock) -> None:
     httpx_mock.add_response(
         method="GET",
         url="http://test/v1/events?event_types=knowledge_change%2Ccapability&scope_level=workspace&tenant_id=acme&system_id=planner&scope_id=run-a&workspace_id=factory&collaboration_id=release-42",
-        text='data: {"type":"knowledge_change","scope":{"tenant_id":"acme"},"timestamp":1,"durationMs":0,"meta":{"action":"promote"}}\n\n',
+        text='data: {"type":"connected"}\n\ndata: {"type":"knowledge_change","scope":{"tenant_id":"acme"},"timestamp":1,"durationMs":0,"meta":{"action":"promote"}}\n\n',
         headers={"content-type": "text/event-stream"},
     )
 
@@ -108,6 +109,32 @@ def test_sync_client_can_stream_events(httpx_mock) -> None:
 
     assert events[0].type == "knowledge_change"
     assert events[0].meta["action"] == "promote"
+
+
+def test_sync_client_can_poll_changes_by_cursor(httpx_mock) -> None:
+    scope = _scope()
+    httpx_mock.add_response(
+        method="GET",
+        url="http://test/v1/changes?cursor=17&scope_level=workspace&tenant_id=acme&system_id=planner&scope_id=run-a&workspace_id=factory&collaboration_id=release-42",
+        json={
+            "changes": [
+                {
+                    "event_id": "18",
+                    "event_type": "knowledge.retired",
+                    "id": 5,
+                    "fact": "shared memory",
+                    "retired_at": 42,
+                }
+            ],
+            "nextCursor": "18",
+        },
+    )
+
+    with MemoryClient("http://test", default_scope=scope) as client:
+        changes = client.poll_changes(cursor=17, scope_level="workspace")
+
+    assert changes.changes[0]["event_type"] == "knowledge.retired"
+    assert changes.next_cursor == "18"
 
 
 def test_sync_client_supports_coordination_endpoints(httpx_mock) -> None:

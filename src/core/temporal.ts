@@ -24,6 +24,8 @@ import type {
   TemporalProjectionWatermark,
   TimelineResult,
 } from '../contracts/temporal.js';
+import type { TemporalQueryOptions, FactsAtResult } from '../contracts/temporal-query.js';
+import type { MemoryContext } from './context.js';
 import type {
   Association,
   AssociationTargetKind,
@@ -70,6 +72,8 @@ export interface ReplayedTemporalState {
   sessionStates: SessionStateProjection[];
   watermarkEventId: TemporalId | null;
 }
+
+const DEFAULT_MAX_ACCUMULATED_EVENTS = 5000;
 
 export function normalizeWorkClaimAt(claim: WorkClaim, asOf: number): WorkClaim {
   if (claim.status !== 'active' || claim.expires_at > asOf) {
@@ -130,13 +134,19 @@ async function accumulateMemoryEvents(
 ): Promise<MemoryEventRecord[]> {
   const events: MemoryEventRecord[] = [];
   let cursor = initialCursor;
+  const absoluteMaxEvents = maxEvents ?? DEFAULT_MAX_ACCUMULATED_EVENTS;
   for (;;) {
     const page = await fetchPage(cursor);
     events.push(...page.events);
-    if (maxEvents != null && events.length > maxEvents) {
-      throw new ValidationError(`Memory validation: event range exceeds maximum of ${maxEvents}`);
+    if (events.length > absoluteMaxEvents) {
+      throw new ValidationError(
+        `Memory validation: event range exceeds maximum of ${absoluteMaxEvents}`,
+      );
     }
     if (page.nextCursor == null) break;
+    if (cursor != null && compareTemporalIds(page.nextCursor, cursor) <= 0) {
+      throw new ValidationError('Memory validation: event pagination cursor did not advance');
+    }
     cursor = page.nextCursor;
   }
   return events;
@@ -675,5 +685,84 @@ export function createTemporalReplayAdapter(
     updateSourceDocument: () => unsupported('updateSourceDocument'),
     transaction: async <T>(fn: () => Promise<T>) => fn(),
     close: async () => undefined,
+  };
+}
+
+/**
+ * Fast temporal query: filters active knowledge by valid_from/valid_until
+ * when validity windows are set. Falls back to getContextAt() replay for
+ * facts without validity windows.
+ */
+export async function getFactsAt(
+  adapter: AsyncStorageAdapter,
+  getContextAt: (asOf: number) => Promise<MemoryContext>,
+  options: TemporalQueryOptions,
+): Promise<FactsAtResult> {
+  const { timestamp, scope, knowledgeClass, fallbackToReplay } = options;
+
+  const activeKnowledge = await adapter.getActiveKnowledgeMemory(scope);
+
+  const withWindows: KnowledgeMemory[] = [];
+  const withoutWindows: KnowledgeMemory[] = [];
+
+  for (const fact of activeKnowledge) {
+    if (fact.valid_from != null || fact.valid_until != null) {
+      withWindows.push(fact);
+    } else {
+      withoutWindows.push(fact);
+    }
+  }
+
+  // Fast path: filter windowed facts by timestamp (inclusive end day)
+  const fastPathFacts = withWindows.filter((fact) => {
+    const fromOk = fact.valid_from == null || fact.valid_from <= timestamp;
+    const untilOk = fact.valid_until == null || fact.valid_until > timestamp;
+    return fromOk && untilOk;
+  });
+
+  const filterByClass = (facts: KnowledgeMemory[]): KnowledgeMemory[] =>
+    knowledgeClass ? facts.filter((f) => f.knowledge_class === knowledgeClass) : facts;
+
+  // Pure fast path: all active facts have windows — no replay needed
+  if (withoutWindows.length === 0) {
+    return {
+      facts: filterByClass(fastPathFacts),
+      queryTimestamp: timestamp,
+      usedFastPath: true,
+    };
+  }
+
+  // Fallback disabled — return fast-path facts + unwindowed facts as-is
+  // Note: this only covers currently-active facts; retired/superseded facts
+  // that were valid at the queried timestamp require replay to surface.
+  if (!fallbackToReplay) {
+    return {
+      facts: filterByClass([...fastPathFacts, ...withoutWindows]),
+      queryTimestamp: timestamp,
+      usedFastPath: withoutWindows.length === 0,
+    };
+  }
+
+  // Replay captures the full historical picture including retired/superseded facts
+  const context = await getContextAt(timestamp);
+  const replayedFacts = [
+    ...context.trustedCoreMemory,
+    ...context.taskRelevantKnowledge,
+    ...context.provisionalKnowledge,
+    ...context.disputedKnowledge,
+    ...context.relevantKnowledge,
+    ...context.durableKnowledge,
+  ];
+
+  // Merge: use replayed facts as the base, then add any windowed fast-path
+  // facts not already present in the replay (replay may miss some windowed
+  // facts that are still active but weren't in the context at that time)
+  const replayedIds = new Set(replayedFacts.map((f) => f.id));
+  const supplemental = fastPathFacts.filter((f) => !replayedIds.has(f.id));
+
+  return {
+    facts: filterByClass([...replayedFacts, ...supplemental]),
+    queryTimestamp: timestamp,
+    usedFastPath: false,
   };
 }

@@ -6,6 +6,7 @@ import {
   createHeuristicExtractor,
   createEnhancedRegexExtractor,
   createRegexExtractor,
+  extractTemporalWindow,
   getContradictionKey,
   normalizeExtractedFact,
   normalizeFactText,
@@ -28,6 +29,8 @@ describe('extractors', () => {
         fact: 'The user prefers rust',
         factType: 'preference',
         confidence: 'high',
+        sourceText: null,
+        rationale: null,
       },
     ]);
   });
@@ -42,6 +45,8 @@ describe('extractors', () => {
         fact: 'The project uses sqlite',
         factType: 'reference',
         confidence: 'medium',
+        sourceText: null,
+        rationale: null,
       },
     ]);
   });
@@ -252,7 +257,115 @@ describe('extractors', () => {
         fact: 'The project uses sqlite',
         factType: 'reference',
         confidence: 'high',
+        sourceText: null,
+        rationale: null,
       },
     ]);
+  });
+
+  describe('temporal extraction', () => {
+    it('extracts valid_from from "effective March 1st, 2025"', () => {
+      const result = extractTemporalWindow('effective March 1st, 2025');
+      expect(result.valid_from).toBe(Math.floor(Date.UTC(2025, 2, 1) / 1000));
+      expect(result.valid_until).toBeNull();
+    });
+
+    it('extracts valid_from from "starting January 15, 2026"', () => {
+      const result = extractTemporalWindow('starting January 15, 2026');
+      expect(result.valid_from).toBe(Math.floor(Date.UTC(2026, 0, 15) / 1000));
+      expect(result.valid_until).toBeNull();
+    });
+
+    it('extracts valid_from from "as of March 2025"', () => {
+      const result = extractTemporalWindow('as of March 2025');
+      expect(result.valid_from).toBe(Math.floor(Date.UTC(2025, 2, 1) / 1000));
+      expect(result.valid_until).toBeNull();
+    });
+
+    it('extracts valid_until from "until December 31, 2025"', () => {
+      const result = extractTemporalWindow('until December 31, 2025');
+      expect(result.valid_from).toBeNull();
+      // End-of-day: start of next day (Jan 1 2026)
+      expect(result.valid_until).toBe(Math.floor(Date.UTC(2025, 11, 31) / 1000) + 86400);
+    });
+
+    it('extracts valid_from from "as of Q3 2025"', () => {
+      const result = extractTemporalWindow('as of Q3 2025');
+      expect(result.valid_from).toBe(Math.floor(Date.UTC(2025, 6, 1) / 1000));
+      expect(result.valid_until).toBeNull();
+    });
+
+    it('extracts valid_until for "until Q4 2025"', () => {
+      const result = extractTemporalWindow('until Q4 2025');
+      // Q4 ends at the last second of December
+      expect(result.valid_until).toBe(Math.floor(Date.UTC(2026, 0, 1) / 1000) - 1);
+    });
+
+    it('extracts both from and until for "from March 1, 2025 until June 30, 2025"', () => {
+      const result = extractTemporalWindow('from March 1, 2025 until June 30, 2025');
+      expect(result.valid_from).toBe(Math.floor(Date.UTC(2025, 2, 1) / 1000));
+      // End-of-day: start of next day (Jul 1 2025)
+      expect(result.valid_until).toBe(Math.floor(Date.UTC(2025, 5, 30) / 1000) + 86400);
+    });
+
+    it('extracts from ISO date "effective 2025-03-01"', () => {
+      const result = extractTemporalWindow('effective 2025-03-01');
+      expect(result.valid_from).toBe(Math.floor(Date.UTC(2025, 2, 1) / 1000));
+    });
+
+    it('extracts range from standalone quarter "Q3 2025"', () => {
+      const result = extractTemporalWindow('Q3 2025');
+      expect(result.valid_from).toBe(Math.floor(Date.UTC(2025, 6, 1) / 1000));
+      expect(result.valid_until).toBe(Math.floor(Date.UTC(2025, 9, 1) / 1000) - 1);
+    });
+
+    it('returns null for ambiguous relative dates', () => {
+      expect(extractTemporalWindow('starting Monday')).toEqual({ valid_from: null, valid_until: null });
+      expect(extractTemporalWindow('until the migration completes')).toEqual({ valid_from: null, valid_until: null });
+      expect(extractTemporalWindow('next week')).toEqual({ valid_from: null, valid_until: null });
+      expect(extractTemporalWindow('soon')).toEqual({ valid_from: null, valid_until: null });
+    });
+
+    it('returns null for text without temporal language', () => {
+      expect(extractTemporalWindow('The user prefers dark mode')).toEqual({ valid_from: null, valid_until: null });
+    });
+
+    it('populates valid_from/valid_until on normalized extracted facts via sourceText', () => {
+      const fact = normalizeExtractedFact({
+        fact: 'The system must use PostgreSQL',
+        factType: 'constraint',
+        confidence: 'high',
+        sourceText: 'effective March 1, 2025: the system must use PostgreSQL',
+      });
+      expect(fact.valid_from).toBe(Math.floor(Date.UTC(2025, 2, 1) / 1000));
+      expect(fact.valid_until).toBeNull();
+    });
+
+    it('does not overwrite explicit valid_from/valid_until on ExtractedFact', () => {
+      const explicitFrom = 1700000000;
+      const fact = normalizeExtractedFact({
+        fact: 'The system must use PostgreSQL',
+        factType: 'constraint',
+        confidence: 'high',
+        sourceText: 'effective March 1, 2025: the system must use PostgreSQL',
+        valid_from: explicitFrom,
+      });
+      expect(fact.valid_from).toBe(explicitFrom);
+    });
+
+    it('leaves valid_from/valid_until null for facts without temporal language', () => {
+      const fact = normalizeExtractedFact({
+        fact: 'The user prefers TypeScript',
+        factType: 'preference',
+        confidence: 'high',
+      });
+      expect(fact.valid_from).toBeNull();
+      expect(fact.valid_until).toBeNull();
+    });
+
+    it('handles DMY format "1 March 2025"', () => {
+      const result = extractTemporalWindow('effective 1 March 2025');
+      expect(result.valid_from).toBe(Math.floor(Date.UTC(2025, 2, 1) / 1000));
+    });
   });
 });

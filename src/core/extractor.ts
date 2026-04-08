@@ -11,6 +11,9 @@ export interface ExtractedFact {
   confidence: FactConfidence;
   sourceText?: string | null;
   domainGroups?: DomainGroups;
+  valid_from?: number | null;
+  valid_until?: number | null;
+  rationale?: string | null;
 }
 
 export interface NormalizedExtractedFact extends ExtractedFact {
@@ -20,6 +23,9 @@ export interface NormalizedExtractedFact extends ExtractedFact {
   normalizedFact: string;
   slotKey: string | null;
   isNegated: boolean;
+  valid_from: number | null;
+  valid_until: number | null;
+  rationale: string | null;
 }
 
 export type Extractor = (
@@ -210,6 +216,201 @@ function inferStructuredFields(
   };
 }
 
+// --- Temporal extraction helpers ---
+
+const MONTH_NAMES: Record<string, number> = {
+  january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
+  july: 6, august: 7, september: 8, october: 9, november: 10, december: 11,
+  jan: 0, feb: 1, mar: 2, apr: 3, jun: 5,
+  jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+};
+
+function parseMonthName(name: string): number | null {
+  return MONTH_NAMES[name.toLowerCase()] ?? null;
+}
+
+function epochSeconds(year: number, month: number, day: number): number {
+  return Math.floor(Date.UTC(year, month, day) / 1000);
+}
+
+function quarterStart(year: number, quarter: number): number {
+  return epochSeconds(year, (quarter - 1) * 3, 1);
+}
+
+function quarterEnd(year: number, quarter: number): number {
+  const nextMonth = quarter * 3;
+  return epochSeconds(year, nextMonth, 1) - 1;
+}
+
+function monthEnd(year: number, month: number): number {
+  return epochSeconds(year, month + 1, 1) - 1;
+}
+
+interface TemporalWindow {
+  valid_from: number | null;
+  valid_until: number | null;
+}
+
+// Full date: "March 1, 2025", "March 1st, 2025", "1 March 2025", "2025-03-01"
+const FULL_DATE_MDY = /\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/i;
+const FULL_DATE_DMY = /\b(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec),?\s+(\d{4})\b/i;
+const FULL_DATE_ISO = /\b(\d{4})-(\d{2})-(\d{2})\b/;
+
+// Quarter + year: "Q3 2025", "Q1 2026"
+const QUARTER_YEAR = /\bQ([1-4])\s+(\d{4})\b/i;
+
+// Month + year: "March 2025", "Jan 2026"
+const MONTH_YEAR = /\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\s+(\d{4})\b/i;
+
+// Temporal markers that indicate start or end
+const START_MARKERS = /\b(?:starting|as\s+of|effective|beginning|from)\s+/i;
+const END_MARKERS = /\b(?:until|through|by|before|ending)\s+/i;
+
+function tryParseFullDate(text: string): number | null {
+  let m = text.match(FULL_DATE_MDY);
+  if (m) {
+    const month = parseMonthName(m[1]);
+    if (month == null) return null;
+    return epochSeconds(parseInt(m[3], 10), month, parseInt(m[2], 10));
+  }
+  m = text.match(FULL_DATE_DMY);
+  if (m) {
+    const month = parseMonthName(m[2]);
+    if (month == null) return null;
+    return epochSeconds(parseInt(m[3], 10), month, parseInt(m[1], 10));
+  }
+  m = text.match(FULL_DATE_ISO);
+  if (m) {
+    return epochSeconds(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
+  }
+  return null;
+}
+
+function tryParseQuarter(text: string): { start: number; end: number } | null {
+  const m = text.match(QUARTER_YEAR);
+  if (!m) return null;
+  const quarter = parseInt(m[1], 10);
+  const year = parseInt(m[2], 10);
+  return { start: quarterStart(year, quarter), end: quarterEnd(year, quarter) };
+}
+
+function tryParseMonthYear(text: string): { start: number; end: number } | null {
+  const m = text.match(MONTH_YEAR);
+  if (!m) return null;
+  const month = parseMonthName(m[1]);
+  if (month == null) return null;
+  const year = parseInt(m[2], 10);
+  return { start: epochSeconds(year, month, 1), end: monthEnd(year, month) };
+}
+
+/**
+ * Extract unambiguous temporal validity windows from source text.
+ * Conservative: only populates when text contains absolute, resolvable dates.
+ * Ambiguous references (relative dates like "Monday", "next week", open-ended
+ * phrases like "until the migration completes") are left as null.
+ */
+export function extractTemporalWindow(text: string): TemporalWindow {
+  const result: TemporalWindow = { valid_from: null, valid_until: null };
+  if (!text) return result;
+
+  // Check for start-marker + date
+  const startMarkerMatch = text.match(START_MARKERS);
+  if (startMarkerMatch) {
+    const afterMarker = text.slice(startMarkerMatch.index! + startMarkerMatch[0].length);
+    const date = tryParseFullDate(afterMarker);
+    if (date != null) {
+      result.valid_from = date;
+    } else {
+      const q = tryParseQuarter(afterMarker);
+      if (q) {
+        result.valid_from = q.start;
+      } else {
+        const my = tryParseMonthYear(afterMarker);
+        if (my) {
+          result.valid_from = my.start;
+        }
+      }
+    }
+  }
+
+  // Check for end-marker + date
+  const endMarkerMatch = text.match(END_MARKERS);
+  if (endMarkerMatch) {
+    const afterMarker = text.slice(endMarkerMatch.index! + endMarkerMatch[0].length);
+    const date = tryParseFullDate(afterMarker);
+    if (date != null) {
+      // Advance to end of the named day (start of next day) so the full day is included
+      result.valid_until = date + 86400;
+    } else {
+      const q = tryParseQuarter(afterMarker);
+      if (q) {
+        result.valid_until = q.end;
+      } else {
+        const my = tryParseMonthYear(afterMarker);
+        if (my) {
+          result.valid_until = my.end;
+        }
+      }
+    }
+  }
+
+  // If no markers matched, try standalone absolute dates as valid_from
+  if (result.valid_from == null && result.valid_until == null) {
+    // Only if the text has an "effective" style context (standalone date next to fact)
+    // Try quarter ranges: "as of Q3 2025" was already caught above,
+    // but "Q3 2025" alone without marker → treat as valid_from..valid_until range
+    const q = tryParseQuarter(text);
+    if (q) {
+      result.valid_from = q.start;
+      result.valid_until = q.end;
+      return result;
+    }
+  }
+
+  return result;
+}
+
+// --- Rationale extraction helpers ---
+
+/**
+ * Causal language patterns that indicate reasoning.
+ * Conservative: only matches clear, unambiguous causal language.
+ */
+const CAUSAL_PATTERNS: RegExp[] = [
+  /\bbecause\s+(.+?)(?:\.|$)/i,
+  /\bin order to\s+(.+?)(?:\.|$)/i,
+  /\bthe reason (?:is|was|being)\s+(.+?)(?:\.|$)/i,
+  /\bthis ensures?\s+(.+?)(?:\.|$)/i,
+  /\bso that\s+(.+?)(?:\.|$)/i,
+  /\bto (?:ensure|prevent|avoid|guarantee|maintain)\s+(.+?)(?:\.|$)/i,
+  // Note: 'since' deliberately excluded — too often temporal rather than causal
+  /\bdue to\s+(.+?)(?:\.|$)/i,
+];
+
+/**
+ * Extract rationale from source text by detecting causal language patterns.
+ * Conservative: only populates when text clearly explains reasoning.
+ * Returns the first matched rationale clause, or null if none found.
+ */
+export function extractRationale(text: string): string | null {
+  if (!text) return null;
+
+  for (const pattern of CAUSAL_PATTERNS) {
+    const match = text.match(pattern);
+    if (match && match[1]) {
+      const rationale = match[1].trim();
+      // Skip very short or very long matches (likely noise)
+      if (rationale.length < 10 || rationale.length > 500) continue;
+      // Require at least 4 words to filter out vague fragments like "of this" or "that issue"
+      const wordCount = rationale.split(/\s+/).filter((w) => w.length > 0).length;
+      if (wordCount < 4) continue;
+      return rationale;
+    }
+  }
+
+  return null;
+}
+
 export function normalizeExtractedFact(fact: ExtractedFact): NormalizedExtractedFact {
   const normalizedFact = normalizeFactText(fact.fact);
   const structured = inferStructuredFields(
@@ -217,6 +418,7 @@ export function normalizeExtractedFact(fact: ExtractedFact): NormalizedExtracted
     fact.fact,
     mergeDomainGroups(fact.domainGroups),
   );
+  const temporal = extractTemporalWindow(fact.sourceText ?? fact.fact);
   return {
     ...fact,
     sourceText: fact.sourceText ?? fact.fact,
@@ -226,6 +428,9 @@ export function normalizeExtractedFact(fact: ExtractedFact): NormalizedExtracted
     normalizedFact,
     slotKey: structured.slotKey,
     isNegated: structured.isNegated,
+    valid_from: fact.valid_from ?? temporal.valid_from,
+    valid_until: fact.valid_until ?? temporal.valid_until,
+    rationale: fact.rationale ?? extractRationale(fact.sourceText ?? fact.fact),
   };
 }
 
@@ -248,6 +453,9 @@ export function normalizeKnowledgeMemory(memory: KnowledgeMemory): NormalizedExt
     normalizedFact: memory.normalized_fact ?? fallback.normalizedFact,
     slotKey: memory.slot_key ?? fallback.slotKey,
     isNegated: memory.is_negated,
+    valid_from: memory.valid_from ?? fallback.valid_from,
+    valid_until: memory.valid_until ?? fallback.valid_until,
+    rationale: memory.rationale ?? fallback.rationale,
   };
 }
 

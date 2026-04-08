@@ -200,5 +200,10 @@ export function matchesKnowledgeSearchOptions(
       return false;
     }
   }
+  if (options.tags && options.tags.length > 0) {
+    if (!options.tags.some((tag) => knowledge.tags.includes(tag))) {
+      return false;
+    }
+  }
   return true;
 }

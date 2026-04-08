@@ -4,10 +4,27 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from typing import Optional
+from typing import Any, Optional
 
 from .client import AsyncMemoryClient, MemoryClient
-from .models import MemoryEvent, MemoryScope, PreparedMemoryTurn, RuntimeTurnResult, StoredExchange
+from .models import (
+    AliasCandidate,
+    CoreMemoryBundle,
+    CurationSummary,
+    DerivedOutput,
+    DiscoveryReport,
+    ExportBundleResult,
+    FactsAtResult,
+    GraphReport,
+    ImportBundleResult,
+    KnowledgeReflectionResult,
+    MemoryEvent,
+    MemoryScope,
+    PreparedMemoryTurn,
+    RefreshResult,
+    RuntimeTurnResult,
+    StoredExchange,
+)
 
 
 def format_prompt(prepared: PreparedMemoryTurn) -> str:
@@ -123,6 +140,53 @@ class MemoryRuntimeClient:
             scope=scope,
         )
 
+    # --- Phase 5 delegation ---
+
+    def discover(self, **kwargs: Any) -> DiscoveryReport:
+        return self.client.discover(**kwargs)
+
+    def get_report(self, **kwargs: Any) -> GraphReport:
+        return self.client.get_report(**kwargs)
+
+    def get_facts_at(self, timestamp: int, **kwargs: Any) -> FactsAtResult:
+        return self.client.get_facts_at(timestamp, **kwargs)
+
+    def reflect_on_knowledge(self, **kwargs: Any) -> KnowledgeReflectionResult:
+        return self.client.reflect_on_knowledge(**kwargs)
+
+    def derive(self, **kwargs: Any) -> list[DerivedOutput]:
+        return self.client.derive(**kwargs)
+
+    def get_curation_summary(self, **kwargs: Any) -> CurationSummary:
+        return self.client.get_curation_summary(**kwargs)
+
+    def get_core_memory(self, **kwargs: Any) -> CoreMemoryBundle:
+        return self.client.get_core_memory(**kwargs)
+
+    def set_aliases(self, alias_map: dict[str, list[str]], **kwargs: Any) -> None:
+        self.client.set_aliases(alias_map, **kwargs)
+
+    def get_aliases(self, **kwargs: Any) -> dict[str, list[str]]:
+        return self.client.get_aliases(**kwargs)
+
+    def get_alias_candidates(self, **kwargs: Any) -> list[AliasCandidate]:
+        return self.client.get_alias_candidates(**kwargs)
+
+    def set_ontology(self, ontology: dict[str, Any], **kwargs: Any) -> None:
+        self.client.set_ontology(ontology, **kwargs)
+
+    def get_ontology(self, **kwargs: Any) -> Optional[dict[str, Any]]:
+        return self.client.get_ontology(**kwargs)
+
+    def export_bundle(self, name: str, **kwargs: Any) -> ExportBundleResult:
+        return self.client.export_bundle(name, **kwargs)
+
+    def import_bundle(self, bundle: dict[str, Any], **kwargs: Any) -> ImportBundleResult:
+        return self.client.import_bundle(bundle, **kwargs)
+
+    def refresh_documents(self, documents: list[dict[str, Any]], **kwargs: Any) -> RefreshResult:
+        return self.client.refresh_documents(documents, **kwargs)
+
 
 class AsyncMemoryRuntimeClient:
     """Async runtime helper that mirrors the Node runtime flow over HTTP."""
@@ -191,3 +255,50 @@ class AsyncMemoryRuntimeClient:
             scope_level=scope_level,
             scope=scope,
         )
+
+    # --- Phase 5 delegation ---
+
+    async def discover(self, **kwargs: Any) -> DiscoveryReport:
+        return await self.client.discover(**kwargs)
+
+    async def get_report(self, **kwargs: Any) -> GraphReport:
+        return await self.client.get_report(**kwargs)
+
+    async def get_facts_at(self, timestamp: int, **kwargs: Any) -> FactsAtResult:
+        return await self.client.get_facts_at(timestamp, **kwargs)
+
+    async def reflect_on_knowledge(self, **kwargs: Any) -> KnowledgeReflectionResult:
+        return await self.client.reflect_on_knowledge(**kwargs)
+
+    async def derive(self, **kwargs: Any) -> list[DerivedOutput]:
+        return await self.client.derive(**kwargs)
+
+    async def get_curation_summary(self, **kwargs: Any) -> CurationSummary:
+        return await self.client.get_curation_summary(**kwargs)
+
+    async def get_core_memory(self, **kwargs: Any) -> CoreMemoryBundle:
+        return await self.client.get_core_memory(**kwargs)
+
+    async def set_aliases(self, alias_map: dict[str, list[str]], **kwargs: Any) -> None:
+        await self.client.set_aliases(alias_map, **kwargs)
+
+    async def get_aliases(self, **kwargs: Any) -> dict[str, list[str]]:
+        return await self.client.get_aliases(**kwargs)
+
+    async def get_alias_candidates(self, **kwargs: Any) -> list[AliasCandidate]:
+        return await self.client.get_alias_candidates(**kwargs)
+
+    async def set_ontology(self, ontology: dict[str, Any], **kwargs: Any) -> None:
+        await self.client.set_ontology(ontology, **kwargs)
+
+    async def get_ontology(self, **kwargs: Any) -> Optional[dict[str, Any]]:
+        return await self.client.get_ontology(**kwargs)
+
+    async def export_bundle(self, name: str, **kwargs: Any) -> ExportBundleResult:
+        return await self.client.export_bundle(name, **kwargs)
+
+    async def import_bundle(self, bundle: dict[str, Any], **kwargs: Any) -> ImportBundleResult:
+        return await self.client.import_bundle(bundle, **kwargs)
+
+    async def refresh_documents(self, documents: list[dict[str, Any]], **kwargs: Any) -> RefreshResult:
+        return await self.client.refresh_documents(documents, **kwargs)

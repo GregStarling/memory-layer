@@ -49,6 +49,8 @@ export function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+const MAX_VALIDITY_EPOCH_SECONDS = 7258118400; // 2200-01-01T00:00:00Z
+
 export function assertNonEmpty(value: string, name: string): void {
   if (!value || value.trim().length === 0) {
     throw new ValidationError(`Memory validation: '${name}' must not be empty`);
@@ -81,6 +83,17 @@ export function assertNumberRange(value: number, name: string, min: number, max:
   if (!Number.isFinite(value) || value < min || value > max) {
     throw new ValidationError(
       `Memory validation: '${name}' must be between ${min} and ${max}, got '${value}'`,
+    );
+  }
+}
+
+function assertEpochSeconds(value: number, name: string): void {
+  if (!Number.isFinite(value) || Number.isNaN(value)) {
+    throw new ValidationError(`Memory validation: '${name}' must be a finite epoch-seconds number`);
+  }
+  if (value < 0 || value > MAX_VALIDITY_EPOCH_SECONDS) {
+    throw new ValidationError(
+      `Memory validation: '${name}' must be between 0 and ${MAX_VALIDITY_EPOCH_SECONDS}`,
     );
   }
 }
@@ -203,6 +216,28 @@ export function validateNewKnowledgeMemory(input: NewKnowledgeMemory): Normalize
   }
   if (input.grounding_strength !== undefined) {
     assertGroundingStrength(input.grounding_strength);
+  }
+  if (input.tags !== undefined) {
+    assertStringArray(input.tags, 'tags');
+  }
+  if (input.valid_from !== undefined && input.valid_from !== null) {
+    if (typeof input.valid_from !== 'number') {
+      throw new ValidationError('valid_from must be a number (epoch seconds)');
+    }
+    assertEpochSeconds(input.valid_from, 'valid_from');
+  }
+  if (input.valid_until !== undefined && input.valid_until !== null) {
+    if (typeof input.valid_until !== 'number') {
+      throw new ValidationError('valid_until must be a number (epoch seconds)');
+    }
+    assertEpochSeconds(input.valid_until, 'valid_until');
+  }
+  if (
+    input.valid_from != null &&
+    input.valid_until != null &&
+    input.valid_until < input.valid_from
+  ) {
+    throw new ValidationError('valid_until must be >= valid_from');
   }
   return scope;
 }

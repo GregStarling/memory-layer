@@ -319,8 +319,10 @@ const memory = createMemory({
 // Search across the workspace
 const results = await memory.searchCrossScope('rate limiting', 'workspace');
 
-// Poll for knowledge changes from other agents
-const changes = await memory.pollForChanges(lastSyncTimestamp);
+// Durable cross-agent sync: start from the current cursor, then advance with nextCursor
+let cursor = await memory.resolveChangeStreamCursor();
+const page = await memory.listKnowledgeChanges({ cursor, scopeLevel: 'workspace' });
+cursor = page.nextCursor;
 ```
 
 Retrieval levels: `scope` → `workspace` → `system` → `tenant`. Each level widens the knowledge pool while preserving ranking preference for local, high-trust facts.
@@ -605,8 +607,9 @@ interface MemoryManager {
   captureSnapshot(relevanceQuery?): Promise<SnapshotData>
   search(query, options?): Promise<{ turns, knowledge }>
   searchCrossScope(query, level, options?): Promise<{ knowledge }>
+  listKnowledgeChanges(options?): Promise<{ changes, nextCursor }>
   recall(timeRange): Promise<{ turns, workingMemory, knowledge, workItems }>
-  pollForChanges(since, options?): Promise<KnowledgeMemory[]>
+  pollForChanges(since, options?): Promise<KnowledgeMemory[]>  // legacy timestamp-based helper
 
   // --- Temporal ---
   getStateAt(asOf, options?): Promise<TemporalStateSnapshot>
@@ -614,6 +617,7 @@ interface MemoryManager {
   diffState(from, to, options?): Promise<TemporalStateDiff>
   listMemoryEvents(options?): Promise<TimelineResult>
   streamChanges(options?): AsyncIterable<MemoryEventRecord>
+  resolveChangeStreamCursor(cursor?): Promise<string>
 
   // --- Knowledge ---
   learnFact(fact, factType, confidence?): Promise<KnowledgeMemory>

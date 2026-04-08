@@ -284,6 +284,10 @@ function mapKnowledgeMemory(row: Record<string, unknown>): KnowledgeMemory {
     superseded_at: row.superseded_at != null ? Number(row.superseded_at) : null,
     superseded_by_id: row.superseded_by_id != null ? Number(row.superseded_by_id) : null,
     retired_at: row.retired_at != null ? Number(row.retired_at) : null,
+    valid_from: row.valid_from != null ? Number(row.valid_from) : null,
+    valid_until: row.valid_until != null ? Number(row.valid_until) : null,
+    rationale: row.rationale != null ? String(row.rationale) : null,
+    tags: Array.isArray(row.tags) ? row.tags.map((v) => String(v)) : parseJsonStringArray(row.tags),
     access_count: Number(row.access_count ?? 0),
     last_accessed_at: Number(row.last_accessed_at ?? 0),
     created_at: Number(row.created_at),
@@ -389,6 +393,7 @@ function mapPlaybook(row: Record<string, unknown>): Playbook {
     scripts: parseJsonStringArray(row.scripts),
     assets: parseJsonStringArray(row.assets),
     tags: parseJsonStringArray(row.tags),
+    rationale: row.rationale != null ? String(row.rationale) : null,
     status: row.status as Playbook['status'],
     source_session_id: row.source_session_id != null ? String(row.source_session_id) : null,
     source_working_memory_id: row.source_working_memory_id != null ? Number(row.source_working_memory_id) : null,
@@ -431,7 +436,8 @@ function mapAssociation(row: Record<string, unknown>): Association {
     target_kind: row.target_kind as AssociationTargetKind,
     target_id: Number(row.target_id),
     association_type: row.association_type as Association['association_type'],
-    confidence: Number(row.confidence),
+    provenance: (row.provenance as Association['provenance']) ?? 'inferred',
+    confidence: row.confidence != null ? Number(row.confidence) : 0.8,
     auto_generated: Boolean(row.auto_generated),
     created_at: Number(row.created_at),
   };
@@ -1426,8 +1432,8 @@ export function createPostgresAdapter(
       const n = normalizeScope(input);
       const createdAt = now();
       const { rows } = await pool.query(
-        `INSERT INTO knowledge_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id, fact, fact_type, knowledge_state, knowledge_class, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated, source, confidence, confidence_score, grounding_strength, evidence_count, trust_score, verification_status, verification_notes, last_verified_at, next_reverification_at, last_confirmed_at, confirmation_count, source_system_id, source_scope_id, source_collaboration_id, source_working_memory_id, source_turn_ids, successful_use_count, failed_use_count, disputed_at, dispute_reason, contradiction_score, superseded_at, retired_at, created_at, last_accessed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $40)
+        `INSERT INTO knowledge_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id, fact, fact_type, knowledge_state, knowledge_class, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated, source, confidence, confidence_score, grounding_strength, evidence_count, trust_score, verification_status, verification_notes, last_verified_at, next_reverification_at, last_confirmed_at, confirmation_count, source_system_id, source_scope_id, source_collaboration_id, source_working_memory_id, source_turn_ids, successful_use_count, failed_use_count, disputed_at, dispute_reason, contradiction_score, superseded_at, retired_at, valid_from, valid_until, rationale, tags, created_at, last_accessed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $44)
          RETURNING *`,
         [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.fact, input.fact_type,
          input.knowledge_state ?? 'trusted', input.knowledge_class ?? 'project_fact',
@@ -1445,7 +1451,9 @@ export function createPostgresAdapter(
          input.source_working_memory_id ?? null, JSON.stringify(input.source_turn_ids ?? []),
          input.successful_use_count ?? 0, input.failed_use_count ?? 0,
          input.disputed_at ?? null, input.dispute_reason ?? null, input.contradiction_score ?? 0,
-         input.superseded_at ?? null, input.retired_at ?? null, createdAt],
+         input.superseded_at ?? null, input.retired_at ?? null,
+         input.valid_from ?? null, input.valid_until ?? null, input.rationale ?? null,
+         JSON.stringify(input.tags ?? []), createdAt],
       );
       const knowledge = mapKnowledgeMemory(rows[0]);
       await insertMemoryEventInternal({
@@ -2734,14 +2742,14 @@ export function createPostgresAdapter(
       const createdAt = input.created_at ?? now();
       const { rows } = await pool.query(
         `INSERT INTO playbooks (tenant_id, system_id, workspace_id, collaboration_id, scope_id, title, description, instructions,
-           references_json, templates, scripts, assets, tags, status, source_session_id, source_working_memory_id, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $17)
+           references_json, templates, scripts, assets, tags, rationale, status, source_session_id, source_working_memory_id, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $18)
          RETURNING *`,
         [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id,
          input.title, input.description, input.instructions,
          JSON.stringify(input.references ?? []), JSON.stringify(input.templates ?? []),
          JSON.stringify(input.scripts ?? []), JSON.stringify(input.assets ?? []),
-         JSON.stringify(input.tags ?? []), input.status ?? 'draft',
+         JSON.stringify(input.tags ?? []), input.rationale ?? null, input.status ?? 'draft',
          input.source_session_id ?? null, input.source_working_memory_id ?? null, createdAt],
       );
       const playbook = mapPlaybook(rows[0]);
@@ -2835,6 +2843,7 @@ export function createPostgresAdapter(
       if (patch.scripts != null) { sets.push(`scripts = $${idx++}`); values.push(JSON.stringify(patch.scripts)); }
       if (patch.assets != null) { sets.push(`assets = $${idx++}`); values.push(JSON.stringify(patch.assets)); }
       if (patch.tags != null) { sets.push(`tags = $${idx++}`); values.push(JSON.stringify(patch.tags)); }
+      if (patch.rationale !== undefined) { sets.push(`rationale = $${idx++}`); values.push(patch.rationale); }
       if (patch.status != null) { sets.push(`status = $${idx++}`); values.push(patch.status); }
       if (sets.length === 0) return this.getPlaybookById(id);
       sets.push(`updated_at = $${idx++}`);
@@ -2936,13 +2945,13 @@ export function createPostgresAdapter(
         const { rows } = await pool.query(
           `INSERT INTO associations
             (tenant_id, system_id, workspace_id, collaboration_id, scope_id,
-             source_kind, source_id, target_kind, target_id, association_type, confidence, auto_generated, visibility_class, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+             source_kind, source_id, target_kind, target_id, association_type, provenance, confidence, auto_generated, visibility_class, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
            RETURNING *`,
           [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id,
            input.source_kind, input.source_id, input.target_kind, input.target_id,
-           input.association_type, input.confidence ?? 0.5, input.auto_generated ?? false,
-           input.visibility_class ?? 'private',
+           input.association_type, input.provenance ?? 'inferred', input.confidence ?? 0.8,
+           input.auto_generated ?? false, input.visibility_class ?? 'private',
            input.created_at ?? now()],
         );
         const association = mapAssociation(rows[0]);

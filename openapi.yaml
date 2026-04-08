@@ -68,6 +68,11 @@ components:
       schema:
         type: string
         format: date-time
+    Cursor:
+      name: cursor
+      in: query
+      schema:
+        type: string
     EventTypes:
       name: event_types
       in: query
@@ -80,6 +85,39 @@ components:
       properties:
         error:
           type: string
+    KnowledgeMemory:
+      type: object
+      properties:
+        id:
+          type: integer
+        fact:
+          type: string
+        fact_type:
+          type: string
+          enum: [preference, entity, decision, constraint, reference]
+        knowledge_state:
+          type: string
+        knowledge_class:
+          type: string
+        trust_score:
+          type: number
+        tags:
+          type: array
+          items:
+            type: string
+    AliasCandidate:
+      type: object
+      properties:
+        entity1:
+          type: string
+        entity2:
+          type: string
+        similarity:
+          type: number
+        suggestedCanonical:
+          type: string
+        confirmed:
+          type: boolean
     Association:
       type: object
       required: [id, tenant_id, system_id, workspace_id, collaboration_id, scope_id, source_kind, source_id, target_kind, target_id, association_type, confidence, auto_generated, created_at]
@@ -473,6 +511,57 @@ components:
         nextCursor:
           type: string
           nullable: true
+    KnowledgeChange:
+      type: object
+      required: [event_id, event_type, change_at, id, fact, fact_type, knowledge_state, created_at]
+      properties:
+        event_id:
+          type: string
+        event_type:
+          type: string
+        change_at:
+          type: integer
+        id:
+          type: integer
+        fact:
+          type: string
+        fact_type:
+          type: string
+        knowledge_state:
+          type: string
+        verification_status:
+          type: string
+        trust_score:
+          type: number
+        workspace_id:
+          type: string
+        scope_id:
+          type: string
+        collaboration_id:
+          type: string
+        retired_at:
+          type: integer
+          nullable: true
+        superseded_at:
+          type: integer
+          nullable: true
+        superseded_by_id:
+          type: integer
+          nullable: true
+        created_at:
+          type: integer
+        last_accessed_at:
+          type: integer
+    KnowledgeChangeListResponse:
+      type: object
+      required: [changes, nextCursor]
+      properties:
+        changes:
+          type: array
+          items:
+            $ref: '#/components/schemas/KnowledgeChange'
+        nextCursor:
+          type: string
     TemporalEventRecord:
       type: object
       required: [event_id, entity_kind, entity_id, event_type, payload, created_at]
@@ -1222,6 +1311,11 @@ paths:
           in: query
           schema:
             type: integer
+        - name: tags
+          in: query
+          description: Comma-separated tag filter for knowledge results
+          schema:
+            type: string
         - $ref: '#/components/parameters/ScopeTenant'
         - $ref: '#/components/parameters/ScopeSystem'
         - $ref: '#/components/parameters/ScopeWorkspace'
@@ -1255,6 +1349,11 @@ paths:
           schema:
             type: integer
         - $ref: '#/components/parameters/ScopeLevel'
+        - name: tags
+          in: query
+          description: Comma-separated tag filter for knowledge results
+          schema:
+            type: string
         - $ref: '#/components/parameters/ScopeTenant'
         - $ref: '#/components/parameters/ScopeSystem'
         - $ref: '#/components/parameters/ScopeWorkspace'
@@ -2675,9 +2774,10 @@ paths:
   /v1/changes:
     get:
       tags: [observability]
-      summary: Poll for knowledge changes since a timestamp
+      summary: Poll for knowledge changes using a durable cursor or a legacy timestamp
       parameters:
         - $ref: '#/components/parameters/Since'
+        - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/ScopeLevel'
         - $ref: '#/components/parameters/ScopeTenant'
         - $ref: '#/components/parameters/ScopeSystem'
@@ -2690,27 +2790,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  changes:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        id:
-                          type: integer
-                        fact:
-                          type: string
-                        fact_type:
-                          type: string
-                        knowledge_state:
-                          type: string
-                        scope_id:
-                          type: string
-                        collaboration_id:
-                          type: string
-                        created_at:
-                          type: integer
+                $ref: '#/components/schemas/KnowledgeChangeListResponse'
         '400':
           description: Invalid timestamp
           content:
@@ -3001,4 +3081,728 @@ paths:
               examples:
                 knowledgeChange:
                   value: |
+                    data: {"type":"connected"}
+
                     data: {"type":"knowledge_change","scope":{"tenant_id":"acme","system_id":"agent","scope_id":"run-42"},"timestamp":1710000000000,"durationMs":0,"meta":{"action":"promote"}}
+
+  # ─── Phase 5 Endpoints ───
+
+  /v1/discover:
+    get:
+      tags: [phase5]
+      summary: Discover surprising cross-memory connections
+      parameters:
+        - name: max_results
+          in: query
+          schema:
+            type: integer
+        - name: min_score
+          in: query
+          description: Minimum surprise score threshold (0-1)
+          schema:
+            type: number
+        - name: max_depth
+          in: query
+          description: Maximum graph traversal depth for centrality
+          schema:
+            type: integer
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Discovery report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  surprises:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        sourceId:
+                          type: string
+                        targetId:
+                          type: string
+                        score:
+                          type: number
+                        explanation:
+                          type: string
+                        bridgeType:
+                          type: string
+                          enum: [semantic_overlap, temporal_proximity, entity_shared, contradiction, causal]
+                  graphStats:
+                    type: object
+                    properties:
+                      totalNodes:
+                        type: integer
+                      totalEdges:
+                        type: integer
+                      avgDegree:
+                        type: number
+                  timestamp:
+                    type: number
+
+  /v1/report:
+    get:
+      tags: [phase5]
+      summary: Generate a graph report for system-prompt injection
+      parameters:
+        - name: token_budget
+          in: query
+          schema:
+            type: integer
+        - name: sections
+          in: query
+          description: Comma-separated section names to include
+          schema:
+            type: string
+        - name: tags
+          in: query
+          description: Comma-separated tag filter
+          schema:
+            type: string
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Graph report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sections:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        title:
+                          type: string
+                        content:
+                          type: string
+                        priority:
+                          type: integer
+                  tokenEstimate:
+                    type: integer
+                  generatedAt:
+                    type: string
+
+  /v1/facts-at:
+    get:
+      tags: [phase5]
+      summary: Query knowledge facts valid at a point in time
+      parameters:
+        - name: timestamp
+          in: query
+          required: true
+          description: Epoch seconds to query
+          schema:
+            type: number
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Facts at the queried timestamp
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  facts:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/KnowledgeMemory'
+                  queryTimestamp:
+                    type: number
+                  usedFastPath:
+                    type: boolean
+        '400':
+          description: Missing or invalid timestamp
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/reflect-knowledge:
+    post:
+      tags: [phase5]
+      summary: Run knowledge reflection to discover new facts from patterns
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                maxFacts:
+                  type: integer
+                includePlaybooks:
+                  type: boolean
+                rateLimitKey:
+                  type: string
+      responses:
+        '200':
+          description: Reflection result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  newFacts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        fact:
+                          type: string
+                        factType:
+                          type: string
+                        knowledgeClass:
+                          type: string
+                        knowledgeState:
+                          type: string
+                          enum: [provisional]
+                        confidence:
+                          type: string
+                          enum: [high, medium, low]
+                        confidenceScore:
+                          type: number
+                        groundingStrength:
+                          type: string
+                        evidenceSource:
+                          type: string
+                          enum: [reflection]
+                        sourceMemoryIds:
+                          type: array
+                          items:
+                            type: integer
+                  patternsFound:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        description:
+                          type: string
+                        occurrences:
+                          type: integer
+                        relatedFactIndices:
+                          type: array
+                          items:
+                            type: integer
+                  sessionsAnalyzed:
+                    type: integer
+                  sourceMemoryIds:
+                    type: array
+                    items:
+                      type: integer
+                  aliasCandidates:
+                    type: array
+                    nullable: true
+                    items:
+                      $ref: '#/components/schemas/AliasCandidate'
+
+  /v1/derive:
+    post:
+      tags: [phase5]
+      summary: Derive new outputs from reflection results
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                outputTypes:
+                  type: array
+                  items:
+                    type: string
+                maxOutputs:
+                  type: integer
+      responses:
+        '200':
+          description: Derived outputs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  outputs:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        type:
+                          type: string
+                        content:
+                          type: string
+                        confidence:
+                          type: number
+                        sourceKnowledgeIds:
+                          type: array
+                          items:
+                            type: integer
+                        rationale:
+                          type: string
+
+  /v1/curation:
+    get:
+      tags: [phase5]
+      summary: Get curation summary of recent knowledge lifecycle actions
+      parameters:
+        - name: since
+          in: query
+          description: Epoch seconds to filter actions after
+          schema:
+            type: number
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: action_types
+          in: query
+          description: Comma-separated action types (retired, expired, demoted, reflected, merged, derived, reverified)
+          schema:
+            type: string
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Curation summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  actions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        actionType:
+                          type: string
+                        affectedEntities:
+                          type: array
+                          items:
+                            type: string
+                        explanation:
+                          type: string
+                        timestamp:
+                          type: number
+                        source:
+                          type: string
+                  period:
+                    type: object
+                    properties:
+                      start:
+                        type: number
+                      end:
+                        type: number
+                  maintenanceRef:
+                    type: string
+                    nullable: true
+                    description: Reference label for the source maintenance report
+                  reflectionRef:
+                    type: string
+                    nullable: true
+                    description: Reference label for the source reflection result
+
+  /v1/core-memory:
+    get:
+      tags: [phase5]
+      summary: Get token-budgeted core memory bundle
+      parameters:
+        - name: token_budget
+          in: query
+          schema:
+            type: integer
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Core memory bundle
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  identity:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/KnowledgeMemory'
+                  constraints:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/KnowledgeMemory'
+                  norms:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/KnowledgeMemory'
+                  workItems:
+                    type: array
+                    items:
+                      type: object
+                  topPlaybook:
+                    type: object
+                    nullable: true
+                  tokenEstimate:
+                    type: integer
+                  generatedAt:
+                    type: number
+
+  /v1/aliases:
+    get:
+      tags: [phase5]
+      summary: Get current alias map
+      parameters:
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Alias map
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  aliasMap:
+                    type: object
+                    additionalProperties:
+                      type: array
+                      items:
+                        type: string
+    post:
+      tags: [phase5]
+      summary: Set alias map
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [aliasMap]
+              properties:
+                aliasMap:
+                  type: object
+                  additionalProperties:
+                    type: array
+                    items:
+                      type: string
+      responses:
+        '200':
+          description: Alias map updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        '400':
+          description: Invalid alias map
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/alias-candidates:
+    get:
+      tags: [phase5]
+      summary: Discover potential alias candidates from entity name similarity
+      parameters:
+        - name: min_similarity
+          in: query
+          description: Minimum similarity threshold (0-1)
+          schema:
+            type: number
+        - name: max_candidates
+          in: query
+          schema:
+            type: integer
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Alias candidates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  candidates:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AliasCandidate'
+
+  /v1/ontology:
+    get:
+      tags: [phase5]
+      summary: Get current ontology configuration
+      parameters:
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Ontology config
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ontology:
+                    type: object
+                    nullable: true
+    post:
+      tags: [phase5]
+      summary: Set ontology configuration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ontology]
+              properties:
+                ontology:
+                  type: object
+                  properties:
+                    entityTypes:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          description:
+                            type: string
+                          extendsClass:
+                            type: string
+                          allowedRelationships:
+                            type: array
+                            items:
+                              type: string
+                    relationshipConstraints:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          sourceType:
+                            type: string
+                          targetType:
+                            type: string
+                          relationshipType:
+                            type: string
+                          bidirectional:
+                            type: boolean
+                    validationRules:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          description:
+                            type: string
+                          appliesTo:
+                            type: array
+                            items:
+                              type: string
+                          severity:
+                            type: string
+                            enum: [error, warning]
+      responses:
+        '200':
+          description: Ontology updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        '400':
+          description: Invalid ontology
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/bundles/export:
+    post:
+      tags: [phase5]
+      summary: Export a named bundle of knowledge facts and playbooks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                knowledgeClassFilter:
+                  type: array
+                  items:
+                    type: string
+                includeTags:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: Export result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bundle:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      version:
+                        type: string
+                      facts:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/KnowledgeMemory'
+                      playbooks:
+                        type: array
+                        items:
+                          type: object
+                      metadata:
+                        type: object
+                      exportedAt:
+                        type: string
+                  factCount:
+                    type: integer
+                  playbookCount:
+                    type: integer
+
+  /v1/bundles/import:
+    post:
+      tags: [phase5]
+      summary: Import a bundle into a target scope
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bundle]
+              properties:
+                bundle:
+                  type: object
+                  description: The bundle object from a previous export
+                conflictResolution:
+                  type: string
+                  enum: [skip, overwrite, merge, trust_higher]
+                  default: skip
+                preserveTrust:
+                  type: boolean
+      responses:
+        '200':
+          description: Import result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  imported:
+                    type: integer
+                  skipped:
+                    type: integer
+                  overwritten:
+                    type: integer
+                  merged:
+                    type: integer
+                  playbooksImported:
+                    type: integer
+                  playbooksSkipped:
+                    type: integer
+        '400':
+          description: Invalid bundle
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/refresh-documents:
+    post:
+      tags: [phase5]
+      summary: Incrementally refresh a document corpus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [documents]
+              properties:
+                documents:
+                  type: array
+                  items:
+                    type: object
+                    required: [title, contentHash]
+                    properties:
+                      title:
+                        type: string
+                      contentHash:
+                        type: string
+                        description: SHA-256 hash of the document content
+                      content:
+                        type: string
+                        description: New content for re-ingestion (optional)
+      responses:
+        '200':
+          description: Refresh result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  unchanged:
+                    type: array
+                    items:
+                      type: object
+                  changed:
+                    type: array
+                    items:
+                      type: object
+                  invalidatedFactCount:
+                    type: integer
+                  reIngestedFactCount:
+                    type: integer
+        '400':
+          description: Invalid documents
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'

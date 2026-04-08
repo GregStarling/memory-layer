@@ -323,4 +323,66 @@ describe('buildMemoryContext', () => {
     expect(context.debugTrace.associationExpansion.candidateKnowledgeIds.length).toBe(15);
     expect(context.debugTrace.associationExpansion.truncatedKnowledgeIds.length).toBeGreaterThan(0);
   });
+
+  it('ranks extracted-provenance associations above inferred ones', async () => {
+    const scope = makeScope();
+    seedTurns(adapter, scope, 1);
+    const seed = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'Primary deployment pipeline runs on CI',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+
+    // Create an inferred association with high confidence
+    const inferredTarget = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'Inferred: deployment uses Docker containers',
+      fact_type: 'entity',
+      source: 'user_stated',
+      confidence: 'high',
+    });
+    adapter.insertAssociation({
+      ...scope,
+      source_kind: 'knowledge',
+      source_id: seed.id,
+      target_kind: 'knowledge',
+      target_id: inferredTarget.id,
+      association_type: 'supports',
+      provenance: 'inferred',
+      confidence: 0.9,
+    });
+
+    // Create an extracted association with the same confidence
+    const extractedTarget = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'Extracted: CI pipeline pushes to staging first',
+      fact_type: 'entity',
+      source: 'user_stated',
+      confidence: 'high',
+    });
+    adapter.insertAssociation({
+      ...scope,
+      source_kind: 'knowledge',
+      source_id: seed.id,
+      target_kind: 'knowledge',
+      target_id: extractedTarget.id,
+      association_type: 'supports',
+      provenance: 'extracted',
+      confidence: 0.9,
+    });
+
+    const context = await buildMemoryContext(asyncAdapter, scope, {
+      relevanceQuery: 'deployment pipeline CI',
+      maxKnowledgeItems: 1,
+    });
+
+    // Both should be included (no exclusion by confidence)
+    expect(context.associatedKnowledge.length).toBe(2);
+
+    // Extracted should rank above inferred (extracted weight=1.0, inferred weight=0.7)
+    const ids = context.associatedKnowledge.map((k) => k.id);
+    expect(ids.indexOf(extractedTarget.id)).toBeLessThan(ids.indexOf(inferredTarget.id));
+  });
 });

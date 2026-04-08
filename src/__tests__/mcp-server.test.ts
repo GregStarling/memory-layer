@@ -1,7 +1,23 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { rmSync } from 'node:fs';
-import { createMcpServerHandler } from '../server/mcp-server.js';
+import { createMcpServerHandler, startMcpServer } from '../server/mcp-server.js';
 import { createSQLiteAdapter } from '../adapters/sqlite/index.js';
+
+const mockedReadline = {
+  lineHandler: null as ((line: string) => void | Promise<void>) | null,
+};
+
+vi.mock('readline', () => ({
+  createInterface: () => ({
+    on(event: string, handler: (line: string) => void | Promise<void>) {
+      if (event === 'line') {
+        mockedReadline.lineHandler = handler;
+      }
+      return this;
+    },
+    close() {},
+  }),
+}));
 
 describe('MCP server handler', () => {
   let handler: ReturnType<typeof createMcpServerHandler>;
@@ -17,7 +33,7 @@ describe('MCP server handler', () => {
 
   it('lists all expected tools', () => {
     handler = createMcpServerHandler();
-    expect(handler.tools.length).toBe(39);
+    expect(handler.tools.length).toBe(54);
     const names = handler.tools.map((t) => t.name);
     expect(names).toContain('memory_store_turn');
     expect(names).toContain('memory_store_exchange');
@@ -54,6 +70,22 @@ describe('MCP server handler', () => {
     expect(names).toContain('memory_add_association');
     expect(names).toContain('memory_remove_association');
     expect(names).toContain('memory_snapshot');
+    // Phase 5 tools
+    expect(names).toContain('memory_discover');
+    expect(names).toContain('memory_get_report');
+    expect(names).toContain('memory_get_facts_at');
+    expect(names).toContain('memory_reflect_knowledge');
+    expect(names).toContain('memory_derive');
+    expect(names).toContain('memory_get_curation');
+    expect(names).toContain('memory_get_core_memory');
+    expect(names).toContain('memory_set_aliases');
+    expect(names).toContain('memory_get_aliases');
+    expect(names).toContain('memory_get_alias_candidates');
+    expect(names).toContain('memory_set_ontology');
+    expect(names).toContain('memory_get_ontology');
+    expect(names).toContain('memory_export_bundle');
+    expect(names).toContain('memory_import_bundle');
+    expect(names).toContain('memory_refresh_documents');
   });
 
   it('stores and retrieves turns via tool calls', async () => {
@@ -182,6 +214,43 @@ describe('MCP server handler', () => {
     });
 
     expect(JSON.parse(result.content[0].text).knowledge[0].fact).toContain('Shared workspace memory');
+  });
+
+  it('waits for initialize before emitting stdio lifecycle messages', async () => {
+    mockedReadline.lineHandler = null;
+    const writes: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation(((chunk: string | Uint8Array) => {
+        writes.push(String(chunk));
+        return true;
+      }) as typeof process.stdout.write);
+
+    try {
+      await startMcpServer();
+      expect(writes).toEqual([]);
+      expect(mockedReadline.lineHandler).toBeTypeOf('function');
+
+      await mockedReadline.lineHandler?.(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+        }),
+      );
+
+      expect(writes).toHaveLength(1);
+      expect(JSON.parse(writes[0])).toMatchObject({
+        jsonrpc: '2.0',
+        id: 1,
+        result: {
+          protocolVersion: '2024-11-05',
+        },
+      });
+    } finally {
+      stdoutSpy.mockRestore();
+      mockedReadline.lineHandler = null;
+    }
   });
 
   it('shares collaboration memory across systems through MCP tools', async () => {

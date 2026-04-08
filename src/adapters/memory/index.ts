@@ -156,6 +156,7 @@ function resolveSearchOptions(options?: SearchOptions): Required<SearchOptions> 
     minimumTrustScore: options?.minimumTrustScore ?? 0,
     knowledgeStates: options?.knowledgeStates ?? [],
     knowledgeClasses: options?.knowledgeClasses ?? [],
+    tags: options?.tags ?? [],
     preferLocalTrusted: options?.preferLocalTrusted ?? false,
     preferLineageMemory: options?.preferLineageMemory ?? false,
   };
@@ -588,6 +589,10 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         superseded_at: input.superseded_at ?? null,
         superseded_by_id: null,
         retired_at: input.retired_at ?? null,
+        valid_from: input.valid_from ?? null,
+        valid_until: input.valid_until ?? null,
+        rationale: input.rationale ?? null,
+        tags: input.tags ? [...input.tags] : [],
         created_at: createdAt,
         last_accessed_at: createdAt,
         access_count: 1,
@@ -1777,6 +1782,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         scripts: input.scripts ? [...input.scripts] : [],
         assets: input.assets ? [...input.assets] : [],
         tags: input.tags ? [...input.tags] : [],
+        rationale: input.rationale ?? null,
         status: input.status ?? 'draft',
         source_session_id: input.source_session_id ?? null,
         source_working_memory_id: input.source_working_memory_id ?? null,
@@ -1864,6 +1870,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       if (patch.scripts != null) playbook.scripts = [...patch.scripts];
       if (patch.assets != null) playbook.assets = [...patch.assets];
       if (patch.tags != null) playbook.tags = [...patch.tags];
+      if (patch.rationale !== undefined) playbook.rationale = patch.rationale ?? null;
       if (patch.status != null) playbook.status = patch.status;
       playbook.updated_at = nowSeconds();
       this.insertMemoryEvent({
@@ -1972,7 +1979,8 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         target_kind: input.target_kind,
         target_id: input.target_id,
         association_type: input.association_type,
-        confidence: input.confidence ?? 0.5,
+        provenance: input.provenance ?? 'inferred',
+        confidence: input.confidence ?? 0.8,
         auto_generated: input.auto_generated ?? false,
         created_at: input.created_at ?? nowSeconds(),
       };

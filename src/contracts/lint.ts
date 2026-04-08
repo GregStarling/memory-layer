@@ -3,7 +3,8 @@ export type LintCategory =
   | 'evidence_concentration'
   | 'trust_distribution'
   | 'contradiction_cluster'
-  | 'stale_provisional';
+  | 'stale_provisional'
+  | 'ontology_violation';
 
 export interface LintIssue {
   severity: 'info' | 'warning' | 'error';
@@ -34,4 +35,5 @@ export interface LintOptions {
   categories?: LintCategory[];
   maxIssues?: number;
   minOrphanAgeDays?: number;
+  filterByTags?: string[];
 }

@@ -151,6 +151,21 @@ describe('stable snapshots', () => {
         "memory_add_association",
         "memory_remove_association",
         "memory_snapshot",
+        "memory_discover",
+        "memory_get_report",
+        "memory_get_facts_at",
+        "memory_reflect_knowledge",
+        "memory_derive",
+        "memory_get_curation",
+        "memory_get_core_memory",
+        "memory_set_aliases",
+        "memory_get_aliases",
+        "memory_get_alias_candidates",
+        "memory_set_ontology",
+        "memory_get_ontology",
+        "memory_export_bundle",
+        "memory_import_bundle",
+        "memory_refresh_documents",
       ]
     `);
     await handler.close();

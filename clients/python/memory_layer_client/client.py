@@ -50,6 +50,18 @@ from .models import (
     TrustAssessmentResponse,
     WorkClaim,
     WorkClaimListResponse,
+    # Phase 5
+    DiscoveryReport,
+    GraphReport,
+    FactsAtResult,
+    KnowledgeReflectionResult,
+    DerivedOutput,
+    CurationSummary,
+    CoreMemoryBundle,
+    AliasCandidate,
+    ExportBundleResult,
+    ImportBundleResult,
+    RefreshResult,
 )
 
 
@@ -127,6 +139,12 @@ def _parse_sse_payload(line: str) -> Optional[MemoryEvent]:
     parsed = json.loads(payload)
     if not isinstance(parsed, dict):
         raise MemoryLayerError("memory-layer event stream returned a non-object payload")
+    if parsed.get("type") == "connected":
+        return None
+    if parsed.get("type") == "error":
+        raise MemoryLayerError(
+            f"memory-layer event stream returned an error frame: {parsed.get('error', 'unknown error')}"
+        )
     return MemoryEvent.from_dict(parsed)
 
 
@@ -1158,8 +1176,9 @@ class MemoryClient:
             "entity_kind": entity_kind,
             "entity_id": entity_id,
         }
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = scope or self.default_scope
+        if resolved_scope:
+            params.update(resolved_scope.to_dict())
         path = _append_query_params("/v1/changes/stream", params)
         headers = _scope_headers(scope, self.default_scope) or None
         with self._client.stream("GET", path, headers=headers) as response:
@@ -1175,14 +1194,16 @@ class MemoryClient:
 
     def poll_changes(
         self,
-        since: str,
+        since: Optional[str] = None,
         scope_level: str = "scope",
         *,
+        cursor: Optional[str | int] = None,
         scope: Optional[MemoryScope] = None,
     ) -> ChangeListResponse:
-        params: dict[str, Any] = {"since": since, "scope_level": scope_level}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        params: dict[str, Any] = {"since": since, "cursor": cursor, "scope_level": scope_level}
+        resolved_scope = scope or self.default_scope
+        if resolved_scope:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/changes", params),
@@ -1316,6 +1337,253 @@ class MemoryClient:
             headers=_scope_headers(scope, self.default_scope),
         )
         return ReverificationResponse.from_dict(payload)
+
+    # --- Phase 5 methods ---
+
+    def discover(
+        self,
+        max_results: Optional[int] = None,
+        min_surprise_score: Optional[float] = None,
+        max_depth: Optional[int] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> DiscoveryReport:
+        params: dict[str, Any] = {"max_results": max_results, "min_score": min_surprise_score, "max_depth": max_depth}
+        payload = self._request(
+            "GET",
+            _append_query_params("/v1/discover", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return DiscoveryReport.from_dict(payload)
+
+    def get_report(
+        self,
+        token_budget: Optional[int] = None,
+        include_sections: Optional[list[str]] = None,
+        filter_by_tags: Optional[list[str]] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> GraphReport:
+        params: dict[str, Any] = {"token_budget": token_budget}
+        if include_sections:
+            params["sections"] = ",".join(include_sections)
+        if filter_by_tags:
+            params["tags"] = ",".join(filter_by_tags)
+        payload = self._request(
+            "GET",
+            _append_query_params("/v1/report", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return GraphReport.from_dict(payload)
+
+    def get_facts_at(
+        self,
+        timestamp: int,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> FactsAtResult:
+        params: dict[str, Any] = {"timestamp": timestamp}
+        payload = self._request(
+            "GET",
+            _append_query_params("/v1/facts-at", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return FactsAtResult.from_dict(payload)
+
+    def reflect_on_knowledge(
+        self,
+        max_facts: Optional[int] = None,
+        include_playbooks: Optional[bool] = None,
+        rate_limit_key: Optional[str] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> KnowledgeReflectionResult:
+        body: dict[str, Any] = {}
+        if max_facts is not None:
+            body["maxFacts"] = max_facts
+        if include_playbooks is not None:
+            body["includePlaybooks"] = include_playbooks
+        if rate_limit_key is not None:
+            body["rateLimitKey"] = rate_limit_key
+        payload = self._request(
+            "POST",
+            "/v1/reflect-knowledge",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return KnowledgeReflectionResult.from_dict(payload)
+
+    def derive(
+        self,
+        output_types: Optional[list[str]] = None,
+        max_outputs: Optional[int] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> list[DerivedOutput]:
+        body: dict[str, Any] = {}
+        if output_types is not None:
+            body["outputTypes"] = output_types
+        if max_outputs is not None:
+            body["maxOutputs"] = max_outputs
+        payload = self._request(
+            "POST",
+            "/v1/derive",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return [DerivedOutput.from_dict(o) for o in payload.get("outputs", [])]
+
+    def get_curation_summary(
+        self,
+        since: Optional[int] = None,
+        action_types: Optional[list[str]] = None,
+        limit: Optional[int] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> CurationSummary:
+        params: dict[str, Any] = {"since": since, "limit": limit}
+        if action_types:
+            params["action_types"] = ",".join(action_types)
+        payload = self._request(
+            "GET",
+            _append_query_params("/v1/curation", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return CurationSummary.from_dict(payload)
+
+    def get_core_memory(
+        self,
+        token_budget: Optional[int] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> CoreMemoryBundle:
+        params: dict[str, Any] = {"token_budget": token_budget}
+        payload = self._request(
+            "GET",
+            _append_query_params("/v1/core-memory", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return CoreMemoryBundle.from_dict(payload)
+
+    def set_aliases(
+        self,
+        alias_map: dict[str, list[str]],
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> None:
+        self._request(
+            "POST",
+            "/v1/aliases",
+            _merge_scope({"aliasMap": alias_map}, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+
+    def get_aliases(
+        self,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> dict[str, list[str]]:
+        payload = self._request(
+            "GET",
+            "/v1/aliases",
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return dict(payload.get("aliasMap", {}))
+
+    def get_alias_candidates(
+        self,
+        min_similarity: Optional[float] = None,
+        max_candidates: Optional[int] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> list[AliasCandidate]:
+        params: dict[str, Any] = {"min_similarity": min_similarity, "max_candidates": max_candidates}
+        payload = self._request(
+            "GET",
+            _append_query_params("/v1/alias-candidates", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return [AliasCandidate.from_dict(c) for c in payload.get("candidates", [])]
+
+    def set_ontology(
+        self,
+        ontology: dict[str, Any],
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> None:
+        self._request(
+            "POST",
+            "/v1/ontology",
+            _merge_scope({"ontology": ontology}, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+
+    def get_ontology(
+        self,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> Optional[dict[str, Any]]:
+        payload = self._request(
+            "GET",
+            "/v1/ontology",
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return payload.get("ontology")
+
+    def export_bundle(
+        self,
+        name: str,
+        include_tags: Optional[list[str]] = None,
+        knowledge_class_filter: Optional[list[str]] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> ExportBundleResult:
+        body: dict[str, Any] = {"name": name}
+        if include_tags is not None:
+            body["includeTags"] = include_tags
+        if knowledge_class_filter is not None:
+            body["knowledgeClassFilter"] = knowledge_class_filter
+        payload = self._request(
+            "POST",
+            "/v1/bundles/export",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return ExportBundleResult.from_dict(payload)
+
+    def import_bundle(
+        self,
+        bundle: dict[str, Any],
+        conflict_resolution: str = "skip",
+        preserve_trust: bool = False,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> ImportBundleResult:
+        payload = self._request(
+            "POST",
+            "/v1/bundles/import",
+            _merge_scope(
+                {"bundle": bundle, "conflictResolution": conflict_resolution, "preserveTrust": preserve_trust},
+                scope,
+                self.default_scope,
+            ),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return ImportBundleResult.from_dict(payload)
+
+    def refresh_documents(
+        self,
+        documents: list[dict[str, Any]],
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> RefreshResult:
+        payload = self._request(
+            "POST",
+            "/v1/refresh-documents",
+            _merge_scope({"documents": documents}, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return RefreshResult.from_dict(payload)
 
 
 class AsyncMemoryClient:
@@ -2317,8 +2585,9 @@ class AsyncMemoryClient:
             "entity_kind": entity_kind,
             "entity_id": entity_id,
         }
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = scope or self.default_scope
+        if resolved_scope:
+            params.update(resolved_scope.to_dict())
         path = _append_query_params("/v1/changes/stream", params)
         headers = _scope_headers(scope, self.default_scope) or None
         async with self._client.stream("GET", path, headers=headers) as response:
@@ -2334,14 +2603,16 @@ class AsyncMemoryClient:
 
     async def poll_changes(
         self,
-        since: str,
+        since: Optional[str] = None,
         scope_level: str = "scope",
         *,
+        cursor: Optional[str | int] = None,
         scope: Optional[MemoryScope] = None,
     ) -> ChangeListResponse:
-        params: dict[str, Any] = {"since": since, "scope_level": scope_level}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        params: dict[str, Any] = {"since": since, "cursor": cursor, "scope_level": scope_level}
+        resolved_scope = scope or self.default_scope
+        if resolved_scope:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/changes", params),
@@ -2475,3 +2746,250 @@ class AsyncMemoryClient:
             headers=_scope_headers(scope, self.default_scope),
         )
         return ReverificationResponse.from_dict(payload)
+
+    # --- Phase 5 methods ---
+
+    async def discover(
+        self,
+        max_results: Optional[int] = None,
+        min_surprise_score: Optional[float] = None,
+        max_depth: Optional[int] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> DiscoveryReport:
+        params: dict[str, Any] = {"max_results": max_results, "min_score": min_surprise_score, "max_depth": max_depth}
+        payload = await self._request(
+            "GET",
+            _append_query_params("/v1/discover", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return DiscoveryReport.from_dict(payload)
+
+    async def get_report(
+        self,
+        token_budget: Optional[int] = None,
+        include_sections: Optional[list[str]] = None,
+        filter_by_tags: Optional[list[str]] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> GraphReport:
+        params: dict[str, Any] = {"token_budget": token_budget}
+        if include_sections:
+            params["sections"] = ",".join(include_sections)
+        if filter_by_tags:
+            params["tags"] = ",".join(filter_by_tags)
+        payload = await self._request(
+            "GET",
+            _append_query_params("/v1/report", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return GraphReport.from_dict(payload)
+
+    async def get_facts_at(
+        self,
+        timestamp: int,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> FactsAtResult:
+        params: dict[str, Any] = {"timestamp": timestamp}
+        payload = await self._request(
+            "GET",
+            _append_query_params("/v1/facts-at", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return FactsAtResult.from_dict(payload)
+
+    async def reflect_on_knowledge(
+        self,
+        max_facts: Optional[int] = None,
+        include_playbooks: Optional[bool] = None,
+        rate_limit_key: Optional[str] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> KnowledgeReflectionResult:
+        body: dict[str, Any] = {}
+        if max_facts is not None:
+            body["maxFacts"] = max_facts
+        if include_playbooks is not None:
+            body["includePlaybooks"] = include_playbooks
+        if rate_limit_key is not None:
+            body["rateLimitKey"] = rate_limit_key
+        payload = await self._request(
+            "POST",
+            "/v1/reflect-knowledge",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return KnowledgeReflectionResult.from_dict(payload)
+
+    async def derive(
+        self,
+        output_types: Optional[list[str]] = None,
+        max_outputs: Optional[int] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> list[DerivedOutput]:
+        body: dict[str, Any] = {}
+        if output_types is not None:
+            body["outputTypes"] = output_types
+        if max_outputs is not None:
+            body["maxOutputs"] = max_outputs
+        payload = await self._request(
+            "POST",
+            "/v1/derive",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return [DerivedOutput.from_dict(o) for o in payload.get("outputs", [])]
+
+    async def get_curation_summary(
+        self,
+        since: Optional[int] = None,
+        action_types: Optional[list[str]] = None,
+        limit: Optional[int] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> CurationSummary:
+        params: dict[str, Any] = {"since": since, "limit": limit}
+        if action_types:
+            params["action_types"] = ",".join(action_types)
+        payload = await self._request(
+            "GET",
+            _append_query_params("/v1/curation", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return CurationSummary.from_dict(payload)
+
+    async def get_core_memory(
+        self,
+        token_budget: Optional[int] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> CoreMemoryBundle:
+        params: dict[str, Any] = {"token_budget": token_budget}
+        payload = await self._request(
+            "GET",
+            _append_query_params("/v1/core-memory", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return CoreMemoryBundle.from_dict(payload)
+
+    async def set_aliases(
+        self,
+        alias_map: dict[str, list[str]],
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> None:
+        await self._request(
+            "POST",
+            "/v1/aliases",
+            _merge_scope({"aliasMap": alias_map}, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+
+    async def get_aliases(
+        self,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> dict[str, list[str]]:
+        payload = await self._request(
+            "GET",
+            "/v1/aliases",
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return dict(payload.get("aliasMap", {}))
+
+    async def get_alias_candidates(
+        self,
+        min_similarity: Optional[float] = None,
+        max_candidates: Optional[int] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> list[AliasCandidate]:
+        params: dict[str, Any] = {"min_similarity": min_similarity, "max_candidates": max_candidates}
+        payload = await self._request(
+            "GET",
+            _append_query_params("/v1/alias-candidates", params),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return [AliasCandidate.from_dict(c) for c in payload.get("candidates", [])]
+
+    async def set_ontology(
+        self,
+        ontology: dict[str, Any],
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> None:
+        await self._request(
+            "POST",
+            "/v1/ontology",
+            _merge_scope({"ontology": ontology}, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+
+    async def get_ontology(
+        self,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> Optional[dict[str, Any]]:
+        payload = await self._request(
+            "GET",
+            "/v1/ontology",
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return payload.get("ontology")
+
+    async def export_bundle(
+        self,
+        name: str,
+        include_tags: Optional[list[str]] = None,
+        knowledge_class_filter: Optional[list[str]] = None,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> ExportBundleResult:
+        body: dict[str, Any] = {"name": name}
+        if include_tags is not None:
+            body["includeTags"] = include_tags
+        if knowledge_class_filter is not None:
+            body["knowledgeClassFilter"] = knowledge_class_filter
+        payload = await self._request(
+            "POST",
+            "/v1/bundles/export",
+            _merge_scope(body, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return ExportBundleResult.from_dict(payload)
+
+    async def import_bundle(
+        self,
+        bundle: dict[str, Any],
+        conflict_resolution: str = "skip",
+        preserve_trust: bool = False,
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> ImportBundleResult:
+        payload = await self._request(
+            "POST",
+            "/v1/bundles/import",
+            _merge_scope(
+                {"bundle": bundle, "conflictResolution": conflict_resolution, "preserveTrust": preserve_trust},
+                scope,
+                self.default_scope,
+            ),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return ImportBundleResult.from_dict(payload)
+
+    async def refresh_documents(
+        self,
+        documents: list[dict[str, Any]],
+        *,
+        scope: Optional[MemoryScope] = None,
+    ) -> RefreshResult:
+        payload = await self._request(
+            "POST",
+            "/v1/refresh-documents",
+            _merge_scope({"documents": documents}, scope, self.default_scope),
+            headers=_scope_headers(scope, self.default_scope),
+        )
+        return RefreshResult.from_dict(payload)

@@ -260,6 +260,7 @@ const TOOLS: McpTool[] = [
       properties: {
         query: { type: 'string', description: 'Search query' },
         limit: { type: 'number', description: 'Max results (default: 10)' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Optional tag filter — only return knowledge matching these tags' },
       },
       required: ['query'],
     },
@@ -277,6 +278,7 @@ const TOOLS: McpTool[] = [
           description: 'Cross-scope level (default: workspace)',
         },
         limit: { type: 'number', description: 'Max results (default: 10)' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Optional tag filter — only return knowledge matching these tags' },
       },
       required: ['query'],
     },
@@ -736,6 +738,208 @@ const TOOLS: McpTool[] = [
         },
       },
       required: ['action', 'sessionId'],
+    },
+  },
+  // --- Phase 5 tools ---
+  {
+    name: 'memory_discover',
+    description: 'Discover surprising connections and high-centrality entities in the knowledge graph.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        maxResults: { type: 'number', description: 'Maximum surprise results to return (default: 10)' },
+        minSurpriseScore: { type: 'number', description: 'Minimum surprise score threshold 0-1' },
+        maxDepth: { type: 'number', description: 'Maximum graph traversal depth' },
+      },
+    },
+  },
+  {
+    name: 'memory_get_report',
+    description: 'Generate a structured graph report of the knowledge base with token budget control.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tokenBudget: { type: 'number', description: 'Token budget for the report' },
+        includeSections: { type: 'array', items: { type: 'string' }, description: 'Sections to include' },
+        filterByTags: { type: 'array', items: { type: 'string' }, description: 'Filter knowledge by tags' },
+      },
+    },
+  },
+  {
+    name: 'memory_get_facts_at',
+    description: 'Get knowledge facts valid at a specific timestamp using fast temporal filtering with validity window fallback.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        timestamp: { type: 'number', description: 'Unix timestamp (epoch seconds) to query facts at' },
+      },
+      required: ['timestamp'],
+    },
+  },
+  {
+    name: 'memory_reflect_knowledge',
+    description: 'Run the knowledge reflection engine to discover new facts, recurring patterns, and alias candidates from existing knowledge.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        maxFacts: { type: 'number', description: 'Maximum new facts to produce (default: 10)' },
+        includePlaybooks: { type: 'boolean', description: 'Include playbook-derived patterns (default: true)' },
+        rateLimitKey: { type: 'string', description: 'Key for rate-limiting reflection calls' },
+      },
+    },
+  },
+  {
+    name: 'memory_derive',
+    description: 'Produce typed draft outputs (playbook candidates, coding rules, anti-patterns, project summaries) from reflection results and active knowledge.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        outputTypes: {
+          type: 'array',
+          items: { type: 'string', enum: ['playbook_candidate', 'coding_rule', 'anti_pattern', 'project_summary'] },
+          description: 'Output types to produce (default: all)',
+        },
+        maxOutputs: { type: 'number', description: 'Maximum outputs to return (default: 20)' },
+      },
+    },
+  },
+  {
+    name: 'memory_get_curation',
+    description: 'Get a structured curation summary aggregating recent actions from maintenance, reflection, ontology, and derived pipelines.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        since: { type: 'number', description: 'Only include actions after this timestamp (epoch seconds)' },
+        actionTypes: {
+          type: 'array',
+          items: { type: 'string', enum: ['retired', 'expired', 'demoted', 'reflected', 'merged', 'derived', 'reverified'] },
+          description: 'Filter by action types',
+        },
+        limit: { type: 'number', description: 'Maximum actions to return (default: 100)' },
+      },
+    },
+  },
+  {
+    name: 'memory_get_core_memory',
+    description: 'Retrieve the core memory bundle: identity facts, constraints, norms, active work items, and top playbook.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tokenBudget: { type: 'number', description: 'Maximum token budget (default: 1500)' },
+        includeClasses: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Restrict to specific knowledge classes',
+        },
+      },
+    },
+  },
+  {
+    name: 'memory_set_aliases',
+    description: 'Set the alias map for entity name canonicalization during extraction.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        aliases: {
+          type: 'object',
+          description: 'Alias map: { canonical_name: [alias1, alias2, ...] }',
+          additionalProperties: { type: 'array', items: { type: 'string' } },
+        },
+      },
+      required: ['aliases'],
+    },
+  },
+  {
+    name: 'memory_get_aliases',
+    description: 'Get the current alias map configuration.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'memory_get_alias_candidates',
+    description: 'Discover potential alias pairs from entity name similarity in the knowledge base.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        threshold: { type: 'number', description: 'Minimum similarity score 0-1 (default: 0.85)' },
+        maxCandidates: { type: 'number', description: 'Maximum candidates to return (default: 20)' },
+      },
+    },
+  },
+  {
+    name: 'memory_set_ontology',
+    description: 'Set the ontology configuration with entity type definitions, relationship constraints, and validation rules.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entityTypes: { type: 'array', items: { type: 'object' }, description: 'Entity type definitions' },
+        relationshipConstraints: { type: 'array', items: { type: 'object' }, description: 'Relationship constraints' },
+        validationRules: { type: 'array', items: { type: 'object' }, description: 'Validation rules' },
+      },
+      required: ['entityTypes', 'relationshipConstraints', 'validationRules'],
+    },
+  },
+  {
+    name: 'memory_get_ontology',
+    description: 'Get the current ontology configuration.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'memory_export_bundle',
+    description: 'Export knowledge and playbooks as a portable bundle.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Bundle name' },
+        includeTags: { type: 'array', items: { type: 'string' }, description: 'Filter exported knowledge by tags' },
+        knowledgeClassFilter: { type: 'array', items: { type: 'string' }, description: 'Filter by knowledge class' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'memory_import_bundle',
+    description: 'Import a knowledge bundle into the current scope.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        bundle: { type: 'object', description: 'The MemoryBundle object to import' },
+        conflictResolution: {
+          type: 'string',
+          enum: ['skip', 'overwrite', 'merge', 'trust_higher'],
+          description: 'How to resolve conflicts with existing knowledge',
+        },
+        preserveTrust: { type: 'boolean', description: 'Preserve trust scores from the bundle (default: false)' },
+      },
+      required: ['bundle', 'conflictResolution'],
+    },
+  },
+  {
+    name: 'memory_refresh_documents',
+    description: 'Re-ingest source documents that have changed since last ingestion.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        documents: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              title: { type: 'string', description: 'Document title (used to match stored documents)' },
+              contentHash: { type: 'string', description: 'SHA-256 hash of current content' },
+              content: { type: 'string', description: 'New content to re-ingest (required when document has changed)' },
+            },
+            required: ['title', 'contentHash'],
+          },
+          description: 'Documents to check and refresh',
+        },
+      },
+      required: ['documents'],
     },
   },
 ];
@@ -1304,9 +1508,12 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           return jsonResult(serializeTimelineResult(events));
         }
         case 'memory_search': {
+          const searchOpts: Record<string, unknown> = {};
+          if (args.limit != null) searchOpts.limit = parseLimit(args.limit);
+          if (Array.isArray(args.tags)) searchOpts.tags = args.tags;
           const results = await requestManager.search(
             requireString(args.query, 'query'),
-            args.limit != null ? { limit: parseLimit(args.limit) } : undefined,
+            Object.keys(searchOpts).length > 0 ? searchOpts : undefined,
           );
           return jsonResult({
             turns: results.turns.map((r) => ({
@@ -1324,12 +1531,15 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           });
         }
         case 'memory_search_cross_scope': {
+          const crossSearchOpts: Record<string, unknown> = {};
+          if (args.limit != null) crossSearchOpts.limit = parseLimit(args.limit);
+          if (Array.isArray(args.tags)) crossSearchOpts.tags = args.tags;
           const results = await requestManager.searchCrossScope(
             requireString(args.query, 'query'),
             (args.scopeLevel == null
               ? 'workspace'
               : requireEnum(args.scopeLevel, ['workspace', 'system', 'tenant'], 'scopeLevel')) as ScopeLevel,
-            args.limit != null ? { limit: parseLimit(args.limit) } : undefined,
+            Object.keys(crossSearchOpts).length > 0 ? crossSearchOpts : undefined,
           );
           return jsonResult({
             knowledge: results.knowledge.map((r) => ({
@@ -1759,6 +1969,128 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           const snapshot = runtime.getSnapshot();
           return jsonResult({ snapshot: snapshot ? { ...snapshot, sessionId } : null });
         }
+        // --- Phase 5 tool handlers ---
+        case 'memory_discover': {
+          const report = await requestManager.discover({
+            maxResults: parseLimit(args.maxResults) ?? undefined,
+            minSurpriseScore: args.minSurpriseScore != null
+              ? parseOptionalFiniteNumber(args.minSurpriseScore, { name: 'minSurpriseScore' }, failMcpValidation) ?? undefined
+              : undefined,
+            maxDepth: parseOptionalNonNegativeInteger(args.maxDepth, 'maxDepth'),
+          });
+          return jsonResult(report);
+        }
+        case 'memory_get_report': {
+          const report = await requestManager.getGraphReport({
+            tokenBudget: parseOptionalNonNegativeInteger(args.tokenBudget, 'tokenBudget'),
+            includeSections: Array.isArray(args.includeSections) ? args.includeSections as string[] : undefined,
+            filterByTags: Array.isArray(args.filterByTags) ? args.filterByTags as string[] : undefined,
+          });
+          return jsonResult(report);
+        }
+        case 'memory_get_facts_at': {
+          const timestamp = parseRequiredFiniteInteger(args.timestamp, 'timestamp', { min: 0 });
+          const factsResult = await requestManager.getFactsAt(timestamp);
+          return jsonResult(factsResult);
+        }
+        case 'memory_reflect_knowledge': {
+          const reflectionResult = await requestManager.reflectOnKnowledge({
+            maxFacts: parseOptionalNonNegativeInteger(args.maxFacts, 'maxFacts'),
+            includePlaybooks: args.includePlaybooks != null ? Boolean(args.includePlaybooks) : undefined,
+            rateLimitKey: optionalString(args.rateLimitKey, 'rateLimitKey'),
+          });
+          return jsonResult(reflectionResult);
+        }
+        case 'memory_derive': {
+          const derived = await requestManager.derive({
+            outputTypes: Array.isArray(args.outputTypes) ? args.outputTypes as string[] : undefined,
+            maxOutputs: parseOptionalNonNegativeInteger(args.maxOutputs, 'maxOutputs'),
+          });
+          return jsonResult(derived);
+        }
+        case 'memory_get_curation': {
+          const curation = await requestManager.getCurationSummary(undefined, {
+            since: args.since != null
+              ? parseOptionalFiniteNumber(args.since, { name: 'since' }, failMcpValidation) ?? undefined
+              : undefined,
+            actionTypes: Array.isArray(args.actionTypes) ? args.actionTypes as unknown as import('../contracts/curation.js').CurationActionType[] : undefined,
+            limit: parseLimit(args.limit),
+          });
+          return jsonResult(curation);
+        }
+        case 'memory_get_core_memory': {
+          const coreMemory = await requestManager.getCoreMemory({
+            tokenBudget: parseOptionalNonNegativeInteger(args.tokenBudget, 'tokenBudget'),
+            includeClasses: Array.isArray(args.includeClasses) ? args.includeClasses as unknown as import('../contracts/types.js').KnowledgeClass[] : undefined,
+          });
+          return jsonResult(coreMemory);
+        }
+        case 'memory_set_aliases': {
+          if (!isRecord(args.aliases)) {
+            throw new McpValidationError('Missing or invalid field: aliases');
+          }
+          requestManager.setAliases(args.aliases as Record<string, string[]>);
+          return jsonResult({ success: true });
+        }
+        case 'memory_get_aliases': {
+          const aliases = requestManager.getAliases();
+          return jsonResult({ aliases: aliases ?? {} });
+        }
+        case 'memory_get_alias_candidates': {
+          const candidates = await requestManager.getAliasCandidates({
+            threshold: args.threshold != null
+              ? parseOptionalFiniteNumber(args.threshold, { name: 'threshold' }, failMcpValidation) ?? undefined
+              : undefined,
+            maxCandidates: parseOptionalNonNegativeInteger(args.maxCandidates, 'maxCandidates'),
+          });
+          return jsonResult({ candidates });
+        }
+        case 'memory_set_ontology': {
+          if (!Array.isArray(args.entityTypes) || !Array.isArray(args.relationshipConstraints) || !Array.isArray(args.validationRules)) {
+            throw new McpValidationError('Missing required fields: entityTypes, relationshipConstraints, validationRules');
+          }
+          requestManager.setOntology({
+            entityTypes: args.entityTypes,
+            relationshipConstraints: args.relationshipConstraints,
+            validationRules: args.validationRules,
+          });
+          return jsonResult({ success: true });
+        }
+        case 'memory_get_ontology': {
+          const ontology = requestManager.getOntology();
+          return jsonResult({ ontology: ontology ?? null });
+        }
+        case 'memory_export_bundle': {
+          const bundleName = requireString(args.name, 'name');
+          const bundle = requestManager.exportBundle(bundleName, {
+            includeTags: Array.isArray(args.includeTags) ? args.includeTags as string[] : undefined,
+            knowledgeClassFilter: Array.isArray(args.knowledgeClassFilter) ? args.knowledgeClassFilter as unknown as import('../contracts/types.js').KnowledgeClass[] : undefined,
+          });
+          return jsonResult(bundle);
+        }
+        case 'memory_import_bundle': {
+          if (!isRecord(args.bundle)) {
+            throw new McpValidationError('Missing or invalid field: bundle');
+          }
+          const conflictResolution = requireEnum(
+            args.conflictResolution,
+            ['skip', 'overwrite', 'merge', 'trust_higher'] as const,
+            'conflictResolution',
+          );
+          const importResult = requestManager.importBundle(args.bundle as any, {
+            conflictResolution,
+            targetScope: resolveScopeInput(config.scope, args) as MemoryScope,
+            preserveTrust: args.preserveTrust != null ? Boolean(args.preserveTrust) : undefined,
+          });
+          return jsonResult(importResult);
+        }
+        case 'memory_refresh_documents': {
+          if (!Array.isArray(args.documents)) {
+            throw new McpValidationError('Missing or invalid field: documents');
+          }
+          const refreshResult = requestManager.refreshDocuments(args.documents);
+          return jsonResult(refreshResult);
+        }
         default:
           return errorResult(`Unknown tool: ${name}`);
       }
@@ -1797,13 +2129,6 @@ export async function startMcpServer(config: McpServerConfig = {}): Promise<void
   // MCP over stdio protocol
   const readline = await import('readline');
   const rl = readline.createInterface({ input: process.stdin });
-
-  process.stdout.write(
-    JSON.stringify({
-      jsonrpc: '2.0',
-      method: 'notifications/initialized',
-    }) + '\n',
-  );
 
   rl.on('line', async (line: string) => {
     try {

@@ -29,6 +29,24 @@ export const THRESHOLDS = {
   snapshotStability: 0.95,
   snapshotLiveWrites: 0.95,
   snapshotRefresh: 0.9,
+  // Phase 5: Discovery
+  discoverSurpriseQuality: 0.5,
+  edgeProvenanceRanking: 0.8,
+  graphReportTokenBudget: 0.9,
+  // Phase 5: Temporal
+  temporalExtractionAccuracy: 0.8,
+  factsAtFastPath: 0.85,
+  timeFormattingQuality: 0.85,
+  // Phase 5: Reflection
+  rationaleExtractionAccuracy: 0.8,
+  reflectionPatternQuality: 0.8,
+  derivedOutputAccuracy: 0.8,
+  curationCompleteness: 0.8,
+  // Phase 5: Intelligence
+  coreMemoryTokenBudget: 0.9,
+  tagFilteringAccuracy: 0.85,
+  aliasResolutionQuality: 0.5,
+  clusterCoherence: 0.5,
 };
 
 export function assertScenario(name, passed, detail = {}) {
@@ -229,5 +247,19 @@ export function baselineMetrics() {
     snapshotStability: 0,
     snapshotLiveWrites: 0,
     snapshotRefresh: 0,
+    discoverSurpriseQuality: 0,
+    edgeProvenanceRanking: 0,
+    graphReportTokenBudget: 0,
+    temporalExtractionAccuracy: 0,
+    factsAtFastPath: 0,
+    timeFormattingQuality: 0,
+    rationaleExtractionAccuracy: 0,
+    reflectionPatternQuality: 0,
+    derivedOutputAccuracy: 0,
+    curationCompleteness: 0,
+    coreMemoryTokenBudget: 0,
+    tagFilteringAccuracy: 0,
+    aliasResolutionQuality: 0,
+    clusterCoherence: 0,
   };
 }

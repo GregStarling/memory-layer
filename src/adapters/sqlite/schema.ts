@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-export const CURRENT_SCHEMA_VERSION = 14;
+export const CURRENT_SCHEMA_VERSION = 16;
 
 export function createSQLiteSchema(database: Database.Database): void {
   database.pragma('journal_mode = WAL');
@@ -13,7 +13,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id         TEXT    NOT NULL,
       system_id         TEXT    NOT NULL,
       workspace_id      TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id  TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id  TEXT    NOT NULL DEFAULT '',
       scope_id          TEXT    NOT NULL,
       actor             TEXT    NOT NULL,
       role              TEXT    NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
@@ -54,7 +54,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id                TEXT    NOT NULL,
       system_id                TEXT    NOT NULL,
       workspace_id             TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id         TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id         TEXT    NOT NULL DEFAULT '',
       scope_id                 TEXT    NOT NULL,
       summary                  TEXT    NOT NULL,
       key_entities             TEXT    NOT NULL DEFAULT '[]',
@@ -77,7 +77,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id                TEXT    NOT NULL,
       system_id                TEXT    NOT NULL,
       workspace_id             TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id         TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id         TEXT    NOT NULL DEFAULT '',
       scope_id                 TEXT    NOT NULL,
       fact                     TEXT    NOT NULL,
       fact_type                TEXT    NOT NULL,
@@ -149,7 +149,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id            TEXT    NOT NULL,
       system_id            TEXT    NOT NULL,
       workspace_id         TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id     TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id     TEXT    NOT NULL DEFAULT '',
       scope_id             TEXT    NOT NULL,
       working_memory_id    INTEGER REFERENCES working_memory(id),
       fact                 TEXT    NOT NULL,
@@ -178,7 +178,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id            TEXT    NOT NULL,
       system_id            TEXT    NOT NULL,
       workspace_id         TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id     TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id     TEXT    NOT NULL DEFAULT '',
       scope_id             TEXT    NOT NULL,
       working_memory_id    INTEGER NOT NULL REFERENCES working_memory(id) ON DELETE CASCADE,
       fact                 TEXT    NOT NULL,
@@ -205,7 +205,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id            TEXT    NOT NULL,
       system_id            TEXT    NOT NULL,
       workspace_id         TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id     TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id     TEXT    NOT NULL DEFAULT '',
       scope_id             TEXT    NOT NULL,
       knowledge_memory_id  INTEGER REFERENCES knowledge_memory(id) ON DELETE CASCADE,
       knowledge_candidate_id INTEGER REFERENCES knowledge_candidate(id) ON DELETE CASCADE,
@@ -235,7 +235,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id             TEXT    NOT NULL,
       system_id             TEXT    NOT NULL,
       workspace_id          TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id      TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id      TEXT    NOT NULL DEFAULT '',
       scope_id              TEXT    NOT NULL,
       compaction_state      TEXT    NOT NULL DEFAULT 'idle',
       last_compaction_at    INTEGER,
@@ -252,7 +252,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id                 TEXT    NOT NULL,
       system_id                 TEXT    NOT NULL,
       workspace_id              TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id          TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id          TEXT    NOT NULL DEFAULT '',
       scope_id                  TEXT    NOT NULL,
       trigger_type              TEXT    NOT NULL,
       turn_id_start             INTEGER NOT NULL,
@@ -279,7 +279,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id              TEXT    NOT NULL,
       system_id              TEXT    NOT NULL,
       workspace_id           TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id       TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id       TEXT    NOT NULL DEFAULT '',
       scope_id               TEXT    NOT NULL,
       kind                   TEXT    NOT NULL,
       title                  TEXT    NOT NULL,
@@ -302,7 +302,7 @@ export function createSQLiteSchema(database: Database.Database): void {
   `);
 
   const knowledgeMemoryAlterStatements = [
-    "ALTER TABLE knowledge_memory ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT 'default'",
+    "ALTER TABLE knowledge_memory ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE knowledge_memory ADD COLUMN knowledge_state TEXT NOT NULL DEFAULT 'trusted'",
     "ALTER TABLE knowledge_memory ADD COLUMN knowledge_class TEXT NOT NULL DEFAULT 'project_fact'",
     'ALTER TABLE knowledge_memory ADD COLUMN fact_subject TEXT',
@@ -357,14 +357,14 @@ export function createSQLiteSchema(database: Database.Database): void {
   }
 
   const collaborationAlterStatements = [
-    "ALTER TABLE turns ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT 'default'",
-    "ALTER TABLE working_memory ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT 'default'",
-    "ALTER TABLE knowledge_memory_audit ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT 'default'",
-    "ALTER TABLE knowledge_candidate ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT 'default'",
-    "ALTER TABLE knowledge_evidence ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT 'default'",
-    "ALTER TABLE context_monitor ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT 'default'",
-    "ALTER TABLE compaction_log ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT 'default'",
-    "ALTER TABLE work_items ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT 'default'",
+    "ALTER TABLE turns ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE working_memory ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE knowledge_memory_audit ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE knowledge_candidate ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE knowledge_evidence ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE context_monitor ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE compaction_log ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE work_items ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
   ];
 
   for (const statement of collaborationAlterStatements) {
@@ -405,6 +405,13 @@ export function createSQLiteSchema(database: Database.Database): void {
     'UPDATE context_monitor SET collaboration_id = "" WHERE collaboration_id IS NULL OR collaboration_id = "default"',
     'UPDATE compaction_log SET collaboration_id = "" WHERE collaboration_id IS NULL OR collaboration_id = "default"',
     'UPDATE work_items SET collaboration_id = "" WHERE collaboration_id IS NULL OR collaboration_id = "default"',
+    'UPDATE playbooks SET collaboration_id = "" WHERE collaboration_id IS NULL OR collaboration_id = "default"',
+    'UPDATE playbook_revisions SET collaboration_id = "" WHERE collaboration_id IS NULL OR collaboration_id = "default"',
+    'UPDATE associations SET collaboration_id = "" WHERE collaboration_id IS NULL OR collaboration_id = "default"',
+    'UPDATE memory_event_log SET collaboration_id = "" WHERE collaboration_id IS NULL OR collaboration_id = "default"',
+    'UPDATE session_state_current SET collaboration_id = "" WHERE collaboration_id IS NULL OR collaboration_id = "default"',
+    'UPDATE work_claims_current SET collaboration_id = "" WHERE collaboration_id IS NULL OR collaboration_id = "default"',
+    'UPDATE handoff_records SET collaboration_id = "" WHERE collaboration_id IS NULL OR collaboration_id = "default"',
   ];
 
   for (const statement of collaborationBackfills) {
@@ -421,13 +428,38 @@ export function createSQLiteSchema(database: Database.Database): void {
     // Column already exists on upgraded databases.
   }
 
+  // v15: Phase 5 field extensions
+  const phase5AlterStatements = [
+    'ALTER TABLE knowledge_memory ADD COLUMN valid_from INTEGER',
+    'ALTER TABLE knowledge_memory ADD COLUMN valid_until INTEGER',
+    'ALTER TABLE knowledge_memory ADD COLUMN rationale TEXT',
+    "ALTER TABLE knowledge_memory ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
+    'ALTER TABLE playbooks ADD COLUMN rationale TEXT',
+    "ALTER TABLE associations ADD COLUMN provenance TEXT NOT NULL DEFAULT 'inferred'",
+  ];
+
+  for (const statement of phase5AlterStatements) {
+    try {
+      database.exec(statement);
+    } catch {
+      // Column already exists on upgraded databases.
+    }
+  }
+
+  // v15: Backfill existing associations confidence from 0.5 → 0.8
+  try {
+    database.exec("UPDATE associations SET confidence = 0.8 WHERE confidence = 0.5");
+  } catch {
+    // Best-effort backfill.
+  }
+
   database.exec(`
     CREATE TABLE IF NOT EXISTS playbooks (
       id                       INTEGER PRIMARY KEY AUTOINCREMENT,
       tenant_id                TEXT    NOT NULL,
       system_id                TEXT    NOT NULL,
       workspace_id             TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id         TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id         TEXT    NOT NULL DEFAULT '',
       scope_id                 TEXT    NOT NULL,
       title                    TEXT    NOT NULL,
       description              TEXT    NOT NULL,
@@ -437,6 +469,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       scripts                  TEXT    NOT NULL DEFAULT '[]',
       assets                   TEXT    NOT NULL DEFAULT '[]',
       tags                     TEXT    NOT NULL DEFAULT '[]',
+      rationale                TEXT,
       status                   TEXT    NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'deprecated', 'archived')),
       source_session_id        TEXT,
       source_working_memory_id INTEGER REFERENCES working_memory(id),
@@ -472,7 +505,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id         TEXT    NOT NULL,
       system_id         TEXT    NOT NULL,
       workspace_id      TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id  TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id  TEXT    NOT NULL DEFAULT '',
       scope_id          TEXT    NOT NULL,
       playbook_id       INTEGER NOT NULL REFERENCES playbooks(id) ON DELETE CASCADE,
       instructions      TEXT    NOT NULL,
@@ -488,14 +521,15 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id         TEXT    NOT NULL,
       system_id         TEXT    NOT NULL,
       workspace_id      TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id  TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id  TEXT    NOT NULL DEFAULT '',
       scope_id          TEXT    NOT NULL,
       source_kind       TEXT    NOT NULL,
       source_id         INTEGER NOT NULL,
       target_kind       TEXT    NOT NULL,
       target_id         INTEGER NOT NULL,
       association_type   TEXT    NOT NULL,
-      confidence        REAL    NOT NULL DEFAULT 0.5,
+      provenance        TEXT    NOT NULL DEFAULT 'inferred',
+      confidence        REAL    NOT NULL DEFAULT 0.8,
       auto_generated    INTEGER NOT NULL DEFAULT 0,
       created_at        INTEGER NOT NULL,
       UNIQUE(source_kind, source_id, target_kind, target_id, association_type)
@@ -510,7 +544,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id          TEXT    NOT NULL,
       system_id          TEXT    NOT NULL,
       workspace_id       TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id   TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id   TEXT    NOT NULL DEFAULT '',
       scope_id           TEXT    NOT NULL,
       session_id         TEXT,
       actor_id           TEXT,
@@ -540,7 +574,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id          TEXT    NOT NULL,
       system_id          TEXT    NOT NULL,
       workspace_id       TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id   TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id   TEXT    NOT NULL DEFAULT '',
       scope_id           TEXT    NOT NULL,
       session_id         TEXT    NOT NULL,
       current_objective  TEXT,
@@ -568,7 +602,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id          TEXT    NOT NULL,
       system_id          TEXT    NOT NULL,
       workspace_id       TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id   TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id   TEXT    NOT NULL DEFAULT '',
       scope_id           TEXT    NOT NULL,
       work_item_id       INTEGER NOT NULL UNIQUE REFERENCES work_items(id) ON DELETE CASCADE,
       session_id         TEXT,
@@ -598,7 +632,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id          TEXT    NOT NULL,
       system_id          TEXT    NOT NULL,
       workspace_id       TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id   TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id   TEXT    NOT NULL DEFAULT '',
       scope_id           TEXT    NOT NULL,
       work_item_id       INTEGER NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
       session_id         TEXT,
@@ -674,7 +708,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id          TEXT    NOT NULL,
       system_id          TEXT    NOT NULL,
       workspace_id       TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id   TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id   TEXT    NOT NULL DEFAULT '',
       scope_id           TEXT    NOT NULL,
       session_id         TEXT,
       actor_id           TEXT,
@@ -703,7 +737,7 @@ export function createSQLiteSchema(database: Database.Database): void {
       tenant_id          TEXT    NOT NULL,
       system_id          TEXT    NOT NULL,
       workspace_id       TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id   TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id   TEXT    NOT NULL DEFAULT '',
       scope_id           TEXT    NOT NULL,
       session_id         TEXT    NOT NULL,
       current_objective  TEXT,
