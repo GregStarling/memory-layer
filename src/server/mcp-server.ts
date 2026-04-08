@@ -2144,7 +2144,7 @@ export async function startMcpServer(config: McpServerConfig = {}): Promise<void
               capabilities: { tools: {} },
               serverInfo: {
                 name: 'memory-layer',
-                version: '3.1.0',
+                version: '4.0.0',
               },
             },
           }) + '\n',
