@@ -178,6 +178,95 @@ describe('MCP server handler', () => {
     expect(resolution.decision).toBe('denied');
   });
 
+  it('deletes contracts and invariants via tool calls', async () => {
+    handler = createMcpServerHandler();
+
+    // Create a contract and invariant
+    await handler.callTool('memory_put_context_contract', {
+      name: 'test-contract',
+      contract: { tokenBudget: 1000 },
+    });
+    await handler.callTool('memory_put_context_invariant', {
+      id: 'test-inv',
+      title: 'Test',
+      instruction: 'Test instruction.',
+      severity: 'advisory',
+    });
+
+    // Delete contract
+    const deleteContract = await handler.callTool('memory_delete_context_contract', {
+      name: 'test-contract',
+    });
+    expect(deleteContract.isError).toBeUndefined();
+    const contractResult = JSON.parse(deleteContract.content[0].text);
+    expect(contractResult.deleted).toBe(true);
+
+    // Delete invariant
+    const deleteInvariant = await handler.callTool('memory_delete_context_invariant', {
+      id: 'test-inv',
+    });
+    expect(deleteInvariant.isError).toBeUndefined();
+    const invariantResult = JSON.parse(deleteInvariant.content[0].text);
+    expect(invariantResult.deleted).toBe(true);
+
+    // Verify they are gone
+    const config = await handler.callTool('memory_get_context_config', {});
+    const snapshot = JSON.parse(config.content[0].text);
+    expect(snapshot.contracts).toEqual({});
+    expect(snapshot.invariants).toEqual([]);
+  });
+
+  it('returns deleted: false for nonexistent governance resources', async () => {
+    handler = createMcpServerHandler();
+
+    const deleteContract = await handler.callTool('memory_delete_context_contract', {
+      name: 'nonexistent',
+    });
+    const contractResult = JSON.parse(deleteContract.content[0].text);
+    expect(contractResult.deleted).toBe(false);
+
+    const deleteInvariant = await handler.callTool('memory_delete_context_invariant', {
+      id: 'nonexistent',
+    });
+    const invariantResult = JSON.parse(deleteInvariant.content[0].text);
+    expect(invariantResult.deleted).toBe(false);
+  });
+
+  it('returns error for invalid governance input', async () => {
+    handler = createMcpServerHandler();
+
+    // Invalid contract view
+    const badContract = await handler.callTool('memory_put_context_contract', {
+      name: 'bad',
+      contract: { view: 'not_a_view' },
+    });
+    expect(badContract.isError).toBe(true);
+
+    // Missing required invariant fields
+    const badInvariant = await handler.callTool('memory_put_context_invariant', {
+      id: 'bad',
+      title: 'Missing instruction',
+    });
+    expect(badInvariant.isError).toBe(true);
+  });
+
+  it('denies expansion when maxTokenBudget ceiling is exceeded', async () => {
+    handler = createMcpServerHandler({
+      escalationPolicy: {
+        defaultDecision: 'allow',
+        maxTokenBudget: 3000,
+      },
+    });
+
+    const result = await handler.callTool('memory_request_context', {
+      reason: 'need_higher_budget',
+      contract: { tokenBudget: 5000 },
+    });
+    const resolution = JSON.parse(result.content[0].text);
+    expect(resolution.decision).toBe('denied');
+    expect(resolution.rationale).toBeTruthy();
+  });
+
   it('learns facts and searches for them', async () => {
     handler = createMcpServerHandler();
 

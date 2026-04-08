@@ -204,6 +204,29 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
     listSourceDocuments: (scope, options) => Promise.resolve(adapter.listSourceDocuments(scope, options)),
     updateSourceDocument: (id, patch) => Promise.resolve(adapter.updateSourceDocument(id, patch)),
 
+    // Context governance persistence (optional)
+    getGovernanceState: adapter.getGovernanceState
+      ? (scope) => Promise.resolve(adapter.getGovernanceState!(scope))
+      : undefined,
+    upsertDefaultContextContract: adapter.upsertDefaultContextContract
+      ? (scope, contract) => Promise.resolve(adapter.upsertDefaultContextContract!(scope, contract))
+      : undefined,
+    upsertNamedContextContract: adapter.upsertNamedContextContract
+      ? (scope, name, contract) => Promise.resolve(adapter.upsertNamedContextContract!(scope, name, contract))
+      : undefined,
+    deleteNamedContextContract: adapter.deleteNamedContextContract
+      ? (scope, name) => Promise.resolve(adapter.deleteNamedContextContract!(scope, name))
+      : undefined,
+    upsertContextInvariant: adapter.upsertContextInvariant
+      ? (scope, invariant) => Promise.resolve(adapter.upsertContextInvariant!(scope, invariant))
+      : undefined,
+    deleteContextInvariant: adapter.deleteContextInvariant
+      ? (scope, invariantId) => Promise.resolve(adapter.deleteContextInvariant!(scope, invariantId))
+      : undefined,
+    upsertContextEscalationPolicy: adapter.upsertContextEscalationPolicy
+      ? (scope, policy) => Promise.resolve(adapter.upsertContextEscalationPolicy!(scope, policy))
+      : undefined,
+
     async close() {
       adapter.close();
     },

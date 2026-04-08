@@ -186,6 +186,258 @@ describe('HTTP server', () => {
     expect(snapshot.escalationPolicy.byChange.increase_token_budget).toBe('deny');
   });
 
+  it('deletes named contracts and invariants over HTTP', async () => {
+    const base = await setup(3219, { adminApiKey: 'secret-admin' });
+    const adminHeaders = {
+      'Content-Type': 'application/json',
+      'x-admin-key': 'secret-admin',
+    };
+
+    // PUT a named contract
+    const putContract = await fetch(`${base}/v1/context/config/contracts/executor`, {
+      method: 'PUT',
+      headers: adminHeaders,
+      body: JSON.stringify({
+        contract: { tokenBudget: 2000, knowledgeClasses: ['constraint'] },
+      }),
+    });
+    expect(putContract.status).toBe(200);
+
+    // PUT an invariant
+    const putInvariant = await fetch(`${base}/v1/context/config/invariants/english-only`, {
+      method: 'PUT',
+      headers: adminHeaders,
+      body: JSON.stringify({
+        invariant: { title: 'Language', instruction: 'English only.', severity: 'important' },
+      }),
+    });
+    expect(putInvariant.status).toBe(200);
+
+    // DELETE the contract
+    const deleteContract = await fetch(`${base}/v1/context/config/contracts/executor`, {
+      method: 'DELETE',
+      headers: { 'x-admin-key': 'secret-admin' },
+    });
+    expect(deleteContract.status).toBe(200);
+    const contractResult = await deleteContract.json();
+    expect(contractResult.deleted).toBe(true);
+
+    // DELETE the invariant
+    const deleteInvariant = await fetch(`${base}/v1/context/config/invariants/english-only`, {
+      method: 'DELETE',
+      headers: { 'x-admin-key': 'secret-admin' },
+    });
+    expect(deleteInvariant.status).toBe(200);
+    const invariantResult = await deleteInvariant.json();
+    expect(invariantResult.deleted).toBe(true);
+
+    // Confirm they are gone
+    const config = await fetch(`${base}/v1/context/config`, {
+      headers: { 'x-admin-key': 'secret-admin' },
+    });
+    const snapshot = await config.json();
+    expect(snapshot.contracts).toEqual({});
+    expect(snapshot.invariants).toEqual([]);
+  });
+
+  it('returns deleted: false for nonexistent governance resources', async () => {
+    const base = await setup(3220, { adminApiKey: 'secret-admin' });
+    const adminHeaders = { 'x-admin-key': 'secret-admin' };
+
+    const deleteContract = await fetch(`${base}/v1/context/config/contracts/nope`, {
+      method: 'DELETE',
+      headers: adminHeaders,
+    });
+    expect(deleteContract.status).toBe(200);
+    expect((await deleteContract.json()).deleted).toBe(false);
+
+    const deleteInvariant = await fetch(`${base}/v1/context/config/invariants/nope`, {
+      method: 'DELETE',
+      headers: adminHeaders,
+    });
+    expect(deleteInvariant.status).toBe(200);
+    expect((await deleteInvariant.json()).deleted).toBe(false);
+  });
+
+  it('sets and clears the default context contract over HTTP', async () => {
+    const base = await setup(3221, { adminApiKey: 'secret-admin' });
+    const adminHeaders = {
+      'Content-Type': 'application/json',
+      'x-admin-key': 'secret-admin',
+    };
+
+    // Set default contract
+    const setDefault = await fetch(`${base}/v1/context/config/default-contract`, {
+      method: 'PUT',
+      headers: adminHeaders,
+      body: JSON.stringify({ contract: { tokenBudget: 1500, view: 'local_only' } }),
+    });
+    expect(setDefault.status).toBe(200);
+
+    // Verify it's set
+    const config1 = await (await fetch(`${base}/v1/context/config`, { headers: { 'x-admin-key': 'secret-admin' } })).json();
+    expect(config1.defaultContract.tokenBudget).toBe(1500);
+
+    // Clear default contract
+    const clearDefault = await fetch(`${base}/v1/context/config/default-contract`, {
+      method: 'DELETE',
+      headers: { 'x-admin-key': 'secret-admin' },
+    });
+    expect(clearDefault.status).toBe(200);
+
+    // Verify it's cleared
+    const config2 = await (await fetch(`${base}/v1/context/config`, { headers: { 'x-admin-key': 'secret-admin' } })).json();
+    expect(config2.defaultContract).toBeNull();
+  });
+
+  it('rejects governance mutations without admin key', async () => {
+    const base = await setup(3222, { adminApiKey: 'secret-admin' });
+    const headers = { 'Content-Type': 'application/json' };
+
+    const putContract = await fetch(`${base}/v1/context/config/contracts/executor`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ contract: { tokenBudget: 2000 } }),
+    });
+    expect(putContract.status).toBe(403);
+
+    const putInvariant = await fetch(`${base}/v1/context/config/invariants/test`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ invariant: { title: 'Test', instruction: 'Test.', severity: 'advisory' } }),
+    });
+    expect(putInvariant.status).toBe(403);
+
+    const putPolicy = await fetch(`${base}/v1/context/config/escalation-policy`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ policy: { defaultDecision: 'deny' } }),
+    });
+    expect(putPolicy.status).toBe(403);
+
+    const getConfig = await fetch(`${base}/v1/context/config`);
+    expect(getConfig.status).toBe(403);
+  });
+
+  it('rejects invalid governance input with 400', async () => {
+    const base = await setup(3223, { adminApiKey: 'secret-admin' });
+    const adminHeaders = {
+      'Content-Type': 'application/json',
+      'x-admin-key': 'secret-admin',
+    };
+
+    // Malformed contract (view is not a valid enum)
+    const badContract = await fetch(`${base}/v1/context/config/contracts/bad`, {
+      method: 'PUT',
+      headers: adminHeaders,
+      body: JSON.stringify({ contract: { view: 'not_a_view' } }),
+    });
+    expect(badContract.status).toBe(400);
+
+    // Malformed invariant (missing required fields)
+    const badInvariant = await fetch(`${base}/v1/context/config/invariants/bad`, {
+      method: 'PUT',
+      headers: adminHeaders,
+      body: JSON.stringify({ invariant: { title: 'No instruction' } }),
+    });
+    expect(badInvariant.status).toBe(400);
+
+    // Malformed policy (invalid decision)
+    const badPolicy = await fetch(`${base}/v1/context/config/escalation-policy`, {
+      method: 'PUT',
+      headers: adminHeaders,
+      body: JSON.stringify({ policy: { defaultDecision: 'yolo' } }),
+    });
+    expect(badPolicy.status).toBe(400);
+  });
+
+  it('denies expansion when maxTokenBudget ceiling is exceeded', async () => {
+    const base = await setup(3224, {
+      adminApiKey: 'secret-admin',
+      escalationPolicy: {
+        defaultDecision: 'allow',
+        maxTokenBudget: 3000,
+      },
+    });
+
+    const request = await fetch(`${base}/v1/context/request`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reason: 'need_higher_budget',
+        contract: { tokenBudget: 5000 },
+      }),
+    });
+    expect(request.status).toBe(200);
+    const resolution = await request.json();
+    expect(resolution.decision).toBe('denied');
+    expect(resolution.rationale).toBeTruthy();
+  });
+
+  it('denies expansion when maxView ceiling is exceeded', async () => {
+    const base = await setup(3225, {
+      adminApiKey: 'secret-admin',
+      escalationPolicy: {
+        defaultDecision: 'allow',
+        maxView: 'user',
+      },
+    });
+
+    const request = await fetch(`${base}/v1/context/request`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reason: 'missing_workspace_context',
+        contract: { view: 'workspace_shared' },
+      }),
+    });
+    expect(request.status).toBe(200);
+    const resolution = await request.json();
+    expect(resolution.decision).toBe('denied');
+  });
+
+  it('propagates governance mutations to session-scoped managers', async () => {
+    const base = await setup(3226, { adminApiKey: 'secret-admin' });
+    const adminHeaders = {
+      'Content-Type': 'application/json',
+      'x-admin-key': 'secret-admin',
+    };
+
+    // Create a session-scoped manager by capturing a snapshot
+    const snapshotRes = await fetch(`${base}/v1/sessions/test-session/snapshot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    expect(snapshotRes.status).toBe(201);
+
+    // Now put an invariant at the scope level — should propagate to session manager
+    const putInvariant = await fetch(`${base}/v1/context/config/invariants/propagated`, {
+      method: 'PUT',
+      headers: adminHeaders,
+      body: JSON.stringify({
+        invariant: {
+          title: 'Propagation Test',
+          instruction: 'This should reach session managers.',
+          severity: 'important',
+        },
+      }),
+    });
+    expect(putInvariant.status).toBe(200);
+
+    // Verify the session-scoped manager sees the invariant in its context
+    const contextRes = await fetch(`${base}/v1/sessions/test-session/snapshot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    expect(contextRes.status).toBe(201);
+    const payload = await contextRes.json();
+    const invariantIds =
+      payload.snapshot?.context?.invariants?.map((i: { id: string }) => i.id) ?? [];
+    expect(invariantIds).toContain('propagated');
+  });
+
   it('stores and retrieves turns', async () => {
     const base = await setup(13101);
 

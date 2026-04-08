@@ -24,6 +24,12 @@ import type { StorageAdapter } from '../../contracts/storage.js';
 import { UniqueConstraintError } from '../../contracts/storage.js';
 import { ConflictError } from '../../contracts/errors.js';
 import type {
+  ContextContract,
+  ContextInvariant,
+  ContextEscalationPolicy,
+  PersistedGovernanceState,
+} from '../../contracts/context-contract.js';
+import type {
   MemoryEventEntityKind,
   MemoryEventQuery,
   MemoryEventRecord,
@@ -3437,6 +3443,113 @@ function createAdapterFromDatabase(
         .prepare(`UPDATE source_documents SET ${setClauses.join(', ')} WHERE id = ? RETURNING *`)
         .get(...values) as Record<string, unknown> | undefined;
       return row ? mapSourceDocumentRow(row) : null;
+    },
+
+    // ────── Context governance persistence ──────
+
+    getGovernanceState(scope): PersistedGovernanceState | null {
+      const sv = scopeValues(scope);
+      const contractRows = db
+        .prepare(`SELECT name, is_default, contract_json FROM context_contracts WHERE ${SCOPE_WHERE}`)
+        .all(...sv) as Array<{ name: string; is_default: number; contract_json: string }>;
+      const invariantRows = db
+        .prepare(`SELECT invariant_id, title, instruction, severity, scope_level FROM context_invariants WHERE ${SCOPE_WHERE}`)
+        .all(...sv) as Array<{ invariant_id: string; title: string; instruction: string; severity: string | null; scope_level: string | null }>;
+      const policyRow = db
+        .prepare(`SELECT policy_json FROM context_escalation_policies WHERE ${SCOPE_WHERE}`)
+        .get(...sv) as { policy_json: string } | undefined;
+
+      if (contractRows.length === 0 && invariantRows.length === 0 && !policyRow) {
+        return null;
+      }
+
+      let defaultContract: ContextContract | null = null;
+      const namedContracts: Record<string, ContextContract> = {};
+      for (const row of contractRows) {
+        const contract: ContextContract = JSON.parse(row.contract_json);
+        if (row.is_default) {
+          defaultContract = contract;
+        } else {
+          namedContracts[row.name] = contract;
+        }
+      }
+
+      const invariants: ContextInvariant[] = invariantRows.map((row) => ({
+        id: row.invariant_id,
+        title: row.title,
+        instruction: row.instruction,
+        severity: row.severity as ContextInvariant['severity'],
+        scopeLevel: row.scope_level as ContextInvariant['scopeLevel'],
+      }));
+
+      return {
+        defaultContract,
+        namedContracts,
+        invariants,
+        escalationPolicy: policyRow ? JSON.parse(policyRow.policy_json) : null,
+      };
+    },
+
+    upsertDefaultContextContract(scope, contract) {
+      const sv = scopeValues(scope);
+      const now = nowSeconds();
+      if (contract == null) {
+        db.prepare(`DELETE FROM context_contracts WHERE ${SCOPE_WHERE} AND is_default = 1`).run(...sv);
+        return;
+      }
+      db.prepare(
+        `INSERT INTO context_contracts (tenant_id, system_id, workspace_id, collaboration_id, scope_id, name, is_default, contract_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, '__default__', 1, ?, ?, ?)
+         ON CONFLICT(tenant_id, system_id, workspace_id, collaboration_id, scope_id, name)
+         DO UPDATE SET contract_json = excluded.contract_json, updated_at = excluded.updated_at`,
+      ).run(...sv, JSON.stringify(contract), now, now);
+    },
+
+    upsertNamedContextContract(scope, name, contract) {
+      const sv = scopeValues(scope);
+      const now = nowSeconds();
+      db.prepare(
+        `INSERT INTO context_contracts (tenant_id, system_id, workspace_id, collaboration_id, scope_id, name, is_default, contract_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+         ON CONFLICT(tenant_id, system_id, workspace_id, collaboration_id, scope_id, name)
+         DO UPDATE SET contract_json = excluded.contract_json, updated_at = excluded.updated_at`,
+      ).run(...sv, name, JSON.stringify(contract), now, now);
+    },
+
+    deleteNamedContextContract(scope, name): boolean {
+      const result = db
+        .prepare(`DELETE FROM context_contracts WHERE ${SCOPE_WHERE} AND name = ? AND is_default = 0`)
+        .run(...scopeValues(scope), name);
+      return result.changes > 0;
+    },
+
+    upsertContextInvariant(scope, invariant) {
+      const sv = scopeValues(scope);
+      const now = nowSeconds();
+      db.prepare(
+        `INSERT INTO context_invariants (tenant_id, system_id, workspace_id, collaboration_id, scope_id, invariant_id, title, instruction, severity, scope_level, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(tenant_id, system_id, workspace_id, collaboration_id, scope_id, invariant_id)
+         DO UPDATE SET title = excluded.title, instruction = excluded.instruction, severity = excluded.severity, scope_level = excluded.scope_level, updated_at = excluded.updated_at`,
+      ).run(...sv, invariant.id, invariant.title, invariant.instruction, invariant.severity ?? null, invariant.scopeLevel ?? null, now, now);
+    },
+
+    deleteContextInvariant(scope, invariantId): boolean {
+      const result = db
+        .prepare(`DELETE FROM context_invariants WHERE ${SCOPE_WHERE} AND invariant_id = ?`)
+        .run(...scopeValues(scope), invariantId);
+      return result.changes > 0;
+    },
+
+    upsertContextEscalationPolicy(scope, policy) {
+      const sv = scopeValues(scope);
+      const now = nowSeconds();
+      db.prepare(
+        `INSERT INTO context_escalation_policies (tenant_id, system_id, workspace_id, collaboration_id, scope_id, policy_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(tenant_id, system_id, workspace_id, collaboration_id, scope_id)
+         DO UPDATE SET policy_json = excluded.policy_json, updated_at = excluded.updated_at`,
+      ).run(...sv, JSON.stringify(policy), now, now);
     },
 
     transaction<T>(fn: () => T): T {

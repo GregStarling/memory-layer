@@ -55,6 +55,12 @@ import type {
   WorkItem,
   WorkingMemory,
 } from './types.js';
+import type {
+  ContextContract,
+  ContextInvariant,
+  ContextEscalationPolicy,
+  PersistedGovernanceState,
+} from './context-contract.js';
 
 /**
  * Async-first storage adapter interface for remote backends (PostgreSQL, Redis, etc.).
@@ -291,6 +297,15 @@ export interface AsyncStorageAdapter {
   getSourceDocumentByHash(contentHash: string, scope: MemoryScope): Promise<SourceDocument | null>;
   listSourceDocuments(scope: MemoryScope, options?: PaginationOptions): Promise<PaginatedResult<SourceDocument>>;
   updateSourceDocument(id: number, patch: { status?: SourceDocumentStatus; fact_count?: number; processed_at?: number | null }): Promise<SourceDocument | null>;
+
+  // Context governance persistence (optional)
+  getGovernanceState?(scope: MemoryScope): Promise<PersistedGovernanceState | null>;
+  upsertDefaultContextContract?(scope: MemoryScope, contract: ContextContract | null): Promise<void>;
+  upsertNamedContextContract?(scope: MemoryScope, name: string, contract: ContextContract): Promise<void>;
+  deleteNamedContextContract?(scope: MemoryScope, name: string): Promise<boolean>;
+  upsertContextInvariant?(scope: MemoryScope, invariant: ContextInvariant): Promise<void>;
+  deleteContextInvariant?(scope: MemoryScope, invariantId: string): Promise<boolean>;
+  upsertContextEscalationPolicy?(scope: MemoryScope, policy: ContextEscalationPolicy): Promise<void>;
 
   transaction<T>(fn: () => Promise<T>): Promise<T>;
   close(): Promise<void>;

@@ -767,6 +767,35 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
   );
   let escalationPolicy = normalizeContextEscalationPolicy(config.escalationPolicy);
 
+  let governanceLoaded = false;
+  let governanceLoadPromise: Promise<void> | null = null;
+
+  async function ensureGovernanceLoaded(): Promise<void> {
+    if (governanceLoaded) return;
+    if (governanceLoadPromise) return governanceLoadPromise;
+    governanceLoadPromise = (async () => {
+      const persisted = await asyncAdapter.getGovernanceState?.(config.scope);
+      if (persisted) {
+        defaultContextContract = persisted.defaultContract
+          ? cloneContextContract(persisted.defaultContract)
+          : null;
+        namedContextContracts.clear();
+        for (const [name, contract] of Object.entries(persisted.namedContracts)) {
+          namedContextContracts.set(name, cloneContextContract({ name: contract.name ?? name, ...contract })!);
+        }
+        contextInvariants.clear();
+        for (const inv of persisted.invariants) {
+          contextInvariants.set(inv.id, cloneContextInvariant(inv));
+        }
+        if (persisted.escalationPolicy) {
+          escalationPolicy = normalizeContextEscalationPolicy(persisted.escalationPolicy);
+        }
+      }
+      governanceLoaded = true;
+    })();
+    return governanceLoadPromise;
+  }
+
   const onEvent: EventHook = (event) => {
     config.onEvent?.(event);
     config.eventEmitter?.emit({
@@ -1363,6 +1392,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     asOf?: number,
     options?: ContextQueryOptions,
   ): Promise<MemoryContext> {
+    await ensureGovernanceLoaded();
     const resolvedOptions = resolveContextQueryOptions(options);
     const activeTurns = await asyncAdapter.getActiveTurns(config.scope, config.sessionId);
     const relevantTurns = asOf == null
@@ -1777,6 +1807,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     cutoverAt: number | null;
   }> {
     const cutoverAt = await getTemporalCutoverAt();
+    await ensureGovernanceLoaded();
     if (cutoverAt == null || asOf < cutoverAt) {
       return {
         // Pre-cutover replay is best-effort only. The historical filters still
@@ -2076,20 +2107,25 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     },
 
     async requestContextExpansion(request, options) {
+      await ensureGovernanceLoaded();
       const currentContract = resolveContextContractReference(options?.currentContract);
       return buildContextExpansionResolution(request, currentContract);
     },
 
     async getContextGovernance() {
+      await ensureGovernanceLoaded();
       return getGovernanceSnapshot();
     },
 
     async setDefaultContextContract(contract) {
+      await ensureGovernanceLoaded();
       defaultContextContract = cloneContextContract(contract);
+      await asyncAdapter.upsertDefaultContextContract?.(config.scope, contract);
       return cloneContextContract(defaultContextContract);
     },
 
     async putContextContract(name, contract) {
+      await ensureGovernanceLoaded();
       if (!name.trim()) {
         throw new ValidationError('Context contract name is required');
       }
@@ -2098,31 +2134,43 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         name: contract.name ?? name,
       })!;
       namedContextContracts.set(name, stored);
+      await asyncAdapter.upsertNamedContextContract?.(config.scope, name, stored);
       return cloneContextContract(stored)!;
     },
 
     async deleteContextContract(name) {
-      return namedContextContracts.delete(name);
+      await ensureGovernanceLoaded();
+      const deleted = namedContextContracts.delete(name);
+      await asyncAdapter.deleteNamedContextContract?.(config.scope, name);
+      return deleted;
     },
 
     async putContextInvariant(invariant) {
+      await ensureGovernanceLoaded();
       if (!invariant.id.trim()) {
         throw new ValidationError('Context invariant id is required');
       }
       contextInvariants.set(invariant.id, cloneContextInvariant(invariant));
+      await asyncAdapter.upsertContextInvariant?.(config.scope, invariant);
       return cloneContextInvariant(contextInvariants.get(invariant.id)!);
     },
 
     async deleteContextInvariant(id) {
-      return contextInvariants.delete(id);
+      await ensureGovernanceLoaded();
+      const deleted = contextInvariants.delete(id);
+      await asyncAdapter.deleteContextInvariant?.(config.scope, id);
+      return deleted;
     },
 
     async getContextEscalationPolicy() {
+      await ensureGovernanceLoaded();
       return cloneContextEscalationPolicy(escalationPolicy);
     },
 
     async setContextEscalationPolicy(policy) {
+      await ensureGovernanceLoaded();
       escalationPolicy = normalizeContextEscalationPolicy(policy);
+      await asyncAdapter.upsertContextEscalationPolicy?.(config.scope, policy);
       return cloneContextEscalationPolicy(escalationPolicy);
     },
 

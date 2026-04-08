@@ -3,24 +3,19 @@ import {
   type CreateMemoryOptions,
 } from '../core/quick.js';
 import type { MemoryManager } from '../core/manager.js';
-import type { MemoryContext } from '../core/context.js';
 import type {
   ContextContract,
   ContextInvariant,
   ContextEscalationPolicy,
-  ContextGovernanceSnapshot,
 } from '../contracts/context-contract.js';
 import { createMemoryRuntime, type MemoryRuntime } from '../core/runtime.js';
 import type {
   ActorRef,
-  HandoffRecord,
-  WorkClaim,
 } from '../contracts/coordination.js';
 import { normalizeScope, type MemoryScope, type ScopeLevel } from '../contracts/identity.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type { EmbeddingAdapter } from '../contracts/embedding.js';
 import { isMemoryDomainError } from '../contracts/errors.js';
-import type { TemporalStateSnapshot, TimelineResult } from '../contracts/temporal.js';
 import type { FactType, FactConfidence, EpisodeDetailLevel, AssociationTargetKind, AssociationType } from '../contracts/types.js';
 import { ASSOCIATION_TARGET_KINDS, ASSOCIATION_TYPES } from '../contracts/types.js';
 import { ACTOR_KINDS, CONTEXT_VIEW_POLICIES, MEMORY_VISIBILITY_CLASSES } from '../contracts/coordination.js';
@@ -36,7 +31,21 @@ import {
   parseOptionalFiniteInteger,
   parseOptionalFiniteNumber,
   parseOptionalTemporalIdValue,
+  isRecord,
+  createParsers,
+  serializeContextGovernance,
 } from './parsing.js';
+import {
+  DEFAULT_DEGRADED_CONTEXT,
+  resolveDiffEventCaps,
+  serializeActorRef,
+  serializeWorkClaim,
+  serializeHandoffRecord,
+  serializeTimelineResult,
+  serializeContextResponse,
+  serializeTemporalState,
+} from './serialization.js';
+import { scopeKeyFor, withScopeManagers } from './scope-propagation.js';
 
 export interface McpServerConfig {
   /** Database path. Defaults to ':memory:'. */
@@ -92,12 +101,9 @@ interface McpToolResult {
 
 class McpValidationError extends Error {}
 
-const MAX_LIST_LIMIT = 100;
 const MANAGER_CACHE_LIMIT = 256;
 const SESSION_MANAGER_CACHE_LIMIT = 256;
 const RUNTIME_CACHE_LIMIT = 256;
-const DEFAULT_DIFF_MAX_EVENTS = 5000;
-const MAX_DIFF_MAX_EVENTS = 20000;
 const TEMPORAL_ENTITY_KINDS = [
   'turn',
   'working_memory',
@@ -115,26 +121,12 @@ function failMcpValidation(message: string): never {
   throw new McpValidationError(message);
 }
 
-function resolveDiffEventCaps(
-  defaultMaxEvents?: number,
-  maxMaxEvents?: number,
-): { defaultDiffMaxEvents: number; maxDiffMaxEvents: number } {
-  const resolvedMax = maxMaxEvents ?? MAX_DIFF_MAX_EVENTS;
-  const resolvedDefault = defaultMaxEvents ?? DEFAULT_DIFF_MAX_EVENTS;
-  if (!Number.isInteger(resolvedMax) || resolvedMax < 1) {
-    throw new Error('memory-layer: maxDiffMaxEvents must be a positive integer');
-  }
-  if (!Number.isInteger(resolvedDefault) || resolvedDefault < 1) {
-    throw new Error('memory-layer: defaultDiffMaxEvents must be a positive integer');
-  }
-  if (resolvedDefault > resolvedMax) {
-    throw new Error('memory-layer: defaultDiffMaxEvents must not exceed maxDiffMaxEvents');
-  }
-  return {
-    defaultDiffMaxEvents: resolvedDefault,
-    maxDiffMaxEvents: resolvedMax,
-  };
-}
+const {
+  requireString, optionalString, requireStringArray, requireEnum,
+  parseOptionalNonNegativeInteger, parseContextViewPolicy, parseContextContract,
+  parseContextInvariant, parseContextEscalationPolicy, parseActorRef, parseLimit,
+} = createParsers(failMcpValidation);
+
 
 const TOOLS: McpTool[] = [
   {
@@ -1066,177 +1058,6 @@ function jsonResult(data: unknown): McpToolResult {
   };
 }
 
-function serializeContextResponse(
-  context: MemoryContext,
-  options: { includeDebug?: boolean } = {},
-): Record<string, unknown> {
-  return {
-    currentObjective: context.currentObjective,
-    sessionState: context.sessionState,
-    activeTurnCount: context.activeTurns.length,
-    workingMemory: context.workingMemory
-      ? {
-          summary: context.workingMemory.summary,
-          key_entities: context.workingMemory.key_entities,
-          topic_tags: context.workingMemory.topic_tags,
-        }
-      : null,
-    relevantKnowledge: context.relevantKnowledge.map((knowledge) => ({
-      id: knowledge.id,
-      fact: knowledge.fact,
-      fact_type: knowledge.fact_type,
-      confidence: knowledge.confidence,
-    })),
-    activeObjectives: context.activeObjectives.map((objective) => ({
-      id: objective.id,
-      title: objective.title,
-      status: objective.status,
-      visibility_class: objective.visibility_class,
-    })),
-    associatedKnowledge: context.associatedKnowledge.map((knowledge) => ({
-      id: knowledge.id,
-      fact: knowledge.fact,
-      fact_type: knowledge.fact_type,
-      knowledge_class: knowledge.knowledge_class,
-      trust_score: knowledge.trust_score,
-    })),
-    unresolvedWork: context.unresolvedWork,
-    invariants: context.invariants?.map((invariant) => ({
-      id: invariant.id,
-      title: invariant.title,
-      instruction: invariant.instruction,
-      severity: invariant.severity,
-      scope_level: invariant.scopeLevel,
-    })),
-    appliedContract: context.appliedContract ?? null,
-    warnings: context.warnings ?? [],
-    degradedContext: context.degradedContext ?? {
-      isDegraded: false,
-      droppedInvariantIds: [],
-      droppedKnowledgeIds: [],
-      droppedSummaryIds: [],
-      droppedPlaybookIds: [],
-      droppedAssociatedKnowledgeIds: [],
-    },
-    coordinationState: context.coordinationState
-      ? {
-          ownedClaims: context.coordinationState.ownedClaims.map(serializeWorkClaim),
-          pendingInboundHandoffs: context.coordinationState.pendingInboundHandoffs.map(
-            serializeHandoffRecord,
-          ),
-          pendingOutboundHandoffs: context.coordinationState.pendingOutboundHandoffs.map(
-            serializeHandoffRecord,
-          ),
-          sharedWorkItems: context.coordinationState.sharedWorkItems.map((item) => ({
-            id: item.id,
-            title: item.title,
-            status: item.status,
-            visibility_class: item.visibility_class,
-          })),
-        }
-      : null,
-    tokenEstimate: context.tokenEstimate,
-    ...(options.includeDebug
-      ? {
-          debugTrace: context.debugTrace,
-          knowledgeSelectionReasons: context.knowledgeSelectionReasons,
-        }
-      : {}),
-  };
-}
-
-function serializeActorRef(actor: ActorRef): Record<string, unknown> {
-  return {
-    actor_kind: actor.actor_kind,
-    actor_id: actor.actor_id,
-    system_id: actor.system_id,
-    display_name: actor.display_name,
-    metadata: actor.metadata,
-  };
-}
-
-function serializeWorkClaim(claim: WorkClaim): Record<string, unknown> {
-  return {
-    id: claim.id,
-    work_item_id: claim.work_item_id,
-    actor: serializeActorRef(claim.actor),
-    session_id: claim.session_id,
-    claim_token: claim.claim_token,
-    status: claim.status,
-    claimed_at: claim.claimed_at,
-    expires_at: claim.expires_at,
-    released_at: claim.released_at,
-    release_reason: claim.release_reason,
-    source_event_id: claim.source_event_id,
-    visibility_class: claim.visibility_class,
-    version: claim.version,
-  };
-}
-
-function serializeHandoffRecord(handoff: HandoffRecord): Record<string, unknown> {
-  return {
-    id: handoff.id,
-    work_item_id: handoff.work_item_id,
-    from_actor: serializeActorRef(handoff.from_actor),
-    to_actor: serializeActorRef(handoff.to_actor),
-    session_id: handoff.session_id,
-    summary: handoff.summary,
-    context_bundle_ref: handoff.context_bundle_ref,
-    status: handoff.status,
-    created_at: handoff.created_at,
-    accepted_at: handoff.accepted_at,
-    rejected_at: handoff.rejected_at,
-    canceled_at: handoff.canceled_at,
-    expires_at: handoff.expires_at,
-    decision_reason: handoff.decision_reason,
-    source_event_id: handoff.source_event_id,
-    visibility_class: handoff.visibility_class,
-    version: handoff.version,
-  };
-}
-
-function serializeTimelineResult(result: TimelineResult): Record<string, unknown> {
-  return {
-    events: result.events,
-    nextCursor: result.nextCursor,
-  };
-}
-
-function serializeTemporalState(
-  state: TemporalStateSnapshot<MemoryContext>,
-  options: { includeDebug?: boolean } = {},
-): Record<string, unknown> {
-  return {
-    asOf: state.asOf,
-    exact: state.exact,
-    cutoverAt: state.cutoverAt,
-    watermarkEventId: state.watermarkEventId,
-    context: serializeContextResponse(state.context, {
-      includeDebug: options.includeDebug,
-    }),
-    sessionState: state.sessionState,
-    turns: state.turns,
-    workingMemory: state.workingMemory,
-    knowledge: state.knowledge,
-    workItems: state.workItems,
-    workClaims: state.workClaims.map(serializeWorkClaim),
-    handoffs: state.handoffs.map(serializeHandoffRecord),
-    coordinationState: state.coordinationState
-      ? {
-          ownedClaims: state.coordinationState.ownedClaims.map(serializeWorkClaim),
-          pendingInboundHandoffs: state.coordinationState.pendingInboundHandoffs.map(
-            serializeHandoffRecord,
-          ),
-          pendingOutboundHandoffs: state.coordinationState.pendingOutboundHandoffs.map(
-            serializeHandoffRecord,
-          ),
-          sharedWorkItems: state.coordinationState.sharedWorkItems,
-        }
-      : null,
-    associations: state.associations,
-    playbooks: state.playbooks,
-  };
-}
 
 function errorResult(message: string): McpToolResult {
   return {
@@ -1245,209 +1066,8 @@ function errorResult(message: string): McpToolResult {
   };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
 
-function requireString(value: unknown, name: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new McpValidationError(`Missing or invalid field: ${name}`);
-  }
-  return value;
-}
 
-function optionalString(value: unknown, name: string): string | undefined {
-  if (value == null) return undefined;
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new McpValidationError(`Invalid field: ${name}`);
-  }
-  return value;
-}
-
-function requireStringArray(value: unknown, name: string): string[] {
-  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || item.trim().length === 0)) {
-    throw new McpValidationError(`Invalid field: ${name}`);
-  }
-  return value.map((item) => item.trim());
-}
-
-function parseContextViewPolicy(value: unknown, name = 'view') {
-  if (value == null) return undefined;
-  return requireEnum(value, CONTEXT_VIEW_POLICIES, name);
-}
-
-function parseContextContract(value: unknown, name = 'contract'): ContextContract | undefined {
-  if (value == null) return undefined;
-  if (!isRecord(value)) {
-    throw new McpValidationError(`Invalid field: ${name}`);
-  }
-  const scopeLevels = ['scope', 'workspace', 'system', 'tenant'] as const;
-  return {
-    name: optionalString(value.name, `${name}.name`),
-    view:
-      typeof value.view === 'string'
-        ? requireEnum(value.view, CONTEXT_VIEW_POLICIES, `${name}.view`)
-        : undefined,
-    crossScopeLevel:
-      typeof value.crossScopeLevel === 'string'
-        ? requireEnum(value.crossScopeLevel, scopeLevels, `${name}.crossScopeLevel`)
-        : undefined,
-    tokenBudget:
-      value.tokenBudget == null
-        ? undefined
-        : parseOptionalFiniteInteger(value.tokenBudget, { name: `${name}.tokenBudget`, min: 0 }, failMcpValidation) ?? undefined,
-    maxKnowledgeItems:
-      value.maxKnowledgeItems == null
-        ? undefined
-        : parseOptionalFiniteInteger(value.maxKnowledgeItems, { name: `${name}.maxKnowledgeItems`, min: 0 }, failMcpValidation) ?? undefined,
-    maxRecentSummaries:
-      value.maxRecentSummaries == null
-        ? undefined
-        : parseOptionalFiniteInteger(value.maxRecentSummaries, { name: `${name}.maxRecentSummaries`, min: 0 }, failMcpValidation) ?? undefined,
-    knowledgeClasses:
-      value.knowledgeClasses == null
-        ? undefined
-        : requireStringArray(value.knowledgeClasses, `${name}.knowledgeClasses`) as ContextContract['knowledgeClasses'],
-    minimumTrustScore:
-      value.minimumTrustScore == null
-        ? undefined
-        : parseOptionalFiniteNumber(value.minimumTrustScore, { name: `${name}.minimumTrustScore` }, failMcpValidation) ?? undefined,
-    includeCoordinationState:
-      value.includeCoordinationState == null
-        ? undefined
-        : Boolean(value.includeCoordinationState),
-  };
-}
-
-function parseContextInvariant(value: unknown, name = 'invariant'): ContextInvariant {
-  if (!isRecord(value)) {
-    throw new McpValidationError(`Invalid field: ${name}`);
-  }
-  const scopeLevels = ['scope', 'workspace', 'system', 'tenant'] as const;
-  const severities = ['critical', 'important', 'advisory'] as const;
-  return {
-    id: requireString(value.id, `${name}.id`),
-    title: requireString(value.title, `${name}.title`),
-    instruction: requireString(value.instruction, `${name}.instruction`),
-    severity:
-      value.severity == null
-        ? undefined
-        : requireEnum(value.severity, severities, `${name}.severity`),
-    scopeLevel:
-      value.scopeLevel == null
-        ? undefined
-        : requireEnum(value.scopeLevel, scopeLevels, `${name}.scopeLevel`),
-  };
-}
-
-function parseContextEscalationPolicy(
-  value: unknown,
-  name = 'policy',
-): ContextEscalationPolicy {
-  if (!isRecord(value)) {
-    throw new McpValidationError(`Invalid field: ${name}`);
-  }
-  const scopeLevels = ['scope', 'workspace', 'system', 'tenant'] as const;
-  return {
-    defaultDecision:
-      value.defaultDecision == null
-        ? undefined
-        : requireEnum(value.defaultDecision, CONTEXT_ESCALATION_RULE_DECISIONS, `${name}.defaultDecision`),
-    byChange:
-      value.byChange == null
-        ? undefined
-        : (() => {
-            if (!isRecord(value.byChange)) {
-              throw new McpValidationError(`Invalid field: ${name}.byChange`);
-            }
-            const parsed: NonNullable<ContextEscalationPolicy['byChange']> = {};
-            for (const [key, decision] of Object.entries(value.byChange)) {
-              parsed[key as keyof typeof parsed] = requireEnum(
-                decision,
-                CONTEXT_ESCALATION_RULE_DECISIONS,
-                `${name}.byChange.${key}`,
-              );
-            }
-            return parsed;
-          })(),
-    maxView:
-      value.maxView == null
-        ? undefined
-        : requireEnum(value.maxView, CONTEXT_VIEW_POLICIES, `${name}.maxView`),
-    maxScopeLevel:
-      value.maxScopeLevel == null
-        ? undefined
-        : requireEnum(value.maxScopeLevel, scopeLevels, `${name}.maxScopeLevel`),
-    maxTokenBudget:
-      value.maxTokenBudget == null
-        ? undefined
-        : parseOptionalFiniteInteger(value.maxTokenBudget, { name: `${name}.maxTokenBudget`, min: 0 }, failMcpValidation) ?? undefined,
-    minimumAllowedTrustScore:
-      value.minimumAllowedTrustScore == null
-        ? undefined
-        : parseOptionalFiniteNumber(
-            value.minimumAllowedTrustScore,
-            { name: `${name}.minimumAllowedTrustScore` },
-            failMcpValidation,
-          ) ?? undefined,
-  };
-}
-
-function serializeContextGovernance(snapshot: ContextGovernanceSnapshot): Record<string, unknown> {
-  return {
-    defaultContract: snapshot.defaultContract,
-    contracts: snapshot.contracts,
-    invariants: snapshot.invariants.map((invariant) => ({
-      id: invariant.id,
-      title: invariant.title,
-      instruction: invariant.instruction,
-      severity: invariant.severity,
-      scopeLevel: invariant.scopeLevel,
-    })),
-    escalationPolicy: snapshot.escalationPolicy,
-  };
-}
-
-function parseActorRef(value: unknown, name = 'actor'): ActorRef | undefined {
-  if (value == null) return undefined;
-  if (!isRecord(value)) {
-    throw new McpValidationError(`Invalid field: ${name}`);
-  }
-  return {
-    actor_kind: requireEnum(value.actor_kind, ACTOR_KINDS, `${name}.actor_kind`),
-    actor_id: requireString(value.actor_id, `${name}.actor_id`),
-    system_id: value.system_id == null ? null : requireString(value.system_id, `${name}.system_id`),
-    display_name:
-      value.display_name == null ? null : requireString(value.display_name, `${name}.display_name`),
-    metadata: isRecord(value.metadata) ? value.metadata : null,
-  };
-}
-
-function requireEnum<T extends string>(value: unknown, allowed: readonly T[], name: string): T {
-  if (typeof value !== 'string' || !allowed.includes(value as T)) {
-    throw new McpValidationError(`Invalid field: ${name}`);
-  }
-  return value as T;
-}
-
-function parseLimit(value: unknown): number | undefined {
-  if (value == null) return undefined;
-  if (typeof value !== 'number' || !Number.isInteger(value)) {
-    throw new McpValidationError('Invalid field: limit');
-  }
-  if (value > MAX_LIST_LIMIT) {
-    throw new McpValidationError(`Invalid field: limit (maximum ${MAX_LIST_LIMIT})`);
-  }
-  return value;
-}
-
-function parseOptionalNonNegativeInteger(value: unknown, name: string): number | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
-    throw new McpValidationError(`Invalid field: ${name} (must be a non-negative integer)`);
-  }
-  return value;
-}
 
 function parseRequiredFiniteInteger(
   value: unknown,
@@ -1639,11 +1259,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
     scopeInput: string | MemoryScope,
     sessionId: string,
   ): Promise<MemoryRuntime> {
-    const scopeKey =
-      typeof scopeInput === 'string'
-        ? `scope:${scopeInput}`
-        : JSON.stringify(normalizeScope(scopeInput));
-    const key = `${scopeKey}|session:${sessionId}`;
+    const key = `${scopeKeyFor(scopeInput)}|session:${sessionId}`;
     const existing = sessionRuntimes.get(key);
     if (existing) {
       sessionRuntimes.delete(key);
@@ -1688,27 +1304,10 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
     return runtime;
   }
 
-  async function withScopeManagers(
+  const propagateToManagers = (
     scopeInput: string | MemoryScope,
     callback: (manager: MemoryManager) => Promise<void>,
-  ): Promise<void> {
-    const baseKey =
-      typeof scopeInput === 'string'
-        ? `scope:${scopeInput}`
-        : JSON.stringify(normalizeScope(scopeInput));
-    const seen = new Set<MemoryManager>();
-    const scopedManagers: MemoryManager[] = [await getManager(scopeInput)];
-    for (const [key, manager] of sessionManagers.entries()) {
-      if (key.startsWith(`${baseKey}|session:`)) {
-        scopedManagers.push(manager);
-      }
-    }
-    for (const manager of scopedManagers) {
-      if (seen.has(manager)) continue;
-      seen.add(manager);
-      await callback(manager);
-    }
-  }
+  ) => withScopeManagers(scopeInput, sessionManagers, getManager, callback);
 
   async function callTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
     try {
@@ -1785,7 +1384,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           return jsonResult(serializeContextGovernance(await requestManager.getContextGovernance()));
         }
         case 'memory_set_default_context_contract': {
-          await withScopeManagers(resolveScopeInput(config.scope, args), async (managed) => {
+          await propagateToManagers(resolveScopeInput(config.scope, args), async (managed) => {
             await managed.setDefaultContextContract(parseContextContract(args.contract, 'contract') ?? null);
           });
           return jsonResult(
@@ -1800,7 +1399,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
             throw new McpValidationError('Missing or invalid field: contract');
           }
           const scopeInput = resolveScopeInput(config.scope, args);
-          await withScopeManagers(scopeInput, async (managed) => {
+          await propagateToManagers(scopeInput, async (managed) => {
             await managed.putContextContract(requireString(args.name, 'name'), contract);
           });
           return jsonResult(
@@ -1811,7 +1410,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           const scopeInput = resolveScopeInput(config.scope, args);
           const contractName = requireString(args.name, 'name');
           let deleted = false;
-          await withScopeManagers(scopeInput, async (managed) => {
+          await propagateToManagers(scopeInput, async (managed) => {
             deleted = (await managed.deleteContextContract(contractName)) || deleted;
           });
           return jsonResult({ deleted, name: contractName });
@@ -1819,7 +1418,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
         case 'memory_put_context_invariant': {
           const scopeInput = resolveScopeInput(config.scope, args);
           const invariant = parseContextInvariant(args, 'invariant');
-          await withScopeManagers(scopeInput, async (managed) => {
+          await propagateToManagers(scopeInput, async (managed) => {
             await managed.putContextInvariant(invariant);
           });
           return jsonResult(
@@ -1830,7 +1429,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           const scopeInput = resolveScopeInput(config.scope, args);
           const invariantId = requireString(args.id, 'id');
           let deleted = false;
-          await withScopeManagers(scopeInput, async (managed) => {
+          await propagateToManagers(scopeInput, async (managed) => {
             deleted = (await managed.deleteContextInvariant(invariantId)) || deleted;
           });
           return jsonResult({ deleted, id: invariantId });
@@ -1838,7 +1437,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
         case 'memory_set_context_escalation_policy': {
           const scopeInput = resolveScopeInput(config.scope, args);
           const policy = parseContextEscalationPolicy(args.policy, 'policy');
-          await withScopeManagers(scopeInput, async (managed) => {
+          await propagateToManagers(scopeInput, async (managed) => {
             await managed.setContextEscalationPolicy(policy);
           });
           return jsonResult(

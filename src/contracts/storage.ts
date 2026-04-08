@@ -70,6 +70,12 @@ import type {
   WorkItem,
   WorkingMemory,
 } from './types.js';
+import type {
+  ContextContract,
+  ContextInvariant,
+  ContextEscalationPolicy,
+  PersistedGovernanceState,
+} from './context-contract.js';
 
 export interface StorageAdapter {
   insertTurn(input: NewTurn): Turn;
@@ -279,6 +285,15 @@ export interface StorageAdapter {
   getSourceDocumentByHash(contentHash: string, scope: MemoryScope): SourceDocument | null;
   listSourceDocuments(scope: MemoryScope, options?: PaginationOptions): PaginatedResult<SourceDocument>;
   updateSourceDocument(id: number, patch: { status?: SourceDocumentStatus; fact_count?: number; processed_at?: number | null }): SourceDocument | null;
+
+  // Context governance persistence (optional)
+  getGovernanceState?(scope: MemoryScope): PersistedGovernanceState | null;
+  upsertDefaultContextContract?(scope: MemoryScope, contract: ContextContract | null): void;
+  upsertNamedContextContract?(scope: MemoryScope, name: string, contract: ContextContract): void;
+  deleteNamedContextContract?(scope: MemoryScope, name: string): boolean;
+  upsertContextInvariant?(scope: MemoryScope, invariant: ContextInvariant): void;
+  deleteContextInvariant?(scope: MemoryScope, invariantId: string): boolean;
+  upsertContextEscalationPolicy?(scope: MemoryScope, policy: ContextEscalationPolicy): void;
 
   transaction<T>(fn: () => T): T;
   close(): void;

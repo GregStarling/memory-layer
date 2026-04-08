@@ -147,6 +147,13 @@ export interface ContextRequestResolution {
   warnings: ContextWarning[];
 }
 
+export interface PersistedGovernanceState {
+  defaultContract: ContextContract | null;
+  namedContracts: Record<string, ContextContract>;
+  invariants: ContextInvariant[];
+  escalationPolicy: ContextEscalationPolicy | null;
+}
+
 export interface ContextGovernanceSnapshot {
   defaultContract: ContextContract | null;
   contracts: Record<string, ContextContract>;

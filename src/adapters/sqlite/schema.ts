@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-export const CURRENT_SCHEMA_VERSION = 16;
+export const CURRENT_SCHEMA_VERSION = 17;
 
 export function createSQLiteSchema(database: Database.Database): void {
   database.pragma('journal_mode = WAL');
@@ -773,5 +773,56 @@ export function createSQLiteSchema(database: Database.Database): void {
       cutover_at         INTEGER,
       metadata           TEXT
     );
+  `);
+
+  // ──────────────────────────── context governance (v17) ────────────────────────────
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS context_contracts (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id         TEXT    NOT NULL,
+      system_id         TEXT    NOT NULL,
+      workspace_id      TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id  TEXT    NOT NULL DEFAULT '',
+      scope_id          TEXT    NOT NULL,
+      name              TEXT    NOT NULL,
+      is_default        INTEGER NOT NULL DEFAULT 0,
+      contract_json     TEXT    NOT NULL,
+      created_at        INTEGER NOT NULL,
+      updated_at        INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ctx_contract_scope_name
+      ON context_contracts(tenant_id, system_id, workspace_id, collaboration_id, scope_id, name);
+
+    CREATE TABLE IF NOT EXISTS context_invariants (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id         TEXT    NOT NULL,
+      system_id         TEXT    NOT NULL,
+      workspace_id      TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id  TEXT    NOT NULL DEFAULT '',
+      scope_id          TEXT    NOT NULL,
+      invariant_id      TEXT    NOT NULL,
+      title             TEXT    NOT NULL,
+      instruction       TEXT    NOT NULL,
+      severity          TEXT,
+      scope_level       TEXT,
+      created_at        INTEGER NOT NULL,
+      updated_at        INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ctx_invariant_scope_id
+      ON context_invariants(tenant_id, system_id, workspace_id, collaboration_id, scope_id, invariant_id);
+
+    CREATE TABLE IF NOT EXISTS context_escalation_policies (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id         TEXT    NOT NULL,
+      system_id         TEXT    NOT NULL,
+      workspace_id      TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id  TEXT    NOT NULL DEFAULT '',
+      scope_id          TEXT    NOT NULL,
+      policy_json       TEXT    NOT NULL,
+      created_at        INTEGER NOT NULL,
+      updated_at        INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ctx_escalation_scope
+      ON context_escalation_policies(tenant_id, system_id, workspace_id, collaboration_id, scope_id);
   `);
 }
