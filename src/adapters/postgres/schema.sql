@@ -409,9 +409,14 @@ CREATE TABLE IF NOT EXISTS knowledge_embeddings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_ke_scope ON knowledge_embeddings (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
-CREATE INDEX IF NOT EXISTS idx_ke_embedding_hnsw
-  ON knowledge_embeddings
-  USING hnsw (embedding vector_cosine_ops);
+DO $$
+BEGIN
+  CREATE INDEX IF NOT EXISTS idx_ke_embedding_hnsw
+    ON knowledge_embeddings
+    USING hnsw (embedding vector_cosine_ops);
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'HNSW index skipped (vector column has no fixed dimensions): %', SQLERRM;
+END $$;
 
 -- Full-text search on turns
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS search_vector TSVECTOR;
