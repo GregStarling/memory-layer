@@ -2,6 +2,20 @@
 
 All notable changes to `memory-layer` are documented here.
 
+## 4.0.0 - 2026-04-08
+
+### Added
+
+- **Phase 5 features**: temporal event log, session state projections, coordination visibility with work claims and handoffs.
+- SQLite migration hardening with forward-only schema versioning (v13-v14).
+- Technical debt cleanup for 100/100 codebase score.
+
+### Fixed
+
+- Postgres confidence constraint migration now drops by name instead of pattern-matching the definition, fixing idempotency on repeated schema applies.
+- Release workflow made idempotent: npm publish skips if version already exists, PyPI uses `skip-existing`.
+- PyPI publishing restricted to canonical repo (GregStarling/memory-layer).
+
 ## 3.1.0 - 2026-04-06
 
 ### Added
