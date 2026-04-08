@@ -8,7 +8,6 @@ import type { EmbeddingAdapter } from '../contracts/embedding.js';
 import type { AliasMap } from '../contracts/aliases.js';
 import type { OntologyConfig } from '../contracts/ontology.js';
 import { type MemoryScope } from '../contracts/identity.js';
-import { createSQLiteAdapterWithEmbeddings } from '../adapters/sqlite/index.js';
 import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 import {
   parseAliases,
@@ -108,6 +107,9 @@ export function createServerContext(config: ServerContextConfig): ServerContext 
           };
         }
         if (!config.databaseUrl) {
+          const { createSQLiteAdapterWithEmbeddings } = await import(
+            '../adapters/sqlite/index.js'
+          );
           const sqlite = createSQLiteAdapterWithEmbeddings(config.dbPath ?? ':memory:');
           return {
             asyncAdapter: wrapSyncAdapter(sqlite),

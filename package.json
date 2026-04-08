@@ -1,6 +1,6 @@
 {
   "name": "ai-memory-layer",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "description": "Backend-agnostic memory package with scoped conversation history, compaction policy, orchestration workflows, and a SQLite adapter.",
   "type": "module",
   "main": "dist/index.js",

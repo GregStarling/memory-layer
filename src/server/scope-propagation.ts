@@ -1,10 +1,18 @@
 import { normalizeScope, type MemoryScope } from '../contracts/identity.js';
 import type { MemoryManager } from '../core/manager.js';
 
-export function scopeKeyFor(scopeInput: string | MemoryScope): string {
+function materializeScope(scopeInput: string | MemoryScope): MemoryScope {
   return typeof scopeInput === 'string'
-    ? `scope:${scopeInput}`
-    : JSON.stringify(normalizeScope(scopeInput));
+    ? {
+        tenant_id: 'default',
+        system_id: 'default',
+        scope_id: scopeInput,
+      }
+    : scopeInput;
+}
+
+export function scopeKeyFor(scopeInput: string | MemoryScope): string {
+  return JSON.stringify(normalizeScope(materializeScope(scopeInput)));
 }
 
 /**

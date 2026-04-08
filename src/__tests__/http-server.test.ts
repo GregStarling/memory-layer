@@ -1310,6 +1310,85 @@ describe('HTTP server', () => {
     await expect(fetch(`${restartedBase}/v1/ontology`).then((res) => res.json())).resolves.toEqual({ ontology });
   }, 15000);
 
+  it('shares persisted alias updates across implicit and explicit default-scope managers', async () => {
+    const adapter = createInMemoryAdapter();
+    adapter.insertKnowledgeMemory({
+      tenant_id: 'default',
+      system_id: 'default',
+      scope_id: 'default',
+      fact: 'PostgreSQL is the primary database',
+      fact_type: 'entity',
+      fact_subject: 'entity',
+      fact_value: 'PostgreSQL',
+      source: 'user_stated',
+      confidence: 'high',
+    });
+    adapter.insertKnowledgeMemory({
+      tenant_id: 'default',
+      system_id: 'default',
+      scope_id: 'default',
+      fact: 'PostreSQL credentials rotate monthly',
+      fact_type: 'entity',
+      fact_subject: 'entity',
+      fact_value: 'PostreSQL',
+      source: 'user_stated',
+      confidence: 'high',
+    });
+
+    const base = await setup(13132, {
+      asyncAdapter: wrapSyncAdapter(adapter),
+    });
+    const explicitScopeQuery = 'tenant_id=default&system_id=default&scope_id=default';
+
+    expect((await fetch(`${base}/v1/context`)).status).toBe(200);
+    expect((await fetch(`${base}/v1/context?${explicitScopeQuery}`)).status).toBe(200);
+
+    const before = await fetch(`${base}/v1/alias-candidates?${explicitScopeQuery}&min_similarity=0.8`);
+    expect(before.status).toBe(200);
+    expect((await before.json()).candidates.length).toBeGreaterThan(0);
+
+    const update = await fetch(`${base}/v1/aliases`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ aliasMap: { PostgreSQL: ['PostreSQL'] } }),
+    });
+    expect(update.status).toBe(200);
+
+    const after = await fetch(`${base}/v1/alias-candidates?${explicitScopeQuery}&min_similarity=0.8`);
+    expect(after.status).toBe(200);
+    expect((await after.json()).candidates).toHaveLength(0);
+  });
+
+  it('rejects malformed alias and ontology config writes over HTTP', async () => {
+    const base = await setup(13133);
+
+    const badAliases = await fetch(`${base}/v1/aliases`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ aliasMap: { TypeScript: 'ts' } }),
+    });
+    expect(badAliases.status).toBe(400);
+    await expect(badAliases.json()).resolves.toMatchObject({
+      code: 'validation_error',
+    });
+
+    const badOntology = await fetch(`${base}/v1/ontology`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ontology: {
+          entityTypes: [{ name: 'tool', description: 'A dev tool', allowedRelationships: ['bad'] }],
+          relationshipConstraints: [],
+          validationRules: [],
+        },
+      }),
+    });
+    expect(badOntology.status).toBe(400);
+    await expect(badOntology.json()).resolves.toMatchObject({
+      code: 'validation_error',
+    });
+  });
+
   it('rejects malformed request validation inputs with 400s', async () => {
     const base = await setup(13113);
 

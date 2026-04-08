@@ -7,8 +7,14 @@ function stubManager(id: string): MemoryManager {
 }
 
 describe('scopeKeyFor', () => {
-  it('returns scope: prefix for string input', () => {
-    expect(scopeKeyFor('default')).toBe('scope:default');
+  it('normalizes string input to the default scope key', () => {
+    expect(scopeKeyFor('default')).toBe(
+      scopeKeyFor({
+        tenant_id: 'default',
+        system_id: 'default',
+        scope_id: 'default',
+      }),
+    );
   });
 
   it('returns JSON for MemoryScope input', () => {
@@ -40,10 +46,11 @@ describe('withScopeManagers', () => {
     const session1 = stubManager('s1');
     const session2 = stubManager('s2');
     const unrelated = stubManager('other');
+    const defaultKey = scopeKeyFor('default');
     const sessions = new Map<string, MemoryManager>([
-      ['scope:default|session:a', session1],
-      ['scope:default|session:b', session2],
-      ['scope:other|session:c', unrelated],
+      [`${defaultKey}|session:a`, session1],
+      [`${defaultKey}|session:b`, session2],
+      [`${scopeKeyFor('other')}|session:c`, unrelated],
     ]);
     const visited: MemoryManager[] = [];
     await withScopeManagers(
@@ -58,7 +65,7 @@ describe('withScopeManagers', () => {
   it('deduplicates when base manager appears in session map', async () => {
     const shared = stubManager('shared');
     const sessions = new Map<string, MemoryManager>([
-      ['scope:default|session:a', shared],
+      [`${scopeKeyFor('default')}|session:a`, shared],
     ]);
     const visited: MemoryManager[] = [];
     await withScopeManagers(

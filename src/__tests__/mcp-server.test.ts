@@ -486,6 +486,81 @@ describe('MCP server handler', () => {
     expect(JSON.parse((await handler.callTool('memory_get_ontology', {})).content[0].text).ontology).toEqual(ontology);
   }, 15000);
 
+  it('shares alias updates across implicit and explicit default-scope MCP managers', async () => {
+    const adapter = createInMemoryAdapter();
+    adapter.insertKnowledgeMemory({
+      tenant_id: 'default',
+      system_id: 'default',
+      scope_id: 'default',
+      fact: 'PostgreSQL is the primary database',
+      fact_type: 'entity',
+      fact_subject: 'entity',
+      fact_value: 'PostgreSQL',
+      source: 'user_stated',
+      confidence: 'high',
+    });
+    adapter.insertKnowledgeMemory({
+      tenant_id: 'default',
+      system_id: 'default',
+      scope_id: 'default',
+      fact: 'PostreSQL credentials rotate monthly',
+      fact_type: 'entity',
+      fact_subject: 'entity',
+      fact_value: 'PostreSQL',
+      source: 'user_stated',
+      confidence: 'high',
+    });
+
+    handler = createMcpServerHandler({
+      asyncAdapter: wrapSyncAdapter(adapter),
+    });
+    const explicitScope = {
+      tenant_id: 'default',
+      system_id: 'default',
+      scope_id: 'default',
+    };
+
+    expect((await handler.callTool('memory_get_context', {})).isError).toBeUndefined();
+    expect((await handler.callTool('memory_get_context', { scope: explicitScope })).isError).toBeUndefined();
+
+    const before = await handler.callTool('memory_get_alias_candidates', {
+      scope: explicitScope,
+      threshold: 0.8,
+    });
+    expect(before.isError).toBeUndefined();
+    expect(JSON.parse(before.content[0].text).candidates.length).toBeGreaterThan(0);
+
+    const update = await handler.callTool('memory_set_aliases', {
+      aliases: { PostgreSQL: ['PostreSQL'] },
+    });
+    expect(update.isError).toBeUndefined();
+
+    const after = await handler.callTool('memory_get_alias_candidates', {
+      scope: explicitScope,
+      threshold: 0.8,
+    });
+    expect(after.isError).toBeUndefined();
+    expect(JSON.parse(after.content[0].text).candidates).toHaveLength(0);
+  });
+
+  it('rejects malformed alias and ontology config writes over MCP', async () => {
+    handler = createMcpServerHandler();
+
+    const badAliases = await handler.callTool('memory_set_aliases', {
+      aliases: { TypeScript: 'ts' },
+    });
+    expect(badAliases.isError).toBe(true);
+    expect(badAliases.content[0].text).toContain('Invalid field: aliases.TypeScript');
+
+    const badOntology = await handler.callTool('memory_set_ontology', {
+      entityTypes: [{ name: 'tool', description: 'A dev tool', allowedRelationships: ['bad'] }],
+      relationshipConstraints: [],
+      validationRules: [],
+    });
+    expect(badOntology.isError).toBe(true);
+    expect(badOntology.content[0].text).toContain('Invalid field: ontology.entityTypes[0].allowedRelationships[0]');
+  });
+
   it('waits for initialize before emitting stdio lifecycle messages', async () => {
     mockedReadline.lineHandler = null;
     const writes: string[] = [];

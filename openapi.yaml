@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: memory-layer HTTP API
-  version: 4.0.0
+  version: 4.1.0
   description: HTTP surface for the memory-layer standalone AI memory service.
 servers:
   - url: http://localhost:3100

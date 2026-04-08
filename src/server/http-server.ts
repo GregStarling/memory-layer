@@ -58,6 +58,7 @@ import {
 } from './serialization.js';
 import { scopeKeyFor, withScopeManagers } from './scope-propagation.js';
 import { createServerContext } from './server-context.js';
+import { normalizeAliasMap, normalizeOntologyConfig } from '../core/scope-config.js';
 export interface HttpServerConfig {
   /** Port to listen on. Defaults to 3100. */
   port?: number;
@@ -597,10 +598,11 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         writeError(res, 400, 'Missing or invalid field: aliasMap');
         return;
       }
+      const aliasMap = normalizeAliasMap(body.aliasMap, 'aliasMap');
       const scopeInput = resolveRequestScope(config.scope, req, query, body);
       await serverContext.saveAliases(
         scopeInput,
-        body.aliasMap as import('../contracts/aliases.js').AliasMap,
+        aliasMap,
       );
       writeJson(res, 200, { ok: true });
     }],
@@ -625,10 +627,11 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         writeError(res, 400, 'Missing or invalid field: ontology');
         return;
       }
+      const ontology = normalizeOntologyConfig(body.ontology, 'ontology');
       const scopeInput = resolveRequestScope(config.scope, req, query, body);
       await serverContext.saveOntology(
         scopeInput,
-        body.ontology as unknown as import('../contracts/ontology.js').OntologyConfig,
+        ontology,
       );
       writeJson(res, 200, { ok: true });
     }],

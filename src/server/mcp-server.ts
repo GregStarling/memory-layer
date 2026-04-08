@@ -42,6 +42,7 @@ import {
 } from './serialization.js';
 import { scopeKeyFor } from './scope-propagation.js';
 import { createServerContext } from './server-context.js';
+import { normalizeAliasMap, normalizeOntologyConfig } from '../core/scope-config.js';
 
 export interface McpServerConfig {
   /** Database path. Defaults to ':memory:'. */
@@ -1355,7 +1356,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
       if (!isRecord(args.aliases)) {
         throw new McpValidationError('Missing or invalid field: aliases');
       }
-      await saveAliases(scopeInput, args.aliases as Record<string, string[]>);
+      await saveAliases(scopeInput, normalizeAliasMap(args.aliases, 'aliases'));
       return jsonResult({ success: true });
     },
     memory_get_aliases: async ({ scopeInput, requestManager }) => {
@@ -1376,11 +1377,17 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
       if (!Array.isArray(args.entityTypes) || !Array.isArray(args.relationshipConstraints) || !Array.isArray(args.validationRules)) {
         throw new McpValidationError('Missing required fields: entityTypes, relationshipConstraints, validationRules');
       }
-      await saveOntology(scopeInput, {
-        entityTypes: args.entityTypes,
-        relationshipConstraints: args.relationshipConstraints,
-        validationRules: args.validationRules,
-      });
+      await saveOntology(
+        scopeInput,
+        normalizeOntologyConfig(
+          {
+            entityTypes: args.entityTypes,
+            relationshipConstraints: args.relationshipConstraints,
+            validationRules: args.validationRules,
+          },
+          'ontology',
+        ),
+      );
       return jsonResult({ success: true });
     },
     memory_get_ontology: async ({ scopeInput, requestManager }) => {
@@ -2109,7 +2116,7 @@ export async function startMcpServer(config: McpServerConfig = {}): Promise<void
               capabilities: { tools: {} },
               serverInfo: {
                 name: 'memory-layer',
-                version: '4.0.0',
+                version: '4.1.0',
               },
             },
           }) + '\n',

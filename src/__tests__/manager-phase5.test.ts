@@ -274,6 +274,40 @@ describe('MemoryManager Phase 5 delegation', () => {
       await expect(reloaded.loadOntology()).resolves.toEqual(ontology);
       await reloaded.close();
     });
+
+    it('loadAliases ignores malformed persisted config', async () => {
+      adapter.setScopeConfig(makeScope(), 'aliases', JSON.stringify({ TypeScript: 'ts' }));
+
+      const reloaded = createMemoryManager({
+        adapter,
+        scope: makeScope(),
+        sessionId: 'session-1',
+        summarizer: async () => ({ summary: '', key_entities: [], topic_tags: [] }),
+      });
+      await expect(reloaded.loadAliases()).resolves.toBeUndefined();
+      await reloaded.close();
+    });
+
+    it('loadOntology ignores malformed persisted config', async () => {
+      adapter.setScopeConfig(
+        makeScope(),
+        'ontology',
+        JSON.stringify({
+          entityTypes: [{ name: 'tool', description: 'A dev tool', allowedRelationships: ['bad'] }],
+          relationshipConstraints: [],
+          validationRules: [],
+        }),
+      );
+
+      const reloaded = createMemoryManager({
+        adapter,
+        scope: makeScope(),
+        sessionId: 'session-1',
+        summarizer: async () => ({ summary: '', key_entities: [], topic_tags: [] }),
+      });
+      await expect(reloaded.loadOntology()).resolves.toBeUndefined();
+      await reloaded.close();
+    });
   });
 
   describe('alias state threading', () => {

@@ -2,6 +2,13 @@
 
 All notable changes to `memory-layer` are documented here.
 
+## 4.1.0 - 2026-04-08
+
+### Fixed
+
+- Hosted manager caches now normalize equivalent implicit and explicit scopes to the same cache key, so live alias and ontology updates propagate consistently across transports.
+- Durable alias and ontology config now validates payload shape before persistence and safely ignores malformed stored config during reloads.
+
 ## 4.0.0 - 2026-04-08
 
 ### Added
