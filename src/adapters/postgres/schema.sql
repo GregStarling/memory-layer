@@ -164,21 +164,17 @@ ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS rationale TEXT;
 ALTER TABLE knowledge_memory ADD COLUMN IF NOT EXISTS tags JSONB NOT NULL DEFAULT '[]';
 
 DO $$
-DECLARE
-  constraint_name TEXT;
 BEGIN
-  FOR constraint_name IN
-    SELECT c.conname
-    FROM pg_constraint c
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint c
     JOIN pg_class t ON t.oid = c.conrelid
     JOIN pg_namespace n ON n.oid = t.relnamespace
     WHERE n.nspname = current_schema()
       AND t.relname = 'knowledge_memory'
-      AND c.contype = 'c'
-      AND pg_get_constraintdef(c.oid) LIKE '%confidence IN (%'
-  LOOP
-    EXECUTE format('ALTER TABLE knowledge_memory DROP CONSTRAINT %I', constraint_name);
-  END LOOP;
+      AND c.conname = 'knowledge_memory_confidence_check'
+  ) THEN
+    ALTER TABLE knowledge_memory DROP CONSTRAINT knowledge_memory_confidence_check;
+  END IF;
 
   ALTER TABLE knowledge_memory
     ADD CONSTRAINT knowledge_memory_confidence_check
