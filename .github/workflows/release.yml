@@ -48,12 +48,13 @@ jobs:
       - run: npm run release:check
       - name: Publish to npm (skip if version exists)
         run: |
+          npm publish --access public 2>&1 && exit 0
           PKG_NAME=$(node -p "require('./package.json').name")
           PKG_VERSION=$(node -p "require('./package.json').version")
           if npm view "${PKG_NAME}@${PKG_VERSION}" version 2>/dev/null; then
             echo "${PKG_NAME}@${PKG_VERSION} already published — skipping"
           else
-            npm publish --access public
+            exit 1
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
