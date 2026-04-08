@@ -200,4 +200,13 @@ describe('getCoreMemory', () => {
     // With no knowledge, tokenEstimate is 0 which is within any budget
     expect(bundle.tokenEstimate).toBeLessThanOrEqual(1500);
   });
+
+  it('rejects non-positive token budgets', async () => {
+    await expect(getCoreMemory(asyncAdapter, scope, { tokenBudget: 0 })).rejects.toThrow(
+      /tokenBudget/,
+    );
+    await expect(getCoreMemory(asyncAdapter, scope, { tokenBudget: -5 })).rejects.toThrow(
+      /tokenBudget/,
+    );
+  });
 });

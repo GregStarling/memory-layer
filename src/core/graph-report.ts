@@ -6,6 +6,7 @@ import type {
   GraphReportSection,
 } from '../contracts/graph-report.js';
 import { GRAPH_REPORT_DEFAULTS } from '../contracts/graph-report.js';
+import { ValidationError } from '../contracts/errors.js';
 import type { KnowledgeMemory } from '../contracts/types.js';
 import { discover } from './discover.js';
 import { lintKnowledge } from './knowledge-lint.js';
@@ -43,6 +44,9 @@ export async function getGraphReport(
   options: GraphReportOptions = {},
 ): Promise<GraphReport> {
   const tokenBudget = options.tokenBudget ?? GRAPH_REPORT_DEFAULTS.tokenBudget;
+  if (!Number.isFinite(tokenBudget) || tokenBudget <= 0) {
+    throw new ValidationError("Memory validation: 'tokenBudget' must be a positive finite number");
+  }
   const include = options.includeSections
     ? new Set(options.includeSections)
     : new Set<string>(SECTION_NAMES);
@@ -80,8 +84,8 @@ export async function getGraphReport(
         ...rawReport,
         surprises: rawReport.surprises
           .filter((s) => {
-            const srcId = s.sourceId.startsWith('knowledge:') ? Number(s.sourceId.split(':')[1]) : null;
-            const tgtId = s.targetId.startsWith('knowledge:') ? Number(s.targetId.split(':')[1]) : null;
+            const srcId = parseKnowledgeNodeId(s.sourceId);
+            const tgtId = parseKnowledgeNodeId(s.targetId);
             return (srcId == null || knowledgeIds.has(srcId)) && (tgtId == null || knowledgeIds.has(tgtId));
           })
           .slice(0, SECTION_LIMITS.surprises),
@@ -259,6 +263,14 @@ export async function getGraphReport(
 function truncate(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;
   return text.slice(0, maxLen - 3) + '...';
+}
+
+function parseKnowledgeNodeId(value: string): number | null {
+  if (!value.startsWith('knowledge:')) return null;
+  const rawId = value.slice('knowledge:'.length);
+  if (!/^\d+$/.test(rawId)) return null;
+  const parsed = Number(rawId);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
 function estimateTokens(text: string): number {

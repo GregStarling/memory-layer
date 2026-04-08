@@ -24,6 +24,10 @@ describe('getGraphReport', () => {
     expect(report.generatedAt).toBeTruthy();
   });
 
+  it('rejects non-positive token budgets', async () => {
+    await expect(getGraphReport(adapter, scope, { tokenBudget: 0 })).rejects.toThrow(/tokenBudget/);
+  });
+
   it('includes surprises section from discover()', async () => {
     const now = Math.floor(Date.now() / 1000);
     const k1 = adapter.insertKnowledgeMemory({

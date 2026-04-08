@@ -143,7 +143,7 @@ function checkContradictionClusters(
     adjacency.get(edge.targetId)!.add(edge.sourceId);
   }
 
-  // Find connected components via BFS
+  // Find connected components via depth-first traversal
   const visited = new Set<number>();
   for (const nodeId of adjacency.keys()) {
     if (visited.has(nodeId)) continue;

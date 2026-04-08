@@ -138,6 +138,12 @@ function scopeValues(scope: Parameters<typeof normalizeScope>[0]): string[] {
   return [values[0], values[1], values[2], values[3], values[3], values[4]];
 }
 
+function canonicalScopeValues(
+  scope: Parameters<typeof normalizeScope>[0],
+): [string, string, string, string, string] {
+  return baseScopeValues(normalizeScope(scope));
+}
+
 type BetterSqliteConstructor = typeof import('better-sqlite3');
 
 function loadBetterSqlite3(): BetterSqliteConstructor {
@@ -3385,7 +3391,7 @@ function createAdapterFromDatabase(
            RETURNING *`,
         )
         .get(
-          ...scopeValues(n),
+          ...canonicalScopeValues(n),
           input.title,
           input.content_hash,
           input.mime_type ?? 'text/plain',

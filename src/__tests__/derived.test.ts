@@ -301,6 +301,36 @@ describe('derive', () => {
       expect(result.length).toBeLessThanOrEqual(3);
     });
 
+    it('deduplicates identical outputs before applying maxOutputs', () => {
+      registerDerivationHandler('anti_pattern', () => [
+        {
+          type: 'anti_pattern',
+          content: 'Duplicate output',
+          confidence: 0.9,
+          sourceKnowledgeIds: [1],
+          rationale: 'first',
+        },
+        {
+          type: 'anti_pattern',
+          content: 'duplicate output',
+          confidence: 0.8,
+          sourceKnowledgeIds: [2],
+          rationale: 'second',
+        },
+      ]);
+
+      const result = derive(makeReflectionResult(), [], {
+        outputTypes: ['anti_pattern'],
+      });
+
+      expect(result).toHaveLength(1);
+      expect(result[0].content).toBe('Duplicate output');
+    });
+
+    it('rejects non-positive maxOutputs', () => {
+      expect(() => derive(makeReflectionResult(), [], { maxOutputs: 0 })).toThrow(/maxOutputs/);
+    });
+
     it('sorts outputs by confidence descending', () => {
       const knowledge = [
         makeKnowledge({ id: 1, fact: 'Low trust anti-pattern', knowledge_class: 'constraint', is_negated: true, trust_score: 0.5 }),

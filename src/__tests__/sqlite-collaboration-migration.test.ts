@@ -69,4 +69,117 @@ describe('sqlite collaboration_id migration repair', () => {
       repaired.close();
     }
   });
+
+  it('rewrites legacy source collaboration ids to the canonical empty string and stays idempotent across reopen', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'memory-layer-collab-'));
+    cleanupPaths.push(dir);
+    const dbPath = join(dir, 'memory.db');
+    const scope: MemoryScope = {
+      tenant_id: 'acme',
+      system_id: 'assistant',
+      workspace_id: 'shared',
+      scope_id: 'thread-1',
+    };
+
+    const bootstrap = createSQLiteAdapter(dbPath);
+    bootstrap.close();
+
+    const BetterSqlite3 = loadBetterSqlite3();
+    const raw = new BetterSqlite3(dbPath);
+    raw.prepare(
+      `INSERT INTO knowledge_memory
+        (tenant_id, system_id, workspace_id, collaboration_id, scope_id, fact, fact_type, source,
+         confidence, source_system_id, source_scope_id, source_collaboration_id, created_at, last_accessed_at)
+       VALUES (?, ?, ?, 'default', ?, ?, ?, ?, ?, ?, ?, 'default', ?, ?)`,
+    ).run(
+      scope.tenant_id,
+      scope.system_id,
+      scope.workspace_id,
+      scope.scope_id,
+      'Legacy sourced fact',
+      'reference',
+      'manual',
+      'high',
+      scope.system_id,
+      scope.scope_id,
+      1,
+      1,
+    );
+    raw.close();
+
+    const repaired = createSQLiteAdapter(dbPath);
+    repaired.close();
+
+    const inspected = new BetterSqlite3(dbPath);
+    const row = inspected
+      .prepare('SELECT collaboration_id, source_collaboration_id FROM knowledge_memory LIMIT 1')
+      .get() as { collaboration_id: string; source_collaboration_id: string | null };
+    inspected.close();
+
+    expect(row.collaboration_id).toBe('');
+    expect(row.source_collaboration_id).toBe('');
+
+    const reopened = createSQLiteAdapter(dbPath);
+    try {
+      const knowledge = reopened.getActiveKnowledgeMemory(scope);
+      expect(knowledge).toHaveLength(1);
+      expect(knowledge[0].source_collaboration_id).toBe('');
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it('preserves non-empty collaboration ids while repairing only legacy defaults', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'memory-layer-collab-'));
+    cleanupPaths.push(dir);
+    const dbPath = join(dir, 'memory.db');
+    const scope: MemoryScope = {
+      tenant_id: 'acme',
+      system_id: 'assistant',
+      workspace_id: 'shared',
+      collaboration_id: 'team-alpha',
+      scope_id: 'thread-1',
+    };
+
+    const bootstrap = createSQLiteAdapter(dbPath);
+    bootstrap.close();
+
+    const BetterSqlite3 = loadBetterSqlite3();
+    const raw = new BetterSqlite3(dbPath);
+    raw.prepare(
+      `INSERT INTO knowledge_memory
+        (tenant_id, system_id, workspace_id, collaboration_id, scope_id, fact, fact_type, source, confidence, created_at, last_accessed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      scope.tenant_id,
+      scope.system_id,
+      scope.workspace_id,
+      scope.collaboration_id,
+      scope.scope_id,
+      'Team-specific fact',
+      'reference',
+      'manual',
+      'high',
+      1,
+      1,
+    );
+    raw.close();
+
+    const repaired = createSQLiteAdapter(dbPath);
+    try {
+      const exactScope = repaired.getActiveKnowledgeMemory(scope);
+      expect(exactScope).toHaveLength(1);
+      expect(exactScope[0].collaboration_id).toBe('team-alpha');
+
+      const defaultScope = repaired.getActiveKnowledgeMemory({
+        tenant_id: scope.tenant_id,
+        system_id: scope.system_id,
+        workspace_id: scope.workspace_id,
+        scope_id: scope.scope_id,
+      });
+      expect(defaultScope).toHaveLength(0);
+    } finally {
+      repaired.close();
+    }
+  });
 });

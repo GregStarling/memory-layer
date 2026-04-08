@@ -7,6 +7,7 @@ import type {
   ReflectionPattern,
 } from '../contracts/reflection.js';
 import type { BuiltInDerivedOutputType, DerivedOutput, DerivedOutputType, DeriveOptions } from '../contracts/derived.js';
+import { ValidationError } from '../contracts/errors.js';
 
 /**
  * Registry of derivation handlers. Each handler inspects reflection results
@@ -245,6 +246,9 @@ export function derive(
 ): DerivedOutput[] {
   const outputTypes = options?.outputTypes ?? (['playbook_candidate', 'coding_rule', 'anti_pattern', 'project_summary'] as DerivedOutputType[]);
   const maxOutputs = options?.maxOutputs ?? 20;
+  if (!Number.isFinite(maxOutputs) || maxOutputs <= 0) {
+    throw new ValidationError("Memory validation: 'maxOutputs' must be a positive finite number");
+  }
 
   const input: DerivationInput = { reflectionResult, activeKnowledge };
   const allOutputs: DerivedOutput[] = [];
@@ -258,7 +262,7 @@ export function derive(
 
   // Sort by confidence descending, cap at maxOutputs
   allOutputs.sort((a, b) => b.confidence - a.confidence);
-  const results = allOutputs.slice(0, maxOutputs);
+  const results = deduplicateOutputs(allOutputs).slice(0, maxOutputs);
 
   // Materialize into trust pipeline as candidates when adapter is provided.
   // Derivation type and source provenance are preserved via fact_subject
@@ -313,4 +317,18 @@ function collectSourceIds(facts: ReflectionFact[], fallbackIds: number[]): numbe
     }
   }
   return [...ids];
+}
+
+function deduplicateOutputs(outputs: DerivedOutput[]): DerivedOutput[] {
+  const seen = new Set<string>();
+  const deduped: DerivedOutput[] = [];
+
+  for (const output of outputs) {
+    const key = `${output.type}\u0000${output.content.trim().toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(output);
+  }
+
+  return deduped;
 }

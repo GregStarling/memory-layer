@@ -215,4 +215,28 @@ describe('corpus-refresh', () => {
     expect(result.changed.length).toBe(1);
     expect(result.invalidatedFactCount).toBe(0);
   });
+
+  it('rolls back document state and invalidated facts when re-ingest fails', () => {
+    const { doc, facts } = ingestFakeDocument('doc1.md', 'hash-aaa', ['Fact A', 'Fact B']);
+
+    expect(() =>
+      refreshDocuments(
+        adapter,
+        scope,
+        [{ title: 'doc1.md', contentHash: 'hash-new', content: 'updated content' }],
+        () => {
+          throw new Error('re-ingest failed');
+        },
+      ),
+    ).toThrow(/re-ingest failed/);
+
+    const restored = adapter.getSourceDocumentById(doc.id);
+    expect(restored?.status).toBe('processed');
+    expect(restored?.fact_count).toBe(facts.length);
+    expect(restored?.processed_at).not.toBeNull();
+
+    for (const fact of facts) {
+      expect(adapter.getKnowledgeMemoryById(fact.id)?.knowledge_state).toBe('trusted');
+    }
+  });
 });

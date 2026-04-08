@@ -30,7 +30,7 @@ export const THRESHOLDS = {
   snapshotLiveWrites: 0.95,
   snapshotRefresh: 0.9,
   // Phase 5: Discovery
-  discoverSurpriseQuality: 0.5,
+  discoverSurpriseQuality: 0.8,
   edgeProvenanceRanking: 0.8,
   graphReportTokenBudget: 0.9,
   // Phase 5: Temporal
@@ -45,8 +45,8 @@ export const THRESHOLDS = {
   // Phase 5: Intelligence
   coreMemoryTokenBudget: 0.9,
   tagFilteringAccuracy: 0.85,
-  aliasResolutionQuality: 0.5,
-  clusterCoherence: 0.5,
+  aliasResolutionQuality: 2 / 3,
+  clusterCoherence: 0.9,
 };
 
 export function assertScenario(name, passed, detail = {}) {

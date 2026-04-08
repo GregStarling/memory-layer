@@ -1,5 +1,6 @@
 import type { MemoryScope } from '../contracts/identity.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
+import { ValidationError } from '../contracts/errors.js';
 import type { KnowledgeMemory } from '../contracts/types.js';
 import type { CoreMemoryBundle, CoreMemoryOptions } from '../contracts/core-memory.js';
 import { estimateTokens } from './tokens.js';
@@ -24,6 +25,9 @@ export async function getCoreMemory(
   options: CoreMemoryOptions = {},
 ): Promise<CoreMemoryBundle> {
   const tokenBudget = options.tokenBudget ?? 1500;
+  if (!Number.isFinite(tokenBudget) || tokenBudget <= 0) {
+    throw new ValidationError("Memory validation: 'tokenBudget' must be a positive finite number");
+  }
 
   // Fetch all active knowledge for this scope
   const allKnowledge = await adapter.getActiveKnowledgeMemory(scope);

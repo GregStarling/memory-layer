@@ -39,6 +39,11 @@ export interface RefreshResult {
   reIngestedFactCount: number;
 }
 
+interface InvalidatedFactSnapshot {
+  id: number;
+  knowledge_state: KnowledgeMemory['knowledge_state'];
+}
+
 /**
  * Incrementally refresh a document corpus.
  *
@@ -93,20 +98,30 @@ export function refreshDocuments(
     }
 
     // Invalidate facts linked to this document
-    const count = invalidateDocumentFacts(adapter, scope, existing);
-    invalidatedFactCount += count;
+    const invalidatedFacts = invalidateDocumentFacts(adapter, scope, existing);
+    invalidatedFactCount += invalidatedFacts.length;
 
     // Re-ingest if callback and content provided
     if (reIngest && descriptor.content) {
-      const newFacts = reIngest(updated ?? existing, descriptor.content);
-      reIngestedFactCount += newFacts.length;
+      try {
+        const newFacts = reIngest(updated ?? existing, descriptor.content);
+        reIngestedFactCount += newFacts.length;
 
-      // Update document metadata after successful re-ingestion
-      adapter.updateSourceDocument(existing.id, {
-        status: 'processed',
-        fact_count: newFacts.length,
-        processed_at: Math.floor(Date.now() / 1000),
-      });
+        // Update document metadata after successful re-ingestion
+        adapter.updateSourceDocument(existing.id, {
+          status: 'processed',
+          fact_count: newFacts.length,
+          processed_at: Math.floor(Date.now() / 1000),
+        });
+      } catch (error) {
+        adapter.updateSourceDocument(existing.id, {
+          status: existing.status,
+          fact_count: existing.fact_count,
+          processed_at: existing.processed_at,
+        });
+        restoreInvalidatedFacts(adapter, invalidatedFacts);
+        throw error;
+      }
     }
   }
 
@@ -147,11 +162,11 @@ function invalidateDocumentFacts(
   adapter: StorageAdapter,
   scope: MemoryScope,
   document: SourceDocument,
-): number {
-  if (!document.processed_at) return 0;
+): InvalidatedFactSnapshot[] {
+  if (!document.processed_at) return [];
 
   const active = adapter.getActiveKnowledgeMemory(scope);
-  const invalidatedIds = new Set<number>();
+  const invalidatedFacts = new Map<number, InvalidatedFactSnapshot>();
 
   for (const fact of active) {
     // Strategy 1: time-window heuristic for manual-source facts
@@ -160,7 +175,7 @@ function invalidateDocumentFacts(
       fact.created_at >= document.created_at &&
       fact.created_at <= document.processed_at
     ) {
-      invalidatedIds.add(fact.id);
+      invalidatedFacts.set(fact.id, { id: fact.id, knowledge_state: fact.knowledge_state });
     }
 
     // Strategy 2: facts promoted from working memory created during doc processing
@@ -170,15 +185,26 @@ function invalidateDocumentFacts(
       fact.created_at >= document.created_at &&
       fact.created_at <= document.processed_at
     ) {
-      invalidatedIds.add(fact.id);
+      invalidatedFacts.set(fact.id, { id: fact.id, knowledge_state: fact.knowledge_state });
     }
   }
 
-  for (const id of invalidatedIds) {
-    adapter.updateKnowledgeMemory(id, {
+  for (const invalidated of invalidatedFacts.values()) {
+    adapter.updateKnowledgeMemory(invalidated.id, {
       knowledge_state: 'candidate',
     });
   }
 
-  return invalidatedIds.size;
+  return [...invalidatedFacts.values()];
+}
+
+function restoreInvalidatedFacts(
+  adapter: StorageAdapter,
+  invalidatedFacts: InvalidatedFactSnapshot[],
+): void {
+  for (const invalidated of invalidatedFacts) {
+    adapter.updateKnowledgeMemory(invalidated.id, {
+      knowledge_state: invalidated.knowledge_state,
+    });
+  }
 }

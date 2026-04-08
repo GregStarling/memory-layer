@@ -17,9 +17,24 @@ import { discoverAliasCandidates, type DiscoverAliasCandidatesOptions } from './
 
 /** Minimum interval (ms) between reflections for the same rate-limit key. */
 const DEFAULT_RATE_LIMIT_MS = 60_000;
+const MAX_RATE_LIMIT_ENTRIES = 1_024;
 
 /** In-memory rate-limit tracker keyed by rateLimitKey. */
 const rateLimitTimestamps = new Map<string, number>();
+
+function pruneRateLimitTimestamps(now: number): void {
+  for (const [key, timestamp] of rateLimitTimestamps) {
+    if (now - timestamp >= DEFAULT_RATE_LIMIT_MS) {
+      rateLimitTimestamps.delete(key);
+    }
+  }
+
+  while (rateLimitTimestamps.size > MAX_RATE_LIMIT_ENTRIES) {
+    const oldestKey = rateLimitTimestamps.keys().next().value;
+    if (oldestKey == null) break;
+    rateLimitTimestamps.delete(oldestKey);
+  }
+}
 
 /**
  * Map extracted fact types to knowledge classes.
@@ -117,10 +132,13 @@ export async function reflectOnKnowledge(
   options: ReflectOnKnowledgeOptions = {},
   extractor?: Extractor,
 ): Promise<KnowledgeReflectionResult> {
+  const now = Date.now();
+  pruneRateLimitTimestamps(now);
+
   // Rate limiting
   if (options.rateLimitKey) {
     const lastRun = rateLimitTimestamps.get(options.rateLimitKey);
-    if (lastRun && Date.now() - lastRun < DEFAULT_RATE_LIMIT_MS) {
+    if (lastRun && now - lastRun < DEFAULT_RATE_LIMIT_MS) {
       return {
         newFacts: [],
         patternsFound: [],
@@ -218,7 +236,8 @@ export async function reflectOnKnowledge(
 
   // Update rate limit timestamp
   if (options.rateLimitKey) {
-    rateLimitTimestamps.set(options.rateLimitKey, Date.now());
+    rateLimitTimestamps.delete(options.rateLimitKey);
+    rateLimitTimestamps.set(options.rateLimitKey, now);
   }
 
   return {
