@@ -1,11 +1,11 @@
-# memory-layer-client
+# ai-memory-layer-client
 
 Python client for the `memory-layer` HTTP service.
 
 ## Install
 
 ```bash
-pip install memory-layer-client
+pip install ai-memory-layer-client
 ```
 
 For local development and tests:

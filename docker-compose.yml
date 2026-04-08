@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -26,6 +24,7 @@ services:
         condition: service_healthy
     environment:
       MEMORY_TRANSPORT: http
+      MEMORY_HOST: 0.0.0.0
       MEMORY_PORT: 3100
       MEMORY_DATABASE_URL: postgres://memory:memory@postgres:5432/memory_layer
       MEMORY_SCOPE: hosted

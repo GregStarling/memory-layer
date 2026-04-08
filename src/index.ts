@@ -162,6 +162,7 @@ export {
   ScopeMismatchError,
   ConflictError,
   ProviderUnavailableError,
+  NotImplementedError,
   isMemoryDomainError,
 } from './contracts/errors.js';
 export type { Logger, MemoryEvent, MemoryEventType, EventHook } from './contracts/observability.js';

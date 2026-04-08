@@ -3445,6 +3445,47 @@ function createAdapterFromDatabase(
       return row ? mapSourceDocumentRow(row) : null;
     },
 
+    getScopeConfig(scope, key): string | null {
+      const row = db
+        .prepare(
+          `SELECT config_value
+           FROM scope_config
+           WHERE ${SCOPE_WHERE} AND config_key = ?`,
+        )
+        .get(...scopeValues(scope), key) as { config_value: string } | undefined;
+      return row?.config_value ?? null;
+    },
+
+    setScopeConfig(scope, key, value): void {
+      const sv = scopeValues(scope);
+      const now = nowSeconds();
+      const updated = db
+        .prepare(
+          `UPDATE scope_config
+           SET config_value = ?,
+               updated_at = ?
+           WHERE ${SCOPE_WHERE} AND config_key = ?`,
+        )
+        .run(value, now, ...sv, key);
+      if (updated.changes > 0) {
+        return;
+      }
+      db.prepare(
+        `INSERT INTO scope_config (
+           tenant_id,
+           system_id,
+           workspace_id,
+           collaboration_id,
+           scope_id,
+           config_key,
+           config_value,
+           created_at,
+           updated_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(...sv, key, value, now, now);
+    },
+
     // ────── Context governance persistence ──────
 
     getGovernanceState(scope): PersistedGovernanceState | null {

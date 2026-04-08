@@ -1,9 +1,6 @@
 import { createHash, timingSafeEqual } from 'crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
-import {
-  createMemoryWithAsyncAdapter,
-  type CreateMemoryOptions,
-} from '../core/quick.js';
+import { type CreateMemoryOptions } from '../core/quick.js';
 import type { MemoryManager } from '../core/manager.js';
 import type {
   ContextContract,
@@ -41,8 +38,6 @@ import {
 } from '../contracts/context-contract.js';
 import type { CognitiveMemoryType } from '../contracts/cognitive.js';
 import type { ProfileSection, ProfileView } from '../contracts/profile.js';
-import { createSQLiteAdapterWithEmbeddings } from '../adapters/sqlite/index.js';
-import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 import {
   parseOptionalFiniteInteger,
   parseOptionalFiniteNumber,
@@ -62,6 +57,7 @@ import {
   serializeTemporalState,
 } from './serialization.js';
 import { scopeKeyFor, withScopeManagers } from './scope-propagation.js';
+import { createServerContext } from './server-context.js';
 export interface HttpServerConfig {
   /** Port to listen on. Defaults to 3100. */
   port?: number;
@@ -89,6 +85,12 @@ export interface HttpServerConfig {
   redactText?: CreateMemoryOptions['redactText'];
   /** Optional Postgres connection string for hosted deployments. */
   databaseUrl?: string;
+  /** Optional injected async adapter for tests or embedded hosting. */
+  asyncAdapter?: AsyncStorageAdapter;
+  /** Optional embedding adapter paired with an injected async adapter. */
+  embeddingAdapter?: EmbeddingAdapter;
+  /** Optional cleanup hook paired with an injected async adapter. */
+  closeAdapterResources?: () => Promise<void>;
   /** Quality mode applied to hosted managers. */
   qualityMode?: CreateMemoryOptions['qualityMode'];
   /** Legacy quality tier mapping. */
@@ -140,7 +142,7 @@ function safeSecretEquals(provided: string | string[] | undefined, expected: str
   if (typeof provided !== 'string') return false;
   const providedBuffer = createHash('sha256').update(provided).digest();
   const expectedBuffer = createHash('sha256').update(expected).digest();
-  return timingSafeEqual(providedBuffer, expectedBuffer) && provided.length === expected.length;
+  return timingSafeEqual(providedBuffer, expectedBuffer);
 }
 
 function writeJson(res: ServerResponse, status: number, data: unknown): void {
@@ -152,8 +154,13 @@ function writeJson(res: ServerResponse, status: number, data: unknown): void {
   res.end(body);
 }
 
-function writeError(res: ServerResponse, status: number, message: string): void {
-  writeJson(res, status, { error: message });
+function writeError(
+  res: ServerResponse,
+  status: number,
+  message: string,
+  code?: string,
+): void {
+  writeJson(res, status, code ? { error: message, code } : { error: message });
 }
 
 
@@ -407,10 +414,6 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
     config.defaultDiffMaxEvents,
     config.maxDiffMaxEvents,
   );
-  const managers = new Map<string, MemoryManager>();
-  // Managers keyed by (scope, sessionId) for snapshot endpoints that must
-  // honor the URL-path session instead of the scope's bound default session.
-  const sessionManagers = new Map<string, MemoryManager>();
   // Insertion-ordered LRU: Map preserves insertion order; we delete+re-set on
   // access to refresh recency and evict the oldest when the cap is exceeded.
   type SessionSnapshotCacheEntry = {
@@ -422,20 +425,6 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
     watermarkEventId: string | null;
   };
   const sessionSnapshots = new Map<string, SessionSnapshotCacheEntry>();
-  function touchManagerCache(
-    cache: Map<string, MemoryManager>,
-    key: string,
-    manager: MemoryManager,
-    limit: number,
-  ): void {
-    cache.delete(key);
-    cache.set(key, manager);
-    while (cache.size > limit) {
-      const oldestKey = cache.keys().next().value;
-      if (!oldestKey) break;
-      cache.delete(oldestKey);
-    }
-  }
   function touchSnapshot(key: string, snapshot: SessionSnapshotCacheEntry): void {
     const cachedSnapshot = cloneSnapshotValue(snapshot);
     sessionSnapshots.delete(key);
@@ -464,43 +453,6 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
   }
   const databaseUrl = config.databaseUrl ?? process.env.MEMORY_DATABASE_URL;
 
-  const adapterResources: {
-    asyncAdapter: AsyncStorageAdapter;
-    embeddingAdapter?: EmbeddingAdapter;
-    close: () => Promise<void>;
-  } = databaseUrl
-    ? await (async () => {
-        const moduleName = 'pg';
-        const pgModule = await import(moduleName).catch(() => {
-          throw new Error(
-            'memory-layer: hosted Postgres mode requires the "pg" package. Install it with: npm install pg',
-          );
-        });
-        const { createPostgresAdapter, createPostgresEmbeddingAdapter } = await import(
-          '../adapters/postgres/index.js'
-        );
-        const Pool = pgModule.Pool ?? pgModule.default?.Pool;
-        const pool = new Pool({ connectionString: databaseUrl });
-        const asyncAdapter = createPostgresAdapter(pool, { ownsPool: false });
-        return {
-          asyncAdapter,
-          embeddingAdapter: createPostgresEmbeddingAdapter(pool),
-          close: async () => {
-            await pool.end();
-          },
-        };
-      })()
-    : (() => {
-        const sqlite = createSQLiteAdapterWithEmbeddings(config.dbPath ?? ':memory:');
-        return {
-          asyncAdapter: wrapSyncAdapter(sqlite),
-          embeddingAdapter: sqlite.embeddings,
-          close: async () => {
-            sqlite.close();
-          },
-        };
-      })();
-
   const sseClients = new Set<{
     response: ServerResponse;
     scope?: MemoryScope;
@@ -508,87 +460,45 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
     eventTypes?: Set<MemoryEventType>;
   }>();
 
-  function buildHostedManagerOptions(
-    scopeInput: string | MemoryScope,
-    sessionId?: string,
-  ): Omit<CreateMemoryOptions, 'adapter' | 'path'> {
-    return {
-      scope: scopeInput,
-      ...(sessionId ? { sessionId } : {}),
-      summarizer: config.summarizer ?? 'extractive',
-      extractor: config.extractor ?? 'regex',
-      preset: config.preset,
-      redactText: config.redactText,
-      qualityMode: config.qualityMode,
-      qualityTier: config.qualityTier,
-      crossScopeLevel: config.crossScopeLevel,
-      contextContract: config.contextContract,
-      contextContracts: config.contextContracts,
-      invariants: config.invariants,
-      escalationPolicy: config.escalationPolicy,
-      autoDetectWorkspace: config.autoDetectWorkspace,
-      structuredClient: config.structuredClient,
-    };
-  }
-
-  function createHostedManager(scopeInput: string | MemoryScope): MemoryManager {
-    const baseOptions: CreateMemoryOptions = {
-      ...buildHostedManagerOptions(scopeInput),
-      onEvent: (event) => {
-        if (sseClients.size === 0) return;
-        const data = `data: ${JSON.stringify(event)}\n\n`;
-        for (const client of sseClients) {
-          if (client.eventTypes && !client.eventTypes.has(event.type)) continue;
-          if (client.scope && client.scopeLevel) {
-            if (!matchesEventScope(event, client.scope, client.scopeLevel)) continue;
+  const serverContext = createServerContext({
+    dbPath: config.dbPath,
+    databaseUrl,
+    asyncAdapter: config.asyncAdapter,
+    embeddingAdapter: config.embeddingAdapter,
+    closeAdapterResources: config.closeAdapterResources,
+    managerCacheLimit: MANAGER_CACHE_LIMIT,
+    sessionManagerCacheLimit: SESSION_MANAGER_CACHE_LIMIT,
+    buildManagerOptions(scopeInput, sessionId) {
+      return {
+        scope: scopeInput,
+        ...(sessionId ? { sessionId } : {}),
+        summarizer: config.summarizer ?? 'extractive',
+        extractor: config.extractor ?? 'regex',
+        preset: config.preset,
+        redactText: config.redactText,
+        qualityMode: config.qualityMode,
+        qualityTier: config.qualityTier,
+        crossScopeLevel: config.crossScopeLevel,
+        contextContract: config.contextContract,
+        contextContracts: config.contextContracts,
+        invariants: config.invariants,
+        escalationPolicy: config.escalationPolicy,
+        autoDetectWorkspace: config.autoDetectWorkspace,
+        structuredClient: config.structuredClient,
+        onEvent: (event) => {
+          if (sseClients.size === 0) return;
+          const data = `data: ${JSON.stringify(event)}\n\n`;
+          for (const client of sseClients) {
+            if (client.eventTypes && !client.eventTypes.has(event.type)) continue;
+            if (client.scope && client.scopeLevel) {
+              if (!matchesEventScope(event, client.scope, client.scopeLevel)) continue;
+            }
+            client.response.write(data);
           }
-          client.response.write(data);
-        }
-      },
-    };
-
-    return createMemoryWithAsyncAdapter({
-      ...baseOptions,
-      asyncAdapter: adapterResources.asyncAdapter,
-      embeddingAdapter: adapterResources.embeddingAdapter,
-      closeAdapter: false,
-    });
-  }
-
-  function getManager(scopeInput: string | MemoryScope): MemoryManager {
-    const key =
-      typeof scopeInput === 'string'
-        ? `scope:${scopeInput}`
-        : JSON.stringify(normalizeScope(scopeInput));
-    const existing = managers.get(key);
-    if (existing) {
-      touchManagerCache(managers, key, existing, MANAGER_CACHE_LIMIT);
-      return existing;
-    }
-
-    const manager = createHostedManager(scopeInput);
-    touchManagerCache(managers, key, manager, MANAGER_CACHE_LIMIT);
-    return manager;
-  }
-
-  function getSessionManager(scopeInput: string | MemoryScope, sessionId: string): MemoryManager {
-    const key = `${scopeKeyFor(scopeInput)}|session:${sessionId}`;
-    const existing = sessionManagers.get(key);
-    if (existing) {
-      touchManagerCache(sessionManagers, key, existing, SESSION_MANAGER_CACHE_LIMIT);
-      return existing;
-    }
-
-    const baseOptions: CreateMemoryOptions = buildHostedManagerOptions(scopeInput, sessionId);
-    const manager = createMemoryWithAsyncAdapter({
-      ...baseOptions,
-      asyncAdapter: adapterResources.asyncAdapter,
-      embeddingAdapter: adapterResources.embeddingAdapter,
-      closeAdapter: false,
-    });
-    touchManagerCache(sessionManagers, key, manager, SESSION_MANAGER_CACHE_LIMIT);
-    return manager;
-  }
+        },
+      };
+    },
+  });
 
   function requireAdmin(req: IncomingMessage): void {
     if (adminApiKey && !safeSecretEquals(req.headers['x-admin-key'], adminApiKey)) {
@@ -599,9 +509,188 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
   const propagateToManagers = (
     scopeInput: string | MemoryScope,
     callback: (manager: MemoryManager) => Promise<void>,
-  ) => withScopeManagers(scopeInput, sessionManagers, getManager, callback);
+  ) => serverContext.withScopeManagers(scopeInput, callback);
+  const getManager = (scopeInput: string | MemoryScope) => serverContext.getManager(scopeInput);
+  const getSessionManager = (scopeInput: string | MemoryScope, sessionId: string) =>
+    serverContext.getSessionManager(scopeInput, sessionId);
 
-  const manager = getManager(config.scope ?? 'default');
+  const manager = await serverContext.getManager(config.scope ?? 'default');
+
+  type RegisteredHttpRouteContext = {
+    req: IncomingMessage;
+    res: ServerResponse;
+    query: Record<string, string>;
+    readJsonBody: () => Promise<Record<string, unknown>>;
+  };
+  type RegisteredHttpRouteHandler = (context: RegisteredHttpRouteContext) => Promise<void>;
+
+  const registeredRoutes = new Map<string, RegisteredHttpRouteHandler>([
+    ['GET /v1/discover', async ({ req, res, query }) => {
+      const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+      const maxResults = parseOptionalFiniteInteger(query.max_results, { name: 'max_results', min: 0 }, failHttpValidation);
+      const minScore = parseOptionalFiniteNumber(query.min_score, { name: 'min_score' }, failHttpValidation);
+      const maxDepth = parseOptionalFiniteInteger(query.max_depth, { name: 'max_depth', min: 0 }, failHttpValidation);
+      const report = await requestManager.discover({
+        maxResults: maxResults ?? undefined,
+        minSurpriseScore: minScore ?? undefined,
+        maxDepth: maxDepth ?? undefined,
+      });
+      writeJson(res, 200, report);
+    }],
+    ['GET /v1/report', async ({ req, res, query }) => {
+      const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+      const report = await requestManager.getGraphReport({
+        tokenBudget: parseOptionalInteger(query.token_budget) ?? undefined,
+        includeSections: query.sections ? query.sections.split(',') : undefined,
+        filterByTags: query.tags ? query.tags.split(',') : undefined,
+      });
+      writeJson(res, 200, report);
+    }],
+    ['GET /v1/facts-at', async ({ req, res, query }) => {
+      const timestamp = parseOptionalFiniteNumber(query.timestamp, { name: 'timestamp' }, failHttpValidation);
+      if (timestamp == null) {
+        writeError(res, 400, 'Missing or invalid timestamp parameter');
+        return;
+      }
+      const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+      const result = await requestManager.getFactsAt(timestamp);
+      writeJson(res, 200, result);
+    }],
+    ['POST /v1/reflect-knowledge', async ({ req, res, query, readJsonBody }) => {
+      const body = await readJsonBody();
+      const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+      const result = await requestManager.reflectOnKnowledge({
+        maxFacts: typeof body.maxFacts === 'number' ? body.maxFacts : undefined,
+        includePlaybooks: typeof body.includePlaybooks === 'boolean' ? body.includePlaybooks : undefined,
+        rateLimitKey: typeof body.rateLimitKey === 'string' ? body.rateLimitKey : undefined,
+      });
+      writeJson(res, 200, result);
+    }],
+    ['POST /v1/derive', async ({ req, res, query, readJsonBody }) => {
+      const body = await readJsonBody();
+      const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+      const outputs = await requestManager.derive({
+        outputTypes: Array.isArray(body.outputTypes) ? body.outputTypes : undefined,
+        maxOutputs: typeof body.maxOutputs === 'number' ? body.maxOutputs : undefined,
+      });
+      writeJson(res, 200, { outputs });
+    }],
+    ['GET /v1/curation', async ({ req, res, query }) => {
+      const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+      const summary = await requestManager.getCurationSummary(undefined, {
+        since: parseOptionalFiniteNumber(query.since, { name: 'since' }, failHttpValidation) ?? undefined,
+        limit: parseOptionalInteger(query.limit) ?? undefined,
+        actionTypes: query.action_types ? query.action_types.split(',') as import('../contracts/curation.js').CurationActionType[] : undefined,
+      });
+      writeJson(res, 200, summary);
+    }],
+    ['GET /v1/core-memory', async ({ req, res, query }) => {
+      const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+      const bundle = await requestManager.getCoreMemory({
+        tokenBudget: parseOptionalInteger(query.token_budget) ?? undefined,
+      });
+      writeJson(res, 200, bundle);
+    }],
+    ['POST /v1/aliases', async ({ req, res, query, readJsonBody }) => {
+      const body = await readJsonBody();
+      if (!isRecord(body.aliasMap)) {
+        writeError(res, 400, 'Missing or invalid field: aliasMap');
+        return;
+      }
+      const scopeInput = resolveRequestScope(config.scope, req, query, body);
+      await serverContext.saveAliases(
+        scopeInput,
+        body.aliasMap as import('../contracts/aliases.js').AliasMap,
+      );
+      writeJson(res, 200, { ok: true });
+    }],
+    ['GET /v1/aliases', async ({ req, res, query }) => {
+      const scopeInput = resolveRequestScope(config.scope, req, query);
+      await serverContext.refreshScopeConfig(scopeInput);
+      const requestManager = await getManager(scopeInput);
+      const aliases = requestManager.getAliases();
+      writeJson(res, 200, { aliasMap: aliases ?? {} });
+    }],
+    ['GET /v1/alias-candidates', async ({ req, res, query }) => {
+      const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+      const candidates = await requestManager.getAliasCandidates({
+        threshold: parseOptionalFiniteNumber(query.min_similarity, { name: 'min_similarity' }, failHttpValidation) ?? undefined,
+        maxCandidates: parseOptionalInteger(query.max_candidates) ?? undefined,
+      });
+      writeJson(res, 200, { candidates });
+    }],
+    ['POST /v1/ontology', async ({ req, res, query, readJsonBody }) => {
+      const body = await readJsonBody();
+      if (!isRecord(body.ontology)) {
+        writeError(res, 400, 'Missing or invalid field: ontology');
+        return;
+      }
+      const scopeInput = resolveRequestScope(config.scope, req, query, body);
+      await serverContext.saveOntology(
+        scopeInput,
+        body.ontology as unknown as import('../contracts/ontology.js').OntologyConfig,
+      );
+      writeJson(res, 200, { ok: true });
+    }],
+    ['GET /v1/ontology', async ({ req, res, query }) => {
+      const scopeInput = resolveRequestScope(config.scope, req, query);
+      await serverContext.refreshScopeConfig(scopeInput);
+      const requestManager = await getManager(scopeInput);
+      const ontology = requestManager.getOntology();
+      writeJson(res, 200, { ontology: ontology ?? null });
+    }],
+    ['POST /v1/bundles/export', async ({ req, res, query, readJsonBody }) => {
+      const body = await readJsonBody();
+      const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+      const name = requireString(body.name, 'name');
+      const result = requestManager.exportBundle(name, {
+        knowledgeClassFilter: Array.isArray(body.knowledgeClassFilter) ? body.knowledgeClassFilter : undefined,
+        includeTags: Array.isArray(body.includeTags) ? body.includeTags : undefined,
+      });
+      writeJson(res, 200, result);
+    }],
+    ['POST /v1/bundles/import', async ({ req, res, query, readJsonBody }) => {
+      const body = await readJsonBody();
+      const scopeInput = resolveRequestScope(config.scope, req, query, body);
+      const requestManager = await getManager(scopeInput);
+      if (!isRecord(body.bundle)) {
+        writeError(res, 400, 'Missing or invalid field: bundle');
+        return;
+      }
+      const resolution = requireEnum(
+        body.conflictResolution ?? 'skip',
+        ['skip', 'overwrite', 'merge', 'trust_higher'],
+        'conflictResolution',
+      );
+      const result = requestManager.importBundle(
+        body.bundle as unknown as import('../contracts/bundles.js').MemoryBundle,
+        {
+          conflictResolution: resolution as import('../contracts/bundles.js').BundleConflictResolution,
+          targetScope: materializeScope(scopeInput),
+          preserveTrust: body.preserveTrust === true,
+        },
+      );
+      writeJson(res, 200, result);
+    }],
+    ['POST /v1/refresh-documents', async ({ req, res, query, readJsonBody }) => {
+      const body = await readJsonBody();
+      const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+      if (!Array.isArray(body.documents)) {
+        writeError(res, 400, 'Missing or invalid field: documents');
+        return;
+      }
+      const documents = body.documents.map((d: unknown) => {
+        if (!isRecord(d)) throw new HttpRequestError(400, 'Each document must be an object');
+        return {
+          title: requireString(d.title, 'documents[].title'),
+          contentHash: requireString(d.contentHash, 'documents[].contentHash'),
+          content: typeof d.content === 'string' ? d.content : undefined,
+        };
+      });
+      const result = requestManager.refreshDocuments(documents);
+      writeJson(res, 200, result);
+    }],
+  ]);
 
   const server = createServer(async (req, res) => {
     // CORS
@@ -633,11 +722,22 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       const url = req.url ?? '/';
       const path = normalizePath(url.split('?')[0]);
       const query = parseQuery(url);
+      const routeHandler = registeredRoutes.get(`${req.method ?? 'GET'} ${path}`);
+      let cachedBody: Record<string, unknown> | undefined;
+      const readJsonBody = async () => {
+        if (cachedBody) return cachedBody;
+        cachedBody = await readBody(req, bodyLimitBytes);
+        return cachedBody;
+      };
+      if (routeHandler) {
+        await routeHandler({ req, res, query, readJsonBody });
+        return;
+      }
 
       // POST /v1/turns
       if (path === '/v1/turns' && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const turn = await requestManager.processTurn(
           requireEnum(body.role, ['user', 'assistant', 'system'], 'role'),
           requireString(body.content, 'content'),
@@ -650,7 +750,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // POST /v1/exchanges
       if (path === '/v1/exchanges' && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const exchange = await requestManager.processExchange(
           requireString(body.userContent, 'userContent'),
           requireString(body.assistantContent, 'assistantContent'),
@@ -665,7 +765,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/context
       if (path === '/v1/context' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const context = await requestManager.getContext(query.query || undefined, {
           view: parseContextViewPolicy(query.view),
           viewer: parseViewerFromQuery(query),
@@ -681,7 +781,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // POST /v1/context/request
       if (path === '/v1/context/request' && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const resolution = await requestManager.requestContextExpansion(
           {
             reason: requireEnum(body.reason, CONTEXT_REQUEST_REASONS, 'reason'),
@@ -699,7 +799,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       if (path === '/v1/context/config' && req.method === 'GET') {
         requireAdmin(req);
         const scopeInput = resolveRequestScope(config.scope, req, query);
-        const requestManager = getManager(scopeInput);
+        const requestManager = await getManager(scopeInput);
         const snapshot = await requestManager.getContextGovernance();
         writeJson(res, 200, serializeContextGovernance(snapshot));
         return;
@@ -713,7 +813,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         await propagateToManagers(scopeInput, async (managed) => {
           await managed.setDefaultContextContract(contract ?? null);
         });
-        const snapshot = await getManager(scopeInput).getContextGovernance();
+        const snapshot = await (await getManager(scopeInput)).getContextGovernance();
         writeJson(res, 200, serializeContextGovernance(snapshot));
         return;
       }
@@ -724,7 +824,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         await propagateToManagers(scopeInput, async (managed) => {
           await managed.setDefaultContextContract(null);
         });
-        const snapshot = await getManager(scopeInput).getContextGovernance();
+        const snapshot = await (await getManager(scopeInput)).getContextGovernance();
         writeJson(res, 200, serializeContextGovernance(snapshot));
         return;
       }
@@ -743,7 +843,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         await propagateToManagers(scopeInput, async (managed) => {
           await managed.putContextContract(name, contract);
         });
-        const snapshot = await getManager(scopeInput).getContextGovernance();
+        const snapshot = await (await getManager(scopeInput)).getContextGovernance();
         writeJson(res, 200, serializeContextGovernance(snapshot));
         return;
       }
@@ -776,7 +876,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         await propagateToManagers(scopeInput, async (managed) => {
           await managed.putContextInvariant(invariant);
         });
-        const snapshot = await getManager(scopeInput).getContextGovernance();
+        const snapshot = await (await getManager(scopeInput)).getContextGovernance();
         writeJson(res, 200, serializeContextGovernance(snapshot));
         return;
       }
@@ -801,14 +901,14 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         await propagateToManagers(scopeInput, async (managed) => {
           await managed.setContextEscalationPolicy(policy);
         });
-        const snapshot = await getManager(scopeInput).getContextGovernance();
+        const snapshot = await (await getManager(scopeInput)).getContextGovernance();
         writeJson(res, 200, serializeContextGovernance(snapshot));
         return;
       }
 
       // GET /v1/state
       if (path === '/v1/state' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const asOf = parseOptionalFiniteNumber(query.as_of, { name: 'as_of' }, failHttpValidation);
         if (asOf == null) {
           writeError(res, 400, 'Missing or invalid as_of parameter');
@@ -829,7 +929,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/timeline
       if (path === '/v1/timeline' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const startAt = parseOptionalFiniteNumber(query.start_at, { name: 'start_at' }, failHttpValidation);
         const endAt = parseOptionalFiniteNumber(query.end_at, { name: 'end_at' }, failHttpValidation);
         const cursor = parseOptionalTemporalId(query.cursor);
@@ -849,7 +949,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/state/diff
       if (path === '/v1/state/diff' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const from = parseOptionalFiniteNumber(query.from, { name: 'from' }, failHttpValidation);
         const to = parseOptionalFiniteNumber(query.to, { name: 'to' }, failHttpValidation);
         const maxEvents = parseOptionalFiniteInteger(
@@ -873,7 +973,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/events/log
       if (path === '/v1/events/log' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const startAt = parseOptionalFiniteNumber(query.start_at, { name: 'start_at' }, failHttpValidation);
         const endAt = parseOptionalFiniteNumber(query.end_at, { name: 'end_at' }, failHttpValidation);
         const cursor = parseOptionalTemporalId(query.cursor);
@@ -898,7 +998,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           'Cache-Control': 'no-cache',
           Connection: 'keep-alive',
         });
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         let closed = false;
         const abortController = new AbortController();
         req.on('close', () => {
@@ -938,7 +1038,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           writeError(res, 400, 'Missing required query parameter: q');
           return;
         }
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const searchOpts: import('../contracts/types.js').SearchOptions = {};
         if (query.limit) searchOpts.limit = parseLimit(query.limit);
         if (query.tags) searchOpts.tags = query.tags.split(',');
@@ -966,7 +1066,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           writeError(res, 400, 'Missing required query parameter: q');
           return;
         }
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const scopeLevel = parseScopeLevel(query.scope_level, 'scope_level', [
           'workspace',
           'system',
@@ -995,7 +1095,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/inspect/knowledge
       if (path === '/v1/inspect/knowledge' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const limit = parseLimit(query.limit);
         const cursor = parseOptionalInteger(query.cursor);
         if ((query.limit && limit == null) || (query.cursor && cursor == null)) {
@@ -1012,7 +1112,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       const knowledgeInspectMatch = path.match(/^\/v1\/inspect\/knowledge\/(\d+)$/);
       if (knowledgeInspectMatch && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const detail = await requestManager.inspectKnowledge(Number(knowledgeInspectMatch[1]));
         if (!detail.knowledge) {
           writeError(res, 404, 'Knowledge not found');
@@ -1024,7 +1124,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/inspect/audits
       if (path === '/v1/inspect/audits' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const knowledgeId = parseOptionalInteger(query.knowledge_id);
         const limit = parseLimit(query.limit);
         if ((query.knowledge_id && knowledgeId == null) || (query.limit && limit == null)) {
@@ -1041,7 +1141,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/inspect/monitor
       if (path === '/v1/inspect/monitor' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const [monitor, diagnostics] = await Promise.all([
           requestManager.getContextMonitor(),
           requestManager.getRuntimeDiagnostics(),
@@ -1052,7 +1152,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/inspect/compactions
       if (path === '/v1/inspect/compactions' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const limit = parseLimit(query.limit);
         if (query.limit && limit == null) {
           writeError(res, 400, 'Invalid compaction inspection parameters');
@@ -1065,7 +1165,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/inspect/context
       if (path === '/v1/inspect/context' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const asOf = parseOptionalFiniteNumber(query.as_of, { name: 'as_of' }, failHttpValidation);
         const context = asOf != null
           ? await requestManager.getContextAt(asOf, query.query || undefined)
@@ -1076,7 +1176,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/inspect/session-state
       if (path === '/v1/inspect/session-state' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const asOf = parseOptionalFiniteNumber(query.as_of, { name: 'as_of' }, failHttpValidation);
         const context = asOf != null
           ? await requestManager.getContextAt(asOf, query.query || undefined)
@@ -1087,7 +1187,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/inspect/retrieval
       if (path === '/v1/inspect/retrieval' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const asOf = parseOptionalFiniteNumber(query.as_of, { name: 'as_of' }, failHttpValidation);
         const context = asOf != null
           ? await requestManager.getContextAt(asOf, query.query || undefined)
@@ -1102,7 +1202,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/inspect/reverification
       if (path === '/v1/inspect/reverification' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const limit = parseOptionalInteger(query.limit);
         if (query.limit && limit == null) {
           writeError(res, 400, 'Invalid reverification inspection parameters');
@@ -1116,7 +1216,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // POST /v1/facts
       if (path === '/v1/facts' && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const fact = await requestManager.learnFact(
           requireString(body.fact, 'fact'),
           requireEnum(body.factType, ['preference', 'entity', 'decision', 'constraint', 'reference'], 'factType') as FactType,
@@ -1131,7 +1231,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // POST /v1/work
       if (path === '/v1/work' && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const item = await requestManager.trackWorkItem(
           requireString(body.title, 'title'),
           requireEnum(body.kind ?? 'objective', ['objective', 'unresolved_work', 'constraint'], 'kind') as
@@ -1162,7 +1262,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       const workItemMatch = path.match(/^\/v1\/work-items\/(\d+)$/);
       if (workItemMatch && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const item = await requestManager.updateWorkItem(
           Number(workItemMatch[1]),
           {
@@ -1196,7 +1296,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       const claimMatch = path.match(/^\/v1\/work-items\/(\d+)\/claim$/);
       if (claimMatch && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const actor = parseActorRef(body.actor, 'actor');
         if (!actor) {
           writeError(res, 400, 'Missing required field: actor');
@@ -1218,7 +1318,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       const renewMatch = path.match(/^\/v1\/work-claims\/(\d+)\/renew$/);
       if (renewMatch && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const actor = parseActorRef(body.actor, 'actor');
         if (!actor) {
           writeError(res, 400, 'Missing required field: actor');
@@ -1240,7 +1340,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       const releaseMatch = path.match(/^\/v1\/work-claims\/(\d+)\/release$/);
       if (releaseMatch && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const actor = parseActorRef(body.actor, 'actor');
         if (!actor) {
           writeError(res, 400, 'Missing required field: actor');
@@ -1256,7 +1356,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       }
 
       if (path === '/v1/work-claims' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const claims = await requestManager.listWorkClaims();
         writeJson(res, 200, { claims: claims.map(serializeWorkClaim) });
         return;
@@ -1265,7 +1365,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       const handoffCreateMatch = path.match(/^\/v1\/work-items\/(\d+)\/handoffs$/);
       if (handoffCreateMatch && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const fromActor = parseActorRef(body.from_actor, 'from_actor');
         const toActor = parseActorRef(body.to_actor, 'to_actor');
         if (!fromActor || !toActor) {
@@ -1292,7 +1392,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       const handoffActionMatch = path.match(/^\/v1\/handoffs\/(\d+)\/(accept|reject|cancel)$/);
       if (handoffActionMatch && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const actor = parseActorRef(body.actor, 'actor');
         if (!actor) {
           writeError(res, 400, 'Missing required field: actor');
@@ -1312,7 +1412,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       }
 
       if (path === '/v1/handoffs' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const handoffs = await requestManager.listPendingHandoffs({
           direction: (query.direction as 'inbound' | 'outbound' | 'all' | undefined) ?? 'all',
         });
@@ -1327,7 +1427,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           return;
         }
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const result = await requestManager.forceCompact();
         writeJson(res, 200, {
           compacted: result !== null,
@@ -1338,7 +1438,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/health
       if (path === '/v1/health' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const [context, diagnostics] = await Promise.all([
           requestManager.getContext(),
           requestManager.getRuntimeDiagnostics(),
@@ -1356,7 +1456,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       }
 
       if ((path === '/healthz' || path === '/readyz') && req.method === 'GET') {
-        writeJson(res, 200, { ok: true, scopes: managers.size });
+        writeJson(res, 200, { ok: true, scopes: serverContext.getCacheSizes().managers });
         return;
       }
 
@@ -1367,7 +1467,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           return;
         }
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const report = await requestManager.runMaintenance();
         writeJson(res, 200, {
           expiredWorkingMemory: report.expiredWorkingMemoryIds.length,
@@ -1384,7 +1484,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           writeError(res, 403, 'Admin key required');
           return;
         }
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const result = await requestManager.reverifyKnowledge(Number(reverificationMatch[1]));
         writeJson(res, 200, result);
         return;
@@ -1397,7 +1497,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           return;
         }
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         let limit: number | undefined;
         if (body.limit != null) {
           if (typeof body.limit !== 'number' || !Number.isInteger(body.limit)) {
@@ -1412,7 +1512,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/changes
       if (path === '/v1/changes' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const cursor = parseOptionalTemporalId(query.cursor);
         const sinceValue = query.since ? new Date(query.since) : new Date(0);
         if (cursor == null && Number.isNaN(sinceValue.valueOf())) {
@@ -1480,7 +1580,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           writeError(res, 400, 'Missing required query parameter: q');
           return;
         }
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const detailLevel = query.detail
           ? requireEnum(query.detail, EPISODE_DETAIL_LEVELS, 'detail')
           : undefined;
@@ -1513,7 +1613,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // POST /v1/episodes/summarize
       if (path === '/v1/episodes/summarize' && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const sessionId = requireString(body.session_id, 'session_id');
         const detailLevel = body.detailLevel
           ? requireEnum(body.detailLevel, EPISODE_DETAIL_LEVELS, 'detailLevel')
@@ -1526,7 +1626,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // POST /v1/reflect
       if (path === '/v1/reflect' && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const reflectQuery = requireString(body.query, 'query');
         const detailLevel = body.detailLevel
           ? requireEnum(body.detailLevel, EPISODE_DETAIL_LEVELS, 'detailLevel')
@@ -1566,7 +1666,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           writeError(res, 400, 'Missing required query parameter: q');
           return;
         }
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const types = query.types
           ? (query.types.split(',').map((t) => t.trim()).filter(Boolean) as CognitiveMemoryType[])
           : undefined;
@@ -1591,7 +1691,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/profile
       if (path === '/v1/profile' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const validViews: ProfileView[] = ['user', 'operator', 'workspace'];
         const view = query.view
           ? requireEnum(query.view, validViews, 'view')
@@ -1621,7 +1721,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // POST /v1/playbooks
       if (path === '/v1/playbooks' && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const playbook = await requestManager.createPlaybook({
           title: requireString(body.title, 'title'),
           description: requireString(body.description, 'description'),
@@ -1639,7 +1739,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/playbooks
       if (path === '/v1/playbooks' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         if (query.q) {
           const results = await requestManager.searchPlaybooks(
             query.q,
@@ -1658,7 +1758,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // POST /v1/playbooks/from-task
       if (path === '/v1/playbooks/from-task' && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const playbook = await requestManager.createPlaybookFromTask({
           title: requireString(body.title, 'title'),
           description: requireString(body.description, 'description'),
@@ -1677,7 +1777,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // GET /v1/playbooks/:id
       const playbookGetMatch = path.match(/^\/v1\/playbooks\/(\d+)$/);
       if (playbookGetMatch && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const playbook = await requestManager.getPlaybook(Number(playbookGetMatch[1]));
         if (!playbook) {
           writeError(res, 404, 'Playbook not found');
@@ -1690,7 +1790,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // PUT /v1/playbooks/:id
       if (playbookGetMatch && req.method === 'PUT') {
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const patch: Record<string, unknown> = {};
         if (body.title != null) patch.title = requireString(body.title, 'title');
         if (body.description != null) patch.description = requireString(body.description, 'description');
@@ -1714,7 +1814,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       const playbookReviseMatch = path.match(/^\/v1\/playbooks\/(\d+)\/revise$/);
       if (playbookReviseMatch && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const result = await requestManager.revisePlaybook(
           Number(playbookReviseMatch[1]),
           requireString(body.instructions, 'instructions'),
@@ -1728,7 +1828,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // POST /v1/playbooks/:id/use
       const playbookUseMatch = path.match(/^\/v1\/playbooks\/(\d+)\/use$/);
       if (playbookUseMatch && req.method === 'POST') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const playbookId = Number(playbookUseMatch[1]);
         await requestManager.recordPlaybookUse(playbookId);
         const playbook = await requestManager.getPlaybook(playbookId);
@@ -1739,7 +1839,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // POST /v1/associations
       if (path === '/v1/associations' && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const sourceId = Number.isInteger(body.source_id) && (body.source_id as number) > 0
           ? (body.source_id as number)
           : (() => { throw new HttpRequestError(400, 'Missing or invalid field: source_id (must be positive integer)'); })();
@@ -1769,7 +1869,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // GET /v1/associations/:kind/:id
       const assocGetMatch = path.match(/^\/v1\/associations\/([a-z_]+)\/(\d+)$/);
       if (assocGetMatch && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         const kind = requireEnum(assocGetMatch[1], ASSOCIATION_TARGET_KINDS, 'kind');
         const targetId = Number(assocGetMatch[2]);
         const result = await requestManager.getAssociations(kind, targetId);
@@ -1780,7 +1880,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // POST /v1/associations/traverse
       if (path === '/v1/associations/traverse' && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
         const kind = requireEnum(body.kind, ASSOCIATION_TARGET_KINDS, 'kind');
         const id = Number.isInteger(body.id) && (body.id as number) > 0
           ? (body.id as number)
@@ -1795,7 +1895,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       // DELETE /v1/associations/:id
       const assocDeleteMatch = path.match(/^\/v1\/associations\/(\d+)$/);
       if (assocDeleteMatch && req.method === 'DELETE') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         await requestManager.removeAssociation(Number(assocDeleteMatch[1]));
         writeJson(res, 200, { deleted: true });
         return;
@@ -1809,7 +1909,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const scopeInput = resolveRequestScope(config.scope, req, query, body);
         // Use session-aware manager so getContext/getSessionBootstrap read
         // the session named in the URL, not the scope's bound default.
-        const requestManager = getSessionManager(scopeInput, sessionId);
+        const requestManager = await getSessionManager(scopeInput, sessionId);
         const scopeKey = scopeKeyFor(scopeInput);
         const relevanceQuery = typeof body.relevanceQuery === 'string' ? body.relevanceQuery : undefined;
         const snapshotData = await requestManager.captureSnapshot(relevanceQuery, {
@@ -1855,7 +1955,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const body = await readBody(req, bodyLimitBytes);
         const sessionId = decodeURIComponent(snapshotRefreshMatch[1]);
         const scopeInput = resolveRequestScope(config.scope, req, query, body);
-        const requestManager = getSessionManager(scopeInput, sessionId);
+        const requestManager = await getSessionManager(scopeInput, sessionId);
         const scopeKey = scopeKeyFor(scopeInput);
         const relevanceQuery = typeof body.relevanceQuery === 'string' ? body.relevanceQuery : undefined;
         const snapshotData = await requestManager.captureSnapshot(relevanceQuery, {
@@ -1880,207 +1980,6 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         return;
       }
 
-      // ========= Phase 5 Endpoints =========
-
-      // GET /v1/discover
-      if (path === '/v1/discover' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const maxResults = parseOptionalFiniteInteger(query.max_results, { name: 'max_results', min: 0 }, failHttpValidation);
-        const minScore = parseOptionalFiniteNumber(query.min_score, { name: 'min_score' }, failHttpValidation);
-        const maxDepth = parseOptionalFiniteInteger(query.max_depth, { name: 'max_depth', min: 0 }, failHttpValidation);
-        const report = await requestManager.discover({
-          maxResults: maxResults ?? undefined,
-          minSurpriseScore: minScore ?? undefined,
-          maxDepth: maxDepth ?? undefined,
-        });
-        writeJson(res, 200, report);
-        return;
-      }
-
-      // GET /v1/report
-      if (path === '/v1/report' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const report = await requestManager.getGraphReport({
-          tokenBudget: parseOptionalInteger(query.token_budget) ?? undefined,
-          includeSections: query.sections ? query.sections.split(',') : undefined,
-          filterByTags: query.tags ? query.tags.split(',') : undefined,
-        });
-        writeJson(res, 200, report);
-        return;
-      }
-
-      // GET /v1/facts-at
-      if (path === '/v1/facts-at' && req.method === 'GET') {
-        const timestamp = parseOptionalFiniteNumber(query.timestamp, { name: 'timestamp' }, failHttpValidation);
-        if (timestamp == null) {
-          writeError(res, 400, 'Missing or invalid timestamp parameter');
-          return;
-        }
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const result = await requestManager.getFactsAt(timestamp);
-        writeJson(res, 200, result);
-        return;
-      }
-
-      // POST /v1/reflect-knowledge
-      if (path === '/v1/reflect-knowledge' && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
-        const result = await requestManager.reflectOnKnowledge({
-          maxFacts: typeof body.maxFacts === 'number' ? body.maxFacts : undefined,
-          includePlaybooks: typeof body.includePlaybooks === 'boolean' ? body.includePlaybooks : undefined,
-          rateLimitKey: typeof body.rateLimitKey === 'string' ? body.rateLimitKey : undefined,
-        });
-        writeJson(res, 200, result);
-        return;
-      }
-
-      // POST /v1/derive
-      if (path === '/v1/derive' && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
-        const outputs = await requestManager.derive({
-          outputTypes: Array.isArray(body.outputTypes) ? body.outputTypes : undefined,
-          maxOutputs: typeof body.maxOutputs === 'number' ? body.maxOutputs : undefined,
-        });
-        writeJson(res, 200, { outputs });
-        return;
-      }
-
-      // GET /v1/curation
-      if (path === '/v1/curation' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const summary = await requestManager.getCurationSummary(undefined, {
-          since: parseOptionalFiniteNumber(query.since, { name: 'since' }, failHttpValidation) ?? undefined,
-          limit: parseOptionalInteger(query.limit) ?? undefined,
-          actionTypes: query.action_types ? query.action_types.split(',') as import('../contracts/curation.js').CurationActionType[] : undefined,
-        });
-        writeJson(res, 200, summary);
-        return;
-      }
-
-      // GET /v1/core-memory
-      if (path === '/v1/core-memory' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const bundle = await requestManager.getCoreMemory({
-          tokenBudget: parseOptionalInteger(query.token_budget) ?? undefined,
-        });
-        writeJson(res, 200, bundle);
-        return;
-      }
-
-      // POST /v1/aliases
-      if (path === '/v1/aliases' && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
-        if (!isRecord(body.aliasMap)) {
-          writeError(res, 400, 'Missing or invalid field: aliasMap');
-          return;
-        }
-        requestManager.setAliases(body.aliasMap as import('../contracts/aliases.js').AliasMap);
-        writeJson(res, 200, { ok: true });
-        return;
-      }
-
-      // GET /v1/aliases
-      if (path === '/v1/aliases' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const aliases = requestManager.getAliases();
-        writeJson(res, 200, { aliasMap: aliases ?? {} });
-        return;
-      }
-
-      // GET /v1/alias-candidates
-      if (path === '/v1/alias-candidates' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const candidates = await requestManager.getAliasCandidates({
-          threshold: parseOptionalFiniteNumber(query.min_similarity, { name: 'min_similarity' }, failHttpValidation) ?? undefined,
-          maxCandidates: parseOptionalInteger(query.max_candidates) ?? undefined,
-        });
-        writeJson(res, 200, { candidates });
-        return;
-      }
-
-      // POST /v1/ontology
-      if (path === '/v1/ontology' && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
-        if (!isRecord(body.ontology)) {
-          writeError(res, 400, 'Missing or invalid field: ontology');
-          return;
-        }
-        requestManager.setOntology(body.ontology as unknown as import('../contracts/ontology.js').OntologyConfig);
-        writeJson(res, 200, { ok: true });
-        return;
-      }
-
-      // GET /v1/ontology
-      if (path === '/v1/ontology' && req.method === 'GET') {
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query));
-        const ontology = requestManager.getOntology();
-        writeJson(res, 200, { ontology: ontology ?? null });
-        return;
-      }
-
-      // POST /v1/bundles/export
-      if (path === '/v1/bundles/export' && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
-        const name = requireString(body.name, 'name');
-        const result = requestManager.exportBundle(name, {
-          knowledgeClassFilter: Array.isArray(body.knowledgeClassFilter) ? body.knowledgeClassFilter : undefined,
-          includeTags: Array.isArray(body.includeTags) ? body.includeTags : undefined,
-        });
-        writeJson(res, 200, result);
-        return;
-      }
-
-      // POST /v1/bundles/import
-      if (path === '/v1/bundles/import' && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
-        if (!isRecord(body.bundle)) {
-          writeError(res, 400, 'Missing or invalid field: bundle');
-          return;
-        }
-        const resolution = requireEnum(
-          body.conflictResolution ?? 'skip',
-          ['skip', 'overwrite', 'merge', 'trust_higher'],
-          'conflictResolution',
-        );
-        const result = requestManager.importBundle(
-          body.bundle as unknown as import('../contracts/bundles.js').MemoryBundle,
-          {
-            conflictResolution: resolution as import('../contracts/bundles.js').BundleConflictResolution,
-            targetScope: resolveRequestScope(config.scope, req, query, body) as MemoryScope,
-            preserveTrust: body.preserveTrust === true,
-          },
-        );
-        writeJson(res, 200, result);
-        return;
-      }
-
-      // POST /v1/refresh-documents
-      if (path === '/v1/refresh-documents' && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
-        if (!Array.isArray(body.documents)) {
-          writeError(res, 400, 'Missing or invalid field: documents');
-          return;
-        }
-        const documents = body.documents.map((d: unknown) => {
-          if (!isRecord(d)) throw new HttpRequestError(400, 'Each document must be an object');
-          return {
-            title: requireString(d.title, 'documents[].title'),
-            contentHash: requireString(d.contentHash, 'documents[].contentHash'),
-            content: typeof d.content === 'string' ? d.content : undefined,
-          };
-        });
-        const result = requestManager.refreshDocuments(documents);
-        writeJson(res, 200, result);
-        return;
-      }
-
       writeError(res, 404, `Not found: ${req.method} ${path}`);
     } catch (error) {
       if (error instanceof HttpRequestError) {
@@ -2088,7 +1987,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         return;
       }
       if (isMemoryDomainError(error)) {
-        writeError(res, error.status, error.message);
+        writeError(res, error.status, error.message, error.code);
         return;
       }
       const message = error instanceof Error ? error.message : String(error);
@@ -2109,10 +2008,8 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           await new Promise<void>((resolveClose) => {
             server.close(() => resolveClose());
           });
-          managers.clear();
-          sessionManagers.clear();
           sessionSnapshots.clear();
-          await adapterResources.close();
+          await serverContext.close();
         },
       });
     });

@@ -18,6 +18,7 @@ FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 ENV MEMORY_TRANSPORT=http
+ENV MEMORY_HOST=0.0.0.0
 ENV MEMORY_PORT=3100
 ENV MEMORY_DB_PATH=/data/memory.db
 

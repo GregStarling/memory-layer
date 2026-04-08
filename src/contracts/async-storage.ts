@@ -297,6 +297,8 @@ export interface AsyncStorageAdapter {
   getSourceDocumentByHash(contentHash: string, scope: MemoryScope): Promise<SourceDocument | null>;
   listSourceDocuments(scope: MemoryScope, options?: PaginationOptions): Promise<PaginatedResult<SourceDocument>>;
   updateSourceDocument(id: number, patch: { status?: SourceDocumentStatus; fact_count?: number; processed_at?: number | null }): Promise<SourceDocument | null>;
+  getScopeConfig(scope: MemoryScope, key: string): Promise<string | null>;
+  setScopeConfig(scope: MemoryScope, key: string, value: string): Promise<void>;
 
   // Context governance persistence (optional)
   getGovernanceState?(scope: MemoryScope): Promise<PersistedGovernanceState | null>;

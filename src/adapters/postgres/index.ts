@@ -3181,6 +3181,51 @@ export function createPostgresAdapter(
       return rows.length > 0 ? mapSourceDocumentRow(rows[0]) : null;
     },
 
+    async getScopeConfig(scope: MemoryScope, key: string): Promise<string | null> {
+      const { rows } = await pool.query(
+        `SELECT config_value
+         FROM scope_config
+         WHERE ${scopeWhere()} AND config_key = $6
+         LIMIT 1`,
+        [...scopeParams(scope), key],
+      );
+      return rows[0] ? String(rows[0].config_value) : null;
+    },
+
+    async setScopeConfig(scope: MemoryScope, key: string, value: string): Promise<void> {
+      const normalized = normalizeScope(scope);
+      const now = nowSeconds();
+      await pool.query(
+        `INSERT INTO scope_config (
+           tenant_id,
+           system_id,
+           workspace_id,
+           collaboration_id,
+           scope_id,
+           config_key,
+           config_value,
+           created_at,
+           updated_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (tenant_id, system_id, workspace_id, collaboration_id, scope_id, config_key)
+         DO UPDATE SET
+           config_value = EXCLUDED.config_value,
+           updated_at = EXCLUDED.updated_at`,
+        [
+          normalized.tenant_id,
+          normalized.system_id,
+          normalized.workspace_id,
+          normalized.collaboration_id,
+          normalized.scope_id,
+          key,
+          value,
+          now,
+          now,
+        ],
+      );
+    },
+
     async close() {
       if (options?.ownsPool !== false) {
         await rootPool.end();

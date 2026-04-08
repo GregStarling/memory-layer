@@ -85,6 +85,8 @@ components:
       properties:
         error:
           type: string
+        code:
+          type: string
     KnowledgeMemory:
       type: object
       properties:
@@ -3473,6 +3475,7 @@ paths:
     get:
       tags: [phase5]
       summary: Discover surprising cross-memory connections
+      description: Supported on embedded, sync-backed, and wrapped-sync hosted deployments. Async-only deployments return `501 not_implemented`.
       parameters:
         - name: max_results
           in: query
@@ -3528,11 +3531,18 @@ paths:
                         type: number
                   timestamp:
                     type: number
+        '501':
+          description: Discover is unavailable on async-only deployments without sync adapter access
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /v1/report:
     get:
       tags: [phase5]
       summary: Generate a graph report for system-prompt injection
+      description: Supported on embedded, sync-backed, and wrapped-sync hosted deployments. Async-only deployments return `501 not_implemented`.
       parameters:
         - name: token_budget
           in: query
@@ -3576,6 +3586,12 @@ paths:
                     type: integer
                   generatedAt:
                     type: string
+        '501':
+          description: Graph reports are unavailable on async-only deployments without sync adapter access
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /v1/facts-at:
     get:
@@ -3851,7 +3867,7 @@ paths:
   /v1/aliases:
     get:
       tags: [phase5]
-      summary: Get current alias map
+      summary: Get persisted alias map
       parameters:
         - $ref: '#/components/parameters/ScopeTenant'
         - $ref: '#/components/parameters/ScopeSystem'
@@ -3874,7 +3890,7 @@ paths:
                         type: string
     post:
       tags: [phase5]
-      summary: Set alias map
+      summary: Persist alias map
       requestBody:
         required: true
         content:
@@ -3941,7 +3957,7 @@ paths:
   /v1/ontology:
     get:
       tags: [phase5]
-      summary: Get current ontology configuration
+      summary: Get persisted ontology configuration
       parameters:
         - $ref: '#/components/parameters/ScopeTenant'
         - $ref: '#/components/parameters/ScopeSystem'
@@ -3961,7 +3977,7 @@ paths:
                     nullable: true
     post:
       tags: [phase5]
-      summary: Set ontology configuration
+      summary: Persist ontology configuration
       requestBody:
         required: true
         content:
@@ -4038,6 +4054,7 @@ paths:
     post:
       tags: [phase5]
       summary: Export a named bundle of knowledge facts and playbooks
+      description: Supported on embedded, sync-backed, and wrapped-sync hosted deployments. Async-only deployments return `501 not_implemented`.
       requestBody:
         required: true
         content:
@@ -4087,11 +4104,18 @@ paths:
                     type: integer
                   playbookCount:
                     type: integer
+        '501':
+          description: Bundle export is unavailable on async-only deployments without sync adapter access
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /v1/bundles/import:
     post:
       tags: [phase5]
       summary: Import a bundle into a target scope
+      description: Supported on embedded, sync-backed, and wrapped-sync hosted deployments. Async-only deployments return `501 not_implemented`.
       requestBody:
         required: true
         content:
@@ -4135,11 +4159,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '501':
+          description: Bundle import is unavailable on async-only deployments without sync adapter access
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /v1/refresh-documents:
     post:
       tags: [phase5]
       summary: Incrementally refresh a document corpus
+      description: Supported on embedded, sync-backed, and wrapped-sync hosted deployments. Async-only deployments return `501 not_implemented`.
       requestBody:
         required: true
         content:
@@ -4180,6 +4211,12 @@ paths:
                       type: object
                   invalidatedFactCount:
                     type: integer
+        '501':
+          description: Document refresh is unavailable on async-only deployments without sync adapter access
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
                   reIngestedFactCount:
                     type: integer
         '400':

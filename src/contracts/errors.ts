@@ -3,7 +3,8 @@ export type MemoryErrorCode =
   | 'resource_not_found'
   | 'scope_mismatch'
   | 'conflict'
-  | 'provider_unavailable';
+  | 'provider_unavailable'
+  | 'not_implemented';
 
 export interface MemoryErrorOptions {
   cause?: unknown;
@@ -56,6 +57,12 @@ export class ConflictError extends MemoryDomainError {
 export class ProviderUnavailableError extends MemoryDomainError {
   constructor(message: string, options: MemoryErrorOptions = {}) {
     super(message, 'provider_unavailable', 503, options);
+  }
+}
+
+export class NotImplementedError extends MemoryDomainError {
+  constructor(message: string, options: MemoryErrorOptions = {}) {
+    super(message, 'not_implemented', 501, options);
   }
 }
 

@@ -10,6 +10,7 @@ import type {
 } from '../contracts/coordination.js';
 import { normalizeScope, type MemoryScope, type ScopeLevel } from '../contracts/identity.js';
 import {
+  NotImplementedError,
   ProviderUnavailableError,
   ResourceNotFoundError,
   ScopeMismatchError,
@@ -172,6 +173,14 @@ import type { CoreMemoryOptions, CoreMemoryBundle } from '../contracts/core-memo
 import type { AliasCandidate } from '../contracts/aliases.js';
 import type { BundleExportOptions, BundleImportOptions, MemoryBundle } from '../contracts/bundles.js';
 import type { DiscoverAliasCandidatesOptions } from './aliases.js';
+import { getNativeSyncAdapter } from '../adapters/sync-to-async.js';
+import {
+  parseAliases,
+  parseOntology,
+  SCOPE_CONFIG_KEYS,
+  serializeAliases,
+  serializeOntology,
+} from './scope-config.js';
 
 export interface MemoryManagerConfig {
   /** Synchronous storage adapter (SQLite, in-memory). Mutually exclusive with asyncAdapter. */
@@ -483,9 +492,13 @@ export interface MemoryManager {
   getCoreMemory(options?: CoreMemoryOptions): Promise<CoreMemoryBundle>;
   setAliases(aliasMap: AliasMap): void;
   getAliases(): AliasMap | undefined;
+  saveAliases(aliasMap: AliasMap): Promise<void>;
+  loadAliases(): Promise<AliasMap | undefined>;
   getAliasCandidates(options?: DiscoverAliasCandidatesOptions): Promise<AliasCandidate[]>;
   setOntology(ontology: OntologyConfig): void;
   getOntology(): OntologyConfig | undefined;
+  saveOntology(ontology: OntologyConfig): Promise<void>;
+  loadOntology(): Promise<OntologyConfig | undefined>;
   exportBundle(name: string, options?: Partial<BundleExportOptions>): ExportBundleResult;
   importBundle(bundle: MemoryBundle, options: BundleImportOptions): ImportBundleResult;
   refreshDocuments(documents: DocumentDescriptor[]): RefreshResult;
@@ -501,6 +514,20 @@ function resolveAdapter(config: MemoryManagerConfig): AsyncStorageAdapter {
     return wrapSyncAdapter(config.adapter);
   }
   throw new ValidationError("MemoryManagerConfig requires either 'adapter' or 'asyncAdapter'");
+}
+
+function resolveSyncAdapter(
+  config: MemoryManagerConfig,
+  asyncAdapter: AsyncStorageAdapter,
+  operation: string,
+): StorageAdapter {
+  const syncAdapter = config.adapter ?? getNativeSyncAdapter(asyncAdapter);
+  if (!syncAdapter) {
+    throw new NotImplementedError(
+      `${operation} is not available on this deployment (requires sync adapter access)`,
+    );
+  }
+  return syncAdapter;
 }
 
 function manualKnowledgeClassForFactType(factType: FactType): KnowledgeMemory['knowledge_class'] {
@@ -3125,17 +3152,15 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     // --- Phase 5 methods ---
 
     async discover(options) {
-      if (!config.adapter) {
-        throw new ValidationError('discover() requires a synchronous adapter (config.adapter)');
-      }
-      return discover(config.adapter, config.scope, options);
+      return discover(resolveSyncAdapter(config, asyncAdapter, 'discover()'), config.scope, options);
     },
 
     async getGraphReport(options) {
-      if (!config.adapter) {
-        throw new ValidationError('getGraphReport() requires a synchronous adapter (config.adapter)');
-      }
-      return getGraphReport(config.adapter, config.scope, options);
+      return getGraphReport(
+        resolveSyncAdapter(config, asyncAdapter, 'getGraphReport()'),
+        config.scope,
+        options,
+      );
     },
 
     async getFactsAt(timestamp, options) {
@@ -3199,6 +3224,24 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       return config.aliasMap;
     },
 
+    async saveAliases(aliasMap) {
+      config.aliasMap = aliasMap;
+      await asyncAdapter.setScopeConfig(
+        config.scope,
+        SCOPE_CONFIG_KEYS.aliases,
+        serializeAliases(aliasMap),
+      );
+    },
+
+    async loadAliases() {
+      const stored = await asyncAdapter.getScopeConfig(config.scope, SCOPE_CONFIG_KEYS.aliases);
+      const aliasMap = parseAliases(stored);
+      if (aliasMap) {
+        config.aliasMap = aliasMap;
+      }
+      return aliasMap;
+    },
+
     async getAliasCandidates(options) {
       const knowledge = await asyncAdapter.getActiveKnowledgeMemory(config.scope);
       return discoverAliasCandidates(knowledge, {
@@ -3215,28 +3258,41 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       return config.ontology;
     },
 
-    exportBundle(name, options) {
-      if (!config.adapter) {
-        throw new ValidationError('exportBundle() requires a synchronous adapter (config.adapter)');
+    async saveOntology(ontology) {
+      config.ontology = ontology;
+      await asyncAdapter.setScopeConfig(
+        config.scope,
+        SCOPE_CONFIG_KEYS.ontology,
+        serializeOntology(ontology),
+      );
+    },
+
+    async loadOntology() {
+      const stored = await asyncAdapter.getScopeConfig(config.scope, SCOPE_CONFIG_KEYS.ontology);
+      const ontology = parseOntology(stored);
+      if (ontology) {
+        config.ontology = ontology;
       }
-      return exportBundle(config.adapter, name, {
+      return ontology;
+    },
+
+    exportBundle(name, options) {
+      return exportBundle(resolveSyncAdapter(config, asyncAdapter, 'exportBundle()'), name, {
         ...options,
         scope: config.scope, // Always enforce manager's scope
       });
     },
 
     importBundle(bundle, options) {
-      if (!config.adapter) {
-        throw new ValidationError('importBundle() requires a synchronous adapter (config.adapter)');
-      }
-      return importBundle(config.adapter, bundle, options);
+      return importBundle(resolveSyncAdapter(config, asyncAdapter, 'importBundle()'), bundle, options);
     },
 
     refreshDocuments(documents) {
-      if (!config.adapter) {
-        throw new ValidationError('refreshDocuments() requires a synchronous adapter (config.adapter)');
-      }
-      return refreshDocuments(config.adapter, config.scope, documents);
+      return refreshDocuments(
+        resolveSyncAdapter(config, asyncAdapter, 'refreshDocuments()'),
+        config.scope,
+        documents,
+      );
     },
 
     async close() {

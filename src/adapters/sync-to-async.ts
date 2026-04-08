@@ -203,6 +203,8 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
     getSourceDocumentByHash: (hash, scope) => Promise.resolve(adapter.getSourceDocumentByHash(hash, scope)),
     listSourceDocuments: (scope, options) => Promise.resolve(adapter.listSourceDocuments(scope, options)),
     updateSourceDocument: (id, patch) => Promise.resolve(adapter.updateSourceDocument(id, patch)),
+    getScopeConfig: (scope, key) => Promise.resolve(adapter.getScopeConfig(scope, key)),
+    setScopeConfig: (scope, key, value) => Promise.resolve(adapter.setScopeConfig(scope, key, value)),
 
     // Context governance persistence (optional)
     getGovernanceState: adapter.getGovernanceState

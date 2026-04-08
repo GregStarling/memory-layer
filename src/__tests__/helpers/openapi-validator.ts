@@ -108,6 +108,20 @@ function splitFlowTopLevel(text: string): string[] {
 
 type Line = { indent: number; text: string };
 
+function parseBlockScalar(
+  lines: Line[],
+  start: number,
+  indent: number,
+): { value: string; next: number } {
+  const parts: string[] = [];
+  let i = start;
+  while (i < lines.length && lines[i].indent >= indent) {
+    parts.push(lines[i].text.slice(indent));
+    i += 1;
+  }
+  return { value: parts.join('\n'), next: i };
+}
+
 function parseBlock(lines: Line[], start: number, indent: number): { value: YamlValue; next: number } {
   // Detect list vs map by first non-trivial line at this indent.
   let i = start;
@@ -135,6 +149,10 @@ function parseBlock(lines: Line[], start: number, indent: number): { value: Yaml
           const { value, next } = parseBlock(lines, i, indent + 2);
           map[key] = value;
           i = next;
+        } else if (rest === '|' || rest === '>') {
+          const { value, next } = parseBlockScalar(lines, i, indent + 4);
+          map[key] = value;
+          i = next;
         } else {
           map[key] = parseFlowValue(rest);
         }
@@ -148,6 +166,10 @@ function parseBlock(lines: Line[], start: number, indent: number): { value: Yaml
           i++;
           if (v === '') {
             const { value, next } = parseBlock(lines, i, indent + 4);
+            map[k] = value;
+            i = next;
+          } else if (v === '|' || v === '>') {
+            const { value, next } = parseBlockScalar(lines, i, indent + 4);
             map[k] = value;
             i = next;
           } else {
@@ -173,6 +195,10 @@ function parseBlock(lines: Line[], start: number, indent: number): { value: Yaml
     i++;
     if (valueText === '') {
       const { value, next } = parseBlock(lines, i, indent + 2);
+      map[key] = value;
+      i = next;
+    } else if (valueText === '|' || valueText === '>') {
+      const { value, next } = parseBlockScalar(lines, i, indent + 2);
       map[key] = value;
       i = next;
     } else {

@@ -2,6 +2,8 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { rmSync } from 'node:fs';
 import { createMcpServerHandler, startMcpServer } from '../server/mcp-server.js';
 import { createSQLiteAdapter } from '../adapters/sqlite/index.js';
+import { createInMemoryAdapter } from '../adapters/memory/index.js';
+import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 
 const mockedReadline = {
   lineHandler: null as ((line: string) => void | Promise<void>) | null,
@@ -30,6 +32,14 @@ describe('MCP server handler', () => {
       cleanupDbPath = null;
     }
   });
+
+  function createAsyncOnlyAdapter() {
+    const base = wrapSyncAdapter(createInMemoryAdapter());
+    return {
+      ...base,
+      close: base.close,
+    };
+  }
 
   it('lists all expected tools', () => {
     handler = createMcpServerHandler();
@@ -380,6 +390,101 @@ describe('MCP server handler', () => {
 
     expect(JSON.parse(result.content[0].text).knowledge[0].fact).toContain('Shared workspace memory');
   });
+
+  it('supports phase-5 MCP tools on wrapped-sync SQLite deployments', async () => {
+    handler = createMcpServerHandler();
+
+    const discover = await handler.callTool('memory_discover', {});
+    expect(discover.isError).toBeUndefined();
+
+    const report = await handler.callTool('memory_get_report', {});
+    expect(report.isError).toBeUndefined();
+
+    const exported = await handler.callTool('memory_export_bundle', {
+      name: 'backup-mcp',
+    });
+    expect(exported.isError).toBeUndefined();
+    const exportedBody = JSON.parse(exported.content[0].text);
+
+    const imported = await handler.callTool('memory_import_bundle', {
+      bundle: exportedBody.bundle,
+      conflictResolution: 'skip',
+    });
+    expect(imported.isError).toBeUndefined();
+
+    const refreshed = await handler.callTool('memory_refresh_documents', {
+      documents: [],
+    });
+    expect(refreshed.isError).toBeUndefined();
+  });
+
+  it('returns not_implemented errors for phase-5 MCP tools on async-only deployments', async () => {
+    handler = createMcpServerHandler({
+      asyncAdapter: createAsyncOnlyAdapter(),
+    });
+
+    const discover = await handler.callTool('memory_discover', {});
+    expect(discover.isError).toBe(true);
+    expect(discover.content[0].text).toContain('not available on this deployment');
+
+    const report = await handler.callTool('memory_get_report', {});
+    expect(report.isError).toBe(true);
+    expect(report.content[0].text).toContain('not available on this deployment');
+
+    const exported = await handler.callTool('memory_export_bundle', {
+      name: 'backup-mcp',
+    });
+    expect(exported.isError).toBe(true);
+    expect(exported.content[0].text).toContain('not available on this deployment');
+
+    const imported = await handler.callTool('memory_import_bundle', {
+      bundle: { name: 'bundle' },
+      conflictResolution: 'skip',
+    });
+    expect(imported.isError).toBe(true);
+    expect(imported.content[0].text).toContain('not available on this deployment');
+
+    const refreshed = await handler.callTool('memory_refresh_documents', {
+      documents: [],
+    });
+    expect(refreshed.isError).toBe(true);
+    expect(refreshed.content[0].text).toContain('not available on this deployment');
+  });
+
+  it('persists aliases and ontology across handler recreation and cache churn', async () => {
+    cleanupDbPath = `/tmp/memory-layer-mcp-phase5-${Date.now()}-${Math.random()}.sqlite`;
+    handler = createMcpServerHandler({ dbPath: cleanupDbPath });
+
+    const aliases = { TypeScript: ['ts', 'TS'] };
+    const ontology = {
+      entityTypes: [{ name: 'tool', description: 'A dev tool', allowedRelationships: [] }],
+      relationshipConstraints: [],
+      validationRules: [],
+    };
+
+    expect((await handler.callTool('memory_set_aliases', { aliases })).isError).toBeUndefined();
+    expect((await handler.callTool('memory_set_ontology', ontology)).isError).toBeUndefined();
+
+    for (let index = 0; index < 257; index += 1) {
+      const result = await handler.callTool('memory_get_context_config', {
+        scope: {
+          tenant_id: 'default',
+          system_id: 'default',
+          scope_id: `scope-${index}`,
+        },
+      });
+      expect(result.isError).toBeUndefined();
+    }
+
+    expect(JSON.parse((await handler.callTool('memory_get_aliases', {})).content[0].text).aliases).toEqual(aliases);
+    expect(JSON.parse((await handler.callTool('memory_get_ontology', {})).content[0].text).ontology).toEqual(ontology);
+
+    await handler.close();
+    handler = createMcpServerHandler({ dbPath: cleanupDbPath });
+
+    expect(JSON.parse((await handler.callTool('memory_get_aliases', {})).content[0].text).aliases).toEqual(aliases);
+    expect(JSON.parse((await handler.callTool('memory_get_ontology', {})).content[0].text).ontology).toEqual(ontology);
+  }, 15000);
 
   it('waits for initialize before emitting stdio lifecycle messages', async () => {
     mockedReadline.lineHandler = null;

@@ -1,7 +1,4 @@
-import {
-  createMemoryWithAsyncAdapter,
-  type CreateMemoryOptions,
-} from '../core/quick.js';
+import { type CreateMemoryOptions } from '../core/quick.js';
 import type { MemoryManager } from '../core/manager.js';
 import type {
   ContextContract,
@@ -25,8 +22,6 @@ import {
 } from '../contracts/context-contract.js';
 import type { ProfileView, ProfileSection } from '../contracts/profile.js';
 import type { CognitiveMemoryType } from '../contracts/cognitive.js';
-import { createSQLiteAdapterWithEmbeddings } from '../adapters/sqlite/index.js';
-import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 import {
   parseOptionalFiniteInteger,
   parseOptionalFiniteNumber,
@@ -45,7 +40,8 @@ import {
   serializeContextResponse,
   serializeTemporalState,
 } from './serialization.js';
-import { scopeKeyFor, withScopeManagers } from './scope-propagation.js';
+import { scopeKeyFor } from './scope-propagation.js';
+import { createServerContext } from './server-context.js';
 
 export interface McpServerConfig {
   /** Database path. Defaults to ':memory:'. */
@@ -60,6 +56,12 @@ export interface McpServerConfig {
   preset?: CreateMemoryOptions['preset'];
   /** Optional Postgres connection string for hosted deployments. */
   databaseUrl?: string;
+  /** Optional injected async adapter for tests or embedded hosting. */
+  asyncAdapter?: AsyncStorageAdapter;
+  /** Optional embedding adapter paired with an injected async adapter. */
+  embeddingAdapter?: EmbeddingAdapter;
+  /** Optional cleanup hook paired with an injected async adapter. */
+  closeAdapterResources?: () => Promise<void>;
   /** Quality mode applied to hosted managers. */
   qualityMode?: CreateMemoryOptions['qualityMode'];
   /** Legacy quality tier mapping. */
@@ -851,7 +853,7 @@ const TOOLS: McpTool[] = [
   // --- Phase 5 tools ---
   {
     name: 'memory_discover',
-    description: 'Discover surprising connections and high-centrality entities in the knowledge graph.',
+    description: 'Discover surprising connections and high-centrality entities in the knowledge graph. Returns not_implemented on async-only deployments without sync adapter access.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -863,7 +865,7 @@ const TOOLS: McpTool[] = [
   },
   {
     name: 'memory_get_report',
-    description: 'Generate a structured graph report of the knowledge base with token budget control.',
+    description: 'Generate a structured graph report of the knowledge base with token budget control. Returns not_implemented on async-only deployments without sync adapter access.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -944,7 +946,7 @@ const TOOLS: McpTool[] = [
   },
   {
     name: 'memory_set_aliases',
-    description: 'Set the alias map for entity name canonicalization during extraction.',
+    description: 'Persist the alias map for entity name canonicalization during extraction across cache eviction and restart.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -959,7 +961,7 @@ const TOOLS: McpTool[] = [
   },
   {
     name: 'memory_get_aliases',
-    description: 'Get the current alias map configuration.',
+    description: 'Get the persisted alias map configuration for the current scope.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -978,7 +980,7 @@ const TOOLS: McpTool[] = [
   },
   {
     name: 'memory_set_ontology',
-    description: 'Set the ontology configuration with entity type definitions, relationship constraints, and validation rules.',
+    description: 'Persist the ontology configuration with entity type definitions, relationship constraints, and validation rules across cache eviction and restart.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -991,7 +993,7 @@ const TOOLS: McpTool[] = [
   },
   {
     name: 'memory_get_ontology',
-    description: 'Get the current ontology configuration.',
+    description: 'Get the persisted ontology configuration for the current scope.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -999,7 +1001,7 @@ const TOOLS: McpTool[] = [
   },
   {
     name: 'memory_export_bundle',
-    description: 'Export knowledge and playbooks as a portable bundle.',
+    description: 'Export knowledge and playbooks as a portable bundle. Returns not_implemented on async-only deployments without sync adapter access.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1012,7 +1014,7 @@ const TOOLS: McpTool[] = [
   },
   {
     name: 'memory_import_bundle',
-    description: 'Import a knowledge bundle into the current scope.',
+    description: 'Import a knowledge bundle into the current scope. Returns not_implemented on async-only deployments without sync adapter access.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1029,7 +1031,7 @@ const TOOLS: McpTool[] = [
   },
   {
     name: 'memory_refresh_documents',
-    description: 'Re-ingest source documents that have changed since last ingestion.',
+    description: 'Re-ingest source documents that have changed since last ingestion. Returns not_implemented on async-only deployments without sync adapter access.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1110,6 +1112,16 @@ function resolveScopeInput(
   return fallbackScope ?? 'default';
 }
 
+function materializeScope(scopeInput: string | MemoryScope): MemoryScope {
+  return typeof scopeInput === 'string'
+    ? {
+        tenant_id: 'default',
+        system_id: 'default',
+        scope_id: scopeInput,
+      }
+    : scopeInput;
+}
+
 /**
  * Creates a standalone MCP server handler that exposes memory operations as tools.
  *
@@ -1123,15 +1135,36 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
     config.defaultDiffMaxEvents,
     config.maxDiffMaxEvents,
   );
-  const managers = new Map<string, MemoryManager>();
   const runtimes = new Map<string, MemoryRuntime>();
-  const sessionManagers = new Map<string, MemoryManager>();
   const sessionRuntimes = new Map<string, MemoryRuntime>();
-  let adapterPromise: Promise<{
-    asyncAdapter: AsyncStorageAdapter;
-    embeddingAdapter?: EmbeddingAdapter;
-    close: () => Promise<void>;
-  }> | null = null;
+  const resolvedDatabaseUrl = config.databaseUrl ?? process.env.MEMORY_DATABASE_URL;
+  const serverContext = createServerContext({
+    dbPath: config.dbPath,
+    databaseUrl: resolvedDatabaseUrl,
+    asyncAdapter: config.asyncAdapter,
+    embeddingAdapter: config.embeddingAdapter,
+    closeAdapterResources: config.closeAdapterResources,
+    managerCacheLimit: MANAGER_CACHE_LIMIT,
+    sessionManagerCacheLimit: SESSION_MANAGER_CACHE_LIMIT,
+    buildManagerOptions(scopeInput, sessionId) {
+      return {
+        scope: scopeInput,
+        ...(sessionId ? { sessionId } : {}),
+        summarizer: config.summarizer ?? 'extractive',
+        extractor: config.extractor ?? 'regex',
+        preset: config.preset,
+        qualityMode: config.qualityMode,
+        qualityTier: config.qualityTier,
+        crossScopeLevel: config.crossScopeLevel,
+        contextContract: config.contextContract,
+        contextContracts: config.contextContracts,
+        invariants: config.invariants,
+        escalationPolicy: config.escalationPolicy,
+        autoDetectWorkspace: config.autoDetectWorkspace,
+        structuredClient: config.structuredClient,
+      };
+    },
+  });
 
   function touchCache<T>(
     cache: Map<string, T>,
@@ -1151,99 +1184,77 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
     }
   }
 
-  async function getAsyncAdapter(): Promise<{
-    asyncAdapter: AsyncStorageAdapter;
-    embeddingAdapter?: EmbeddingAdapter;
-    close: () => Promise<void>;
-  }> {
-    if (!adapterPromise) {
-      adapterPromise = (async () => {
-        if (!config.databaseUrl && !process.env.MEMORY_DATABASE_URL) {
-          const sqlite = createSQLiteAdapterWithEmbeddings(config.dbPath ?? ':memory:');
-          return {
-            asyncAdapter: wrapSyncAdapter(sqlite),
-            embeddingAdapter: sqlite.embeddings,
-            close: async () => {
-              sqlite.close();
-            },
-          };
-        }
-        const moduleName = 'pg';
-        const pgModule = await import(moduleName).catch(() => {
-          throw new Error(
-            'memory-layer: hosted Postgres mode requires the "pg" package. Install it with: npm install pg',
-          );
-        });
-        const { createPostgresAdapter, createPostgresEmbeddingAdapter } = await import(
-          '../adapters/postgres/index.js'
-        );
-        const Pool = pgModule.Pool ?? pgModule.default?.Pool;
-        const pool = new Pool({
-          connectionString: config.databaseUrl ?? process.env.MEMORY_DATABASE_URL,
-        });
-        const asyncAdapter = createPostgresAdapter(pool, { ownsPool: false });
-        return {
-          asyncAdapter,
-          embeddingAdapter: createPostgresEmbeddingAdapter(pool),
-          close: async () => {
-            await pool.end();
-          },
-        };
-      })();
-    }
-    return adapterPromise;
+  async function getManager(scopeInput: string | MemoryScope): Promise<MemoryManager> {
+    return serverContext.getManager(scopeInput);
   }
 
-  async function getManager(scopeInput: string | MemoryScope): Promise<MemoryManager> {
-    const key =
-      typeof scopeInput === 'string'
-        ? `scope:${scopeInput}`
-        : JSON.stringify(normalizeScope(scopeInput));
-    const existing = managers.get(key);
-    if (existing) {
-      touchCache(managers, key, existing, MANAGER_CACHE_LIMIT);
-      return existing;
+  async function withRuntimeManagers(
+    scopeInput: string | MemoryScope,
+    callback: (manager: MemoryManager) => Promise<void>,
+  ): Promise<void> {
+    const baseKey = scopeKeyFor(scopeInput);
+    const seen = new Set<MemoryManager>();
+    const baseRuntime = runtimes.get(baseKey);
+    if (baseRuntime) {
+      seen.add(baseRuntime.manager);
+      await callback(baseRuntime.manager);
     }
-    const baseOptions: CreateMemoryOptions = {
-      scope: scopeInput,
-      summarizer: config.summarizer ?? 'extractive',
-      extractor: config.extractor ?? 'regex',
-      preset: config.preset,
-      qualityMode: config.qualityMode,
-      qualityTier: config.qualityTier,
-      crossScopeLevel: config.crossScopeLevel,
-      contextContract: config.contextContract,
-      contextContracts: config.contextContracts,
-      invariants: config.invariants,
-      escalationPolicy: config.escalationPolicy,
-      autoDetectWorkspace: config.autoDetectWorkspace,
-      structuredClient: config.structuredClient,
-    };
-    const adapterContext = await getAsyncAdapter();
-    const manager = createMemoryWithAsyncAdapter({
-      ...baseOptions,
-      asyncAdapter: adapterContext.asyncAdapter,
-      embeddingAdapter: adapterContext.embeddingAdapter,
-      closeAdapter: false,
+    for (const [key, runtime] of sessionRuntimes.entries()) {
+      if (!key.startsWith(`${baseKey}|session:`)) continue;
+      if (seen.has(runtime.manager)) continue;
+      seen.add(runtime.manager);
+      await callback(runtime.manager);
+    }
+  }
+
+  async function refreshScopeConfig(scopeInput: string | MemoryScope): Promise<{
+    aliases?: import('../contracts/aliases.js').AliasMap;
+    ontology?: import('../contracts/ontology.js').OntologyConfig;
+  }> {
+    const persisted = await serverContext.refreshScopeConfig(scopeInput);
+    await withRuntimeManagers(scopeInput, async (manager) => {
+      if (persisted.aliases) {
+        manager.setAliases(persisted.aliases);
+      }
+      if (persisted.ontology) {
+        manager.setOntology(persisted.ontology);
+      }
     });
-    touchCache(managers, key, manager, MANAGER_CACHE_LIMIT, (evictedKey) => {
-      runtimes.delete(evictedKey);
+    return persisted;
+  }
+
+  async function saveAliases(
+    scopeInput: string | MemoryScope,
+    aliasMap: Record<string, string[]>,
+  ): Promise<void> {
+    await serverContext.saveAliases(
+      scopeInput,
+      aliasMap as import('../contracts/aliases.js').AliasMap,
+    );
+    await withRuntimeManagers(scopeInput, async (manager) => {
+      manager.setAliases(aliasMap as import('../contracts/aliases.js').AliasMap);
     });
-    return manager;
+  }
+
+  async function saveOntology(
+    scopeInput: string | MemoryScope,
+    ontology: import('../contracts/ontology.js').OntologyConfig,
+  ): Promise<void> {
+    await serverContext.saveOntology(scopeInput, ontology);
+    await withRuntimeManagers(scopeInput, async (manager) => {
+      manager.setOntology(ontology);
+    });
   }
 
   async function getRuntime(scopeInput: string | MemoryScope): Promise<MemoryRuntime> {
-    const key =
-      typeof scopeInput === 'string'
-        ? `scope:${scopeInput}`
-        : JSON.stringify(normalizeScope(scopeInput));
+    const key = scopeKeyFor(scopeInput);
     const existing = runtimes.get(key);
     if (existing) {
       runtimes.delete(key);
       runtimes.set(key, existing);
       return existing;
     }
-    const manager = await getManager(scopeInput);
+    const manager = await serverContext.getManager(scopeInput);
     const runtime = createMemoryRuntime(manager, { snapshotMode: true });
     touchCache(runtimes, key, runtime, RUNTIME_CACHE_LIMIT);
     return runtime;
@@ -1266,39 +1277,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
       sessionRuntimes.set(key, existing);
       return existing;
     }
-    const baseOptions: CreateMemoryOptions = {
-      scope: scopeInput,
-      sessionId,
-      summarizer: config.summarizer ?? 'extractive',
-      extractor: config.extractor ?? 'regex',
-      preset: config.preset,
-      qualityMode: config.qualityMode,
-      qualityTier: config.qualityTier,
-      crossScopeLevel: config.crossScopeLevel,
-      contextContract: config.contextContract,
-      contextContracts: config.contextContracts,
-      invariants: config.invariants,
-      escalationPolicy: config.escalationPolicy,
-      autoDetectWorkspace: config.autoDetectWorkspace,
-      structuredClient: config.structuredClient,
-    };
-    const adapterContext = await getAsyncAdapter();
-    const manager = createMemoryWithAsyncAdapter({
-      ...baseOptions,
-      asyncAdapter: adapterContext.asyncAdapter,
-      embeddingAdapter: adapterContext.embeddingAdapter,
-      closeAdapter: false,
-    });
-    touchCache(
-      sessionManagers,
-      key,
-      manager,
-      SESSION_MANAGER_CACHE_LIMIT,
-      (evictedKey, evictedManager) => {
-        sessionRuntimes.delete(evictedKey);
-        void evictedManager.close().catch(() => undefined);
-      },
-    );
+    const manager = await serverContext.getSessionManager(scopeInput, sessionId);
     const runtime = createMemoryRuntime(manager, { snapshotMode: true });
     touchCache(sessionRuntimes, key, runtime, RUNTIME_CACHE_LIMIT);
     return runtime;
@@ -1307,11 +1286,149 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
   const propagateToManagers = (
     scopeInput: string | MemoryScope,
     callback: (manager: MemoryManager) => Promise<void>,
-  ) => withScopeManagers(scopeInput, sessionManagers, getManager, callback);
+  ) => serverContext.withScopeManagers(scopeInput, callback);
+
+  type RegisteredToolHandlerContext = {
+    args: Record<string, unknown>;
+    scopeInput: string | MemoryScope;
+    requestManager: MemoryManager;
+  };
+  type RegisteredToolHandler = (context: RegisteredToolHandlerContext) => Promise<McpToolResult>;
+
+  const registeredToolHandlers: Record<string, RegisteredToolHandler> = {
+    memory_discover: async ({ args, requestManager }) => {
+      const report = await requestManager.discover({
+        maxResults: parseLimit(args.maxResults) ?? undefined,
+        minSurpriseScore: args.minSurpriseScore != null
+          ? parseOptionalFiniteNumber(args.minSurpriseScore, { name: 'minSurpriseScore' }, failMcpValidation) ?? undefined
+          : undefined,
+        maxDepth: parseOptionalNonNegativeInteger(args.maxDepth, 'maxDepth'),
+      });
+      return jsonResult(report);
+    },
+    memory_get_report: async ({ args, requestManager }) => {
+      const report = await requestManager.getGraphReport({
+        tokenBudget: parseOptionalNonNegativeInteger(args.tokenBudget, 'tokenBudget'),
+        includeSections: Array.isArray(args.includeSections) ? args.includeSections as string[] : undefined,
+        filterByTags: Array.isArray(args.filterByTags) ? args.filterByTags as string[] : undefined,
+      });
+      return jsonResult(report);
+    },
+    memory_get_facts_at: async ({ args, requestManager }) => {
+      const timestamp = parseRequiredFiniteInteger(args.timestamp, 'timestamp', { min: 0 });
+      const factsResult = await requestManager.getFactsAt(timestamp);
+      return jsonResult(factsResult);
+    },
+    memory_reflect_knowledge: async ({ args, requestManager }) => {
+      const reflectionResult = await requestManager.reflectOnKnowledge({
+        maxFacts: parseOptionalNonNegativeInteger(args.maxFacts, 'maxFacts'),
+        includePlaybooks: args.includePlaybooks != null ? Boolean(args.includePlaybooks) : undefined,
+        rateLimitKey: optionalString(args.rateLimitKey, 'rateLimitKey'),
+      });
+      return jsonResult(reflectionResult);
+    },
+    memory_derive: async ({ args, requestManager }) => {
+      const derived = await requestManager.derive({
+        outputTypes: Array.isArray(args.outputTypes) ? args.outputTypes as string[] : undefined,
+        maxOutputs: parseOptionalNonNegativeInteger(args.maxOutputs, 'maxOutputs'),
+      });
+      return jsonResult(derived);
+    },
+    memory_get_curation: async ({ args, requestManager }) => {
+      const curation = await requestManager.getCurationSummary(undefined, {
+        since: args.since != null
+          ? parseOptionalFiniteNumber(args.since, { name: 'since' }, failMcpValidation) ?? undefined
+          : undefined,
+        actionTypes: Array.isArray(args.actionTypes) ? args.actionTypes as unknown as import('../contracts/curation.js').CurationActionType[] : undefined,
+        limit: parseLimit(args.limit),
+      });
+      return jsonResult(curation);
+    },
+    memory_get_core_memory: async ({ args, requestManager }) => {
+      const coreMemory = await requestManager.getCoreMemory({
+        tokenBudget: parseOptionalNonNegativeInteger(args.tokenBudget, 'tokenBudget'),
+        includeClasses: Array.isArray(args.includeClasses) ? args.includeClasses as unknown as import('../contracts/types.js').KnowledgeClass[] : undefined,
+      });
+      return jsonResult(coreMemory);
+    },
+    memory_set_aliases: async ({ args, scopeInput }) => {
+      if (!isRecord(args.aliases)) {
+        throw new McpValidationError('Missing or invalid field: aliases');
+      }
+      await saveAliases(scopeInput, args.aliases as Record<string, string[]>);
+      return jsonResult({ success: true });
+    },
+    memory_get_aliases: async ({ scopeInput, requestManager }) => {
+      await refreshScopeConfig(scopeInput);
+      const aliases = requestManager.getAliases();
+      return jsonResult({ aliases: aliases ?? {} });
+    },
+    memory_get_alias_candidates: async ({ args, requestManager }) => {
+      const candidates = await requestManager.getAliasCandidates({
+        threshold: args.threshold != null
+          ? parseOptionalFiniteNumber(args.threshold, { name: 'threshold' }, failMcpValidation) ?? undefined
+          : undefined,
+        maxCandidates: parseOptionalNonNegativeInteger(args.maxCandidates, 'maxCandidates'),
+      });
+      return jsonResult({ candidates });
+    },
+    memory_set_ontology: async ({ args, scopeInput }) => {
+      if (!Array.isArray(args.entityTypes) || !Array.isArray(args.relationshipConstraints) || !Array.isArray(args.validationRules)) {
+        throw new McpValidationError('Missing required fields: entityTypes, relationshipConstraints, validationRules');
+      }
+      await saveOntology(scopeInput, {
+        entityTypes: args.entityTypes,
+        relationshipConstraints: args.relationshipConstraints,
+        validationRules: args.validationRules,
+      });
+      return jsonResult({ success: true });
+    },
+    memory_get_ontology: async ({ scopeInput, requestManager }) => {
+      await refreshScopeConfig(scopeInput);
+      const ontology = requestManager.getOntology();
+      return jsonResult({ ontology: ontology ?? null });
+    },
+    memory_export_bundle: async ({ args, requestManager }) => {
+      const bundleName = requireString(args.name, 'name');
+      const bundle = requestManager.exportBundle(bundleName, {
+        includeTags: Array.isArray(args.includeTags) ? args.includeTags as string[] : undefined,
+        knowledgeClassFilter: Array.isArray(args.knowledgeClassFilter) ? args.knowledgeClassFilter as unknown as import('../contracts/types.js').KnowledgeClass[] : undefined,
+      });
+      return jsonResult(bundle);
+    },
+    memory_import_bundle: async ({ args, scopeInput, requestManager }) => {
+      if (!isRecord(args.bundle)) {
+        throw new McpValidationError('Missing or invalid field: bundle');
+      }
+      const conflictResolution = requireEnum(
+        args.conflictResolution,
+        ['skip', 'overwrite', 'merge', 'trust_higher'] as const,
+        'conflictResolution',
+      );
+      const importResult = requestManager.importBundle(args.bundle as any, {
+        conflictResolution,
+        targetScope: materializeScope(scopeInput),
+        preserveTrust: args.preserveTrust != null ? Boolean(args.preserveTrust) : undefined,
+      });
+      return jsonResult(importResult);
+    },
+    memory_refresh_documents: async ({ args, requestManager }) => {
+      if (!Array.isArray(args.documents)) {
+        throw new McpValidationError('Missing or invalid field: documents');
+      }
+      const refreshResult = requestManager.refreshDocuments(args.documents);
+      return jsonResult(refreshResult);
+    },
+  };
 
   async function callTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
     try {
-      const requestManager = await getManager(resolveScopeInput(config.scope, args));
+      const scopeInput = resolveScopeInput(config.scope, args);
+      const requestManager = await getManager(scopeInput);
+      const registeredHandler = registeredToolHandlers[name];
+      if (registeredHandler) {
+        return await registeredHandler({ args, scopeInput, requestManager });
+      }
       switch (name) {
         case 'memory_store_turn': {
           const turn = await requestManager.processTurn(
@@ -1384,12 +1501,12 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           return jsonResult(serializeContextGovernance(await requestManager.getContextGovernance()));
         }
         case 'memory_set_default_context_contract': {
-          await propagateToManagers(resolveScopeInput(config.scope, args), async (managed) => {
+          await propagateToManagers(scopeInput, async (managed) => {
             await managed.setDefaultContextContract(parseContextContract(args.contract, 'contract') ?? null);
           });
           return jsonResult(
             serializeContextGovernance(
-              await (await getManager(resolveScopeInput(config.scope, args))).getContextGovernance(),
+              await (await getManager(scopeInput)).getContextGovernance(),
             ),
           );
         }
@@ -1398,7 +1515,6 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           if (!contract) {
             throw new McpValidationError('Missing or invalid field: contract');
           }
-          const scopeInput = resolveScopeInput(config.scope, args);
           await propagateToManagers(scopeInput, async (managed) => {
             await managed.putContextContract(requireString(args.name, 'name'), contract);
           });
@@ -1407,7 +1523,6 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           );
         }
         case 'memory_delete_context_contract': {
-          const scopeInput = resolveScopeInput(config.scope, args);
           const contractName = requireString(args.name, 'name');
           let deleted = false;
           await propagateToManagers(scopeInput, async (managed) => {
@@ -1416,7 +1531,6 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           return jsonResult({ deleted, name: contractName });
         }
         case 'memory_put_context_invariant': {
-          const scopeInput = resolveScopeInput(config.scope, args);
           const invariant = parseContextInvariant(args, 'invariant');
           await propagateToManagers(scopeInput, async (managed) => {
             await managed.putContextInvariant(invariant);
@@ -1426,7 +1540,6 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           );
         }
         case 'memory_delete_context_invariant': {
-          const scopeInput = resolveScopeInput(config.scope, args);
           const invariantId = requireString(args.id, 'id');
           let deleted = false;
           await propagateToManagers(scopeInput, async (managed) => {
@@ -1435,7 +1548,6 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           return jsonResult({ deleted, id: invariantId });
         }
         case 'memory_set_context_escalation_policy': {
-          const scopeInput = resolveScopeInput(config.scope, args);
           const policy = parseContextEscalationPolicy(args.policy, 'policy');
           await propagateToManagers(scopeInput, async (managed) => {
             await managed.setContextEscalationPolicy(policy);
@@ -1934,7 +2046,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
         case 'memory_snapshot': {
           const action = requireEnum(args.action, ['capture', 'refresh', 'get'] as const, 'action');
           const sessionId = requireString(args.sessionId, 'sessionId');
-          const runtime = await getSessionRuntime(resolveScopeInput(config.scope, args), sessionId);
+          const runtime = await getSessionRuntime(scopeInput, sessionId);
           const relevanceQuery = optionalString(args.relevanceQuery, 'relevanceQuery');
           if (action === 'capture') {
             await runtime.startSession(relevanceQuery);
@@ -1948,128 +2060,6 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
           // get
           const snapshot = runtime.getSnapshot();
           return jsonResult({ snapshot: snapshot ? { ...snapshot, sessionId } : null });
-        }
-        // --- Phase 5 tool handlers ---
-        case 'memory_discover': {
-          const report = await requestManager.discover({
-            maxResults: parseLimit(args.maxResults) ?? undefined,
-            minSurpriseScore: args.minSurpriseScore != null
-              ? parseOptionalFiniteNumber(args.minSurpriseScore, { name: 'minSurpriseScore' }, failMcpValidation) ?? undefined
-              : undefined,
-            maxDepth: parseOptionalNonNegativeInteger(args.maxDepth, 'maxDepth'),
-          });
-          return jsonResult(report);
-        }
-        case 'memory_get_report': {
-          const report = await requestManager.getGraphReport({
-            tokenBudget: parseOptionalNonNegativeInteger(args.tokenBudget, 'tokenBudget'),
-            includeSections: Array.isArray(args.includeSections) ? args.includeSections as string[] : undefined,
-            filterByTags: Array.isArray(args.filterByTags) ? args.filterByTags as string[] : undefined,
-          });
-          return jsonResult(report);
-        }
-        case 'memory_get_facts_at': {
-          const timestamp = parseRequiredFiniteInteger(args.timestamp, 'timestamp', { min: 0 });
-          const factsResult = await requestManager.getFactsAt(timestamp);
-          return jsonResult(factsResult);
-        }
-        case 'memory_reflect_knowledge': {
-          const reflectionResult = await requestManager.reflectOnKnowledge({
-            maxFacts: parseOptionalNonNegativeInteger(args.maxFacts, 'maxFacts'),
-            includePlaybooks: args.includePlaybooks != null ? Boolean(args.includePlaybooks) : undefined,
-            rateLimitKey: optionalString(args.rateLimitKey, 'rateLimitKey'),
-          });
-          return jsonResult(reflectionResult);
-        }
-        case 'memory_derive': {
-          const derived = await requestManager.derive({
-            outputTypes: Array.isArray(args.outputTypes) ? args.outputTypes as string[] : undefined,
-            maxOutputs: parseOptionalNonNegativeInteger(args.maxOutputs, 'maxOutputs'),
-          });
-          return jsonResult(derived);
-        }
-        case 'memory_get_curation': {
-          const curation = await requestManager.getCurationSummary(undefined, {
-            since: args.since != null
-              ? parseOptionalFiniteNumber(args.since, { name: 'since' }, failMcpValidation) ?? undefined
-              : undefined,
-            actionTypes: Array.isArray(args.actionTypes) ? args.actionTypes as unknown as import('../contracts/curation.js').CurationActionType[] : undefined,
-            limit: parseLimit(args.limit),
-          });
-          return jsonResult(curation);
-        }
-        case 'memory_get_core_memory': {
-          const coreMemory = await requestManager.getCoreMemory({
-            tokenBudget: parseOptionalNonNegativeInteger(args.tokenBudget, 'tokenBudget'),
-            includeClasses: Array.isArray(args.includeClasses) ? args.includeClasses as unknown as import('../contracts/types.js').KnowledgeClass[] : undefined,
-          });
-          return jsonResult(coreMemory);
-        }
-        case 'memory_set_aliases': {
-          if (!isRecord(args.aliases)) {
-            throw new McpValidationError('Missing or invalid field: aliases');
-          }
-          requestManager.setAliases(args.aliases as Record<string, string[]>);
-          return jsonResult({ success: true });
-        }
-        case 'memory_get_aliases': {
-          const aliases = requestManager.getAliases();
-          return jsonResult({ aliases: aliases ?? {} });
-        }
-        case 'memory_get_alias_candidates': {
-          const candidates = await requestManager.getAliasCandidates({
-            threshold: args.threshold != null
-              ? parseOptionalFiniteNumber(args.threshold, { name: 'threshold' }, failMcpValidation) ?? undefined
-              : undefined,
-            maxCandidates: parseOptionalNonNegativeInteger(args.maxCandidates, 'maxCandidates'),
-          });
-          return jsonResult({ candidates });
-        }
-        case 'memory_set_ontology': {
-          if (!Array.isArray(args.entityTypes) || !Array.isArray(args.relationshipConstraints) || !Array.isArray(args.validationRules)) {
-            throw new McpValidationError('Missing required fields: entityTypes, relationshipConstraints, validationRules');
-          }
-          requestManager.setOntology({
-            entityTypes: args.entityTypes,
-            relationshipConstraints: args.relationshipConstraints,
-            validationRules: args.validationRules,
-          });
-          return jsonResult({ success: true });
-        }
-        case 'memory_get_ontology': {
-          const ontology = requestManager.getOntology();
-          return jsonResult({ ontology: ontology ?? null });
-        }
-        case 'memory_export_bundle': {
-          const bundleName = requireString(args.name, 'name');
-          const bundle = requestManager.exportBundle(bundleName, {
-            includeTags: Array.isArray(args.includeTags) ? args.includeTags as string[] : undefined,
-            knowledgeClassFilter: Array.isArray(args.knowledgeClassFilter) ? args.knowledgeClassFilter as unknown as import('../contracts/types.js').KnowledgeClass[] : undefined,
-          });
-          return jsonResult(bundle);
-        }
-        case 'memory_import_bundle': {
-          if (!isRecord(args.bundle)) {
-            throw new McpValidationError('Missing or invalid field: bundle');
-          }
-          const conflictResolution = requireEnum(
-            args.conflictResolution,
-            ['skip', 'overwrite', 'merge', 'trust_higher'] as const,
-            'conflictResolution',
-          );
-          const importResult = requestManager.importBundle(args.bundle as any, {
-            conflictResolution,
-            targetScope: resolveScopeInput(config.scope, args) as MemoryScope,
-            preserveTrust: args.preserveTrust != null ? Boolean(args.preserveTrust) : undefined,
-          });
-          return jsonResult(importResult);
-        }
-        case 'memory_refresh_documents': {
-          if (!Array.isArray(args.documents)) {
-            throw new McpValidationError('Missing or invalid field: documents');
-          }
-          const refreshResult = requestManager.refreshDocuments(args.documents);
-          return jsonResult(refreshResult);
         }
         default:
           return errorResult(`Unknown tool: ${name}`);
@@ -2087,14 +2077,9 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
     callTool,
     manager: undefined,
     async close() {
-      managers.clear();
-      sessionManagers.clear();
       sessionRuntimes.clear();
       runtimes.clear();
-      if (adapterPromise) {
-        const adapterContext = await adapterPromise;
-        await adapterContext.close();
-      }
+      await serverContext.close();
     },
   };
 }

@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-export const CURRENT_SCHEMA_VERSION = 18;
+export const CURRENT_SCHEMA_VERSION = 19;
 
 export function createSQLiteSchema(database: Database.Database): void {
   database.pragma('journal_mode = WAL');
@@ -705,6 +705,21 @@ export function createSQLiteSchema(database: Database.Database): void {
       ON source_documents(tenant_id, system_id, scope_id);
     CREATE INDEX IF NOT EXISTS idx_source_documents_hash
       ON source_documents(content_hash, tenant_id, system_id, scope_id);
+
+    CREATE TABLE IF NOT EXISTS scope_config (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id         TEXT    NOT NULL,
+      system_id         TEXT    NOT NULL,
+      workspace_id      TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id  TEXT    NOT NULL DEFAULT '',
+      scope_id          TEXT    NOT NULL,
+      config_key        TEXT    NOT NULL,
+      config_value      TEXT    NOT NULL,
+      created_at        INTEGER NOT NULL,
+      updated_at        INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_scope_config_key
+      ON scope_config(tenant_id, system_id, workspace_id, collaboration_id, scope_id, config_key);
   `);
 
   database

@@ -4,9 +4,10 @@ import { createInMemoryAdapter } from '../adapters/memory/index.js';
 import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 import { createMemoryManager } from '../core/manager.js';
 import type { MemoryManager } from '../core/manager.js';
+import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type { StorageAdapter } from '../contracts/storage.js';
 import { makeScope } from './test-helpers.js';
-import { ValidationError } from '../contracts/errors.js';
+import { NotImplementedError } from '../contracts/errors.js';
 
 describe('MemoryManager Phase 5 delegation', () => {
   let adapter: StorageAdapter;
@@ -209,37 +210,69 @@ describe('MemoryManager Phase 5 delegation', () => {
   });
 
   describe('sync-adapter guards', () => {
-    it('throws ValidationError for discover() without sync adapter', async () => {
-      const asyncOnly = createMemoryManager({
+    it('supports discover/export/refresh through wrapped sync adapters', async () => {
+      const wrappedSync = createMemoryManager({
         asyncAdapter: wrapSyncAdapter(createInMemoryAdapter()),
         scope: makeScope(),
         sessionId: 's1',
         summarizer: async () => ({ summary: '', key_entities: [], topic_tags: [] }),
       });
-      await expect(asyncOnly.discover()).rejects.toThrow(ValidationError);
-      await asyncOnly.close();
+      await expect(wrappedSync.discover()).resolves.toHaveProperty('surprises');
+      expect(wrappedSync.exportBundle('test')).toHaveProperty('bundle.name', 'test');
+      expect(wrappedSync.refreshDocuments([])).toHaveProperty('unchanged');
+      await wrappedSync.close();
     });
 
-    it('throws ValidationError for exportBundle() without sync adapter', async () => {
+    it('throws NotImplementedError for truly async-only deployments', async () => {
+      const baseAsync = wrapSyncAdapter(createInMemoryAdapter());
+      const asyncOnlyAdapter: AsyncStorageAdapter = {
+        ...baseAsync,
+        close: baseAsync.close,
+      };
       const asyncOnly = createMemoryManager({
-        asyncAdapter: wrapSyncAdapter(createInMemoryAdapter()),
+        asyncAdapter: asyncOnlyAdapter,
         scope: makeScope(),
         sessionId: 's1',
         summarizer: async () => ({ summary: '', key_entities: [], topic_tags: [] }),
       });
-      expect(() => asyncOnly.exportBundle('test')).toThrow(ValidationError);
+      await expect(asyncOnly.discover()).rejects.toThrow(NotImplementedError);
+      expect(() => asyncOnly.exportBundle('test')).toThrow(NotImplementedError);
+      expect(() => asyncOnly.refreshDocuments([])).toThrow(NotImplementedError);
       await asyncOnly.close();
     });
+  });
 
-    it('throws ValidationError for refreshDocuments() without sync adapter', async () => {
-      const asyncOnly = createMemoryManager({
-        asyncAdapter: wrapSyncAdapter(createInMemoryAdapter()),
+  describe('durable scoped config', () => {
+    it('saveAliases persists config for later load', async () => {
+      const aliases = { TypeScript: ['ts', 'TS'] };
+      await manager.saveAliases(aliases);
+
+      const reloaded = createMemoryManager({
+        adapter,
         scope: makeScope(),
-        sessionId: 's1',
+        sessionId: 'session-1',
         summarizer: async () => ({ summary: '', key_entities: [], topic_tags: [] }),
       });
-      expect(() => asyncOnly.refreshDocuments([])).toThrow(ValidationError);
-      await asyncOnly.close();
+      await expect(reloaded.loadAliases()).resolves.toEqual(aliases);
+      await reloaded.close();
+    });
+
+    it('saveOntology persists config for later load', async () => {
+      const ontology = {
+        entityTypes: [{ name: 'tool', description: 'A dev tool', allowedRelationships: [] as never[] }],
+        relationshipConstraints: [],
+        validationRules: [],
+      };
+      await manager.saveOntology(ontology);
+
+      const reloaded = createMemoryManager({
+        adapter,
+        scope: makeScope(),
+        sessionId: 'session-1',
+        summarizer: async () => ({ summary: '', key_entities: [], topic_tags: [] }),
+      });
+      await expect(reloaded.loadOntology()).resolves.toEqual(ontology);
+      await reloaded.close();
     });
   });
 

@@ -285,6 +285,8 @@ export interface StorageAdapter {
   getSourceDocumentByHash(contentHash: string, scope: MemoryScope): SourceDocument | null;
   listSourceDocuments(scope: MemoryScope, options?: PaginationOptions): PaginatedResult<SourceDocument>;
   updateSourceDocument(id: number, patch: { status?: SourceDocumentStatus; fact_count?: number; processed_at?: number | null }): SourceDocument | null;
+  getScopeConfig(scope: MemoryScope, key: string): string | null;
+  setScopeConfig(scope: MemoryScope, key: string, value: string): void;
 
   // Context governance persistence (optional)
   getGovernanceState?(scope: MemoryScope): PersistedGovernanceState | null;

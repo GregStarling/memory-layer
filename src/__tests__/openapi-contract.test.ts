@@ -10,6 +10,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { startHttpServer } from '../server/http-server.js';
+import { createInMemoryAdapter } from '../adapters/memory/index.js';
+import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 import {
   assertMatchesOpenApi,
   loadOpenApi,
@@ -64,6 +66,14 @@ describe('OpenAPI contract validation — Phase 1-3 endpoints', () => {
     const instance = await startHttpServer({ port, dbPath: ':memory:', ...overrides });
     cleanup = instance.close;
     return `http://localhost:${port}`;
+  }
+
+  function createAsyncOnlyAdapter() {
+    const base = wrapSyncAdapter(createInMemoryAdapter());
+    return {
+      ...base,
+      close: base.close,
+    };
   }
 
   it('GET /v1/profile response matches the documented schema', async () => {
@@ -216,5 +226,87 @@ describe('OpenAPI contract validation — Phase 1-3 endpoints', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     assertMatchesOpenApi('/v1/changes', 'get', '200', body);
+  });
+
+  it('GET /v1/discover 200 response matches the documented schema', async () => {
+    const base = await setup(13811);
+    const res = await fetch(`${base}/v1/discover`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    assertMatchesOpenApi('/v1/discover', 'get', '200', body);
+  });
+
+  it('GET /v1/report 200 response matches the documented schema', async () => {
+    const base = await setup(13812);
+    const res = await fetch(`${base}/v1/report`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    assertMatchesOpenApi('/v1/report', 'get', '200', body);
+  });
+
+  it('GET /v1/discover 501 response matches the documented schema', async () => {
+    const base = await setup(13813, {
+      asyncAdapter: createAsyncOnlyAdapter(),
+    });
+    const res = await fetch(`${base}/v1/discover`);
+    expect(res.status).toBe(501);
+    const body = await res.json();
+    assertMatchesOpenApi('/v1/discover', 'get', '501', body);
+  });
+
+  it('GET /v1/aliases 200 response matches the documented schema', async () => {
+    const base = await setup(13814);
+    await fetch(`${base}/v1/aliases`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ aliasMap: { TypeScript: ['ts'] } }),
+    });
+    const res = await fetch(`${base}/v1/aliases`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    assertMatchesOpenApi('/v1/aliases', 'get', '200', body);
+  });
+
+  it('GET /v1/ontology 200 response matches the documented schema', async () => {
+    const base = await setup(13815);
+    await fetch(`${base}/v1/ontology`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ontology: {
+          entityTypes: [{ name: 'tool', description: 'A dev tool', allowedRelationships: [] }],
+          relationshipConstraints: [],
+          validationRules: [],
+        },
+      }),
+    });
+    const res = await fetch(`${base}/v1/ontology`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    assertMatchesOpenApi('/v1/ontology', 'get', '200', body);
+  });
+
+  it('POST /v1/bundles/export 200 response matches the documented schema', async () => {
+    const base = await setup(13816);
+    const res = await fetch(`${base}/v1/bundles/export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'contract-export' }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    assertMatchesOpenApi('/v1/bundles/export', 'post', '200', body);
+  });
+
+  it('POST /v1/refresh-documents 200 response matches the documented schema', async () => {
+    const base = await setup(13817);
+    const res = await fetch(`${base}/v1/refresh-documents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ documents: [] }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    assertMatchesOpenApi('/v1/refresh-documents', 'post', '200', body);
   });
 });

@@ -227,7 +227,7 @@ Full REST API documented in [`openapi.yaml`](openapi.yaml), with multi-tenant ro
 | **HTTP API** | Polyglot services, hosted deployments | `npx memory-layer serve --transport http` |
 | **MCP server** | Tool ecosystems, Claude Desktop, agent frameworks | `npx memory-layer serve --transport mcp` |
 | **CLI** | Inspection, debugging, admin | `npx memory-layer inspect` |
-| **Python client** | Python agents consuming the HTTP API | `pip install memory-layer-client` |
+| **Python client** | Python agents consuming the HTTP API | `pip install ai-memory-layer-client` |
 
 ---
 
@@ -694,7 +694,7 @@ interface MemoryRuntime {
 ## Python Client
 
 ```bash
-pip install memory-layer-client
+pip install ai-memory-layer-client
 ```
 
 ```python

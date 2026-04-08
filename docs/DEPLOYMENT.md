@@ -30,6 +30,7 @@ npx memory-layer serve \
   --transport http \
   --db ./data/memory.db \
   --preset autonomous_agent \
+  --host 0.0.0.0 \
   --port 3100
 ```
 
@@ -38,6 +39,7 @@ Recommended environment variables:
 ```bash
 MEMORY_DB_PATH=./data/memory.db
 MEMORY_TRANSPORT=http
+MEMORY_HOST=0.0.0.0
 MEMORY_PORT=3100
 MEMORY_API_KEY=replace-me
 MEMORY_ADMIN_API_KEY=replace-me-admin
@@ -52,6 +54,7 @@ docker build -t memory-layer .
 docker run --rm \
   -p 3100:3100 \
   -v "$(pwd)/data:/data" \
+  -e MEMORY_HOST=0.0.0.0 \
   -e MEMORY_API_KEY=local-dev-key \
   -e MEMORY_ADMIN_API_KEY=local-dev-admin \
   memory-layer

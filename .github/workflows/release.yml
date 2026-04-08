@@ -22,7 +22,7 @@ jobs:
       POSTGRES_TEST_URL: postgres://postgres:postgres@localhost:5432/memory_layer_test
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_DB: memory_layer_test
           POSTGRES_USER: postgres

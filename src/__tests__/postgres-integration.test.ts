@@ -57,19 +57,6 @@ function loadSchemaSql(): string {
   return readFileSync(path.join(root, 'src/adapters/postgres/schema.sql'), 'utf8');
 }
 
-/**
- * Remove pgvector-dependent DDL from the schema SQL so the integration
- * tests can run against a Postgres without the `vector` extension. The
- * `knowledge_embeddings` table and its HNSW index are the only pieces that
- * require pgvector; everything else in schema.sql is plain Postgres.
- */
-function stripPgVectorDdl(sql: string): string {
-  return sql
-    .replace(/CREATE TABLE IF NOT EXISTS knowledge_embeddings[\s\S]*?\);\n/, '')
-    .replace(/CREATE INDEX IF NOT EXISTS idx_ke_scope[^;]*;/, '')
-    .replace(/CREATE INDEX IF NOT EXISTS idx_ke_embedding_hnsw[\s\S]*?;/, '');
-}
-
 function scope(schemaName: string): MemoryScope {
   return {
     tenant_id: 'itest',
@@ -108,7 +95,6 @@ describeIntegration('Postgres integration — schema + adapter parity', () => {
     pool: InstanceType<typeof import('pg').Pool>;
     schemaName: string;
     schemaSql: string;
-    hasVector: boolean;
   }> {
     const schemaName = `memory_layer_itest_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
 
@@ -131,23 +117,12 @@ describeIntegration('Postgres integration — schema + adapter parity', () => {
     poolRef = pool;
     currentSchema = schemaName;
 
-    // pgvector is optional: the knowledge_embeddings table needs it, but
-    // the rest of the schema is plain Postgres. If the extension isn't
-    // available we strip the vector-dependent DDL before applying so the
-    // integration suite still validates the Phase 1-3 surface.
-    let hasVector = true;
-    try {
-      await pool.query('CREATE EXTENSION IF NOT EXISTS vector');
-    } catch {
-      hasVector = false;
-    }
-
-    const rawSql = loadSchemaSql();
-    const schemaSql = hasVector ? rawSql : stripPgVectorDdl(rawSql);
+    await pool.query('CREATE EXTENSION IF NOT EXISTS vector');
+    const schemaSql = loadSchemaSql();
     if (options.applySchema ?? true) {
       await pool.query(schemaSql);
     }
-    return { pool, schemaName, schemaSql, hasVector };
+    return { pool, schemaName, schemaSql };
   }
 
   it('applies schema.sql to a fresh schema and records version history', async () => {

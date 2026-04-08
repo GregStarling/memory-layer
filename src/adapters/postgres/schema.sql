@@ -691,11 +691,28 @@ CREATE INDEX IF NOT EXISTS idx_source_documents_scope
 CREATE INDEX IF NOT EXISTS idx_source_documents_hash
   ON source_documents (content_hash, tenant_id, system_id, scope_id);
 
+-- v16: durable scope-scoped config for aliases and ontology
+CREATE TABLE IF NOT EXISTS scope_config (
+  id BIGSERIAL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  system_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL DEFAULT 'default',
+  collaboration_id TEXT NOT NULL DEFAULT '',
+  scope_id TEXT NOT NULL,
+  config_key TEXT NOT NULL,
+  config_value TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_scope_config_key
+  ON scope_config (tenant_id, system_id, workspace_id, collaboration_id, scope_id, config_key);
+
 ALTER TABLE knowledge_evidence ADD COLUMN IF NOT EXISTS source_document_id INTEGER REFERENCES source_documents(id) ON DELETE SET NULL;
 ALTER TABLE associations ADD COLUMN IF NOT EXISTS visibility_class TEXT NOT NULL DEFAULT 'private';
 
 -- Record all applied schema versions so upgrades are visible and auditable.
 -- ON CONFLICT DO NOTHING keeps this idempotent across repeated applies.
 INSERT INTO schema_version (version) VALUES
-  (1), (9), (10), (11), (12), (13), (14), (15)
+  (1), (9), (10), (11), (12), (13), (14), (15), (16)
 ON CONFLICT DO NOTHING;

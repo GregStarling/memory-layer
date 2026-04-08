@@ -683,6 +683,8 @@ export function createTemporalReplayAdapter(
     getSourceDocumentByHash: async () => null,
     listSourceDocuments: async () => ({ items: [], hasMore: false, nextCursor: null }),
     updateSourceDocument: () => unsupported('updateSourceDocument'),
+    getScopeConfig: async () => null,
+    setScopeConfig: () => unsupported('setScopeConfig'),
     transaction: async <T>(fn: () => Promise<T>) => fn(),
     close: async () => undefined,
   };

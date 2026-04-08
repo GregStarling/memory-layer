@@ -2,6 +2,8 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { rmSync } from 'node:fs';
 import { startHttpServer } from '../server/http-server.js';
 import { createSQLiteAdapter } from '../adapters/sqlite/index.js';
+import { createInMemoryAdapter } from '../adapters/memory/index.js';
+import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 
 describe('HTTP server', () => {
   let cleanup: (() => Promise<void>) | null = null;
@@ -20,6 +22,14 @@ describe('HTTP server', () => {
     const instance = await startHttpServer({ port, dbPath: ':memory:', ...overrides });
     cleanup = instance.close;
     return `http://localhost:${port}`;
+  }
+
+  function createAsyncOnlyAdapter() {
+    const base = wrapSyncAdapter(createInMemoryAdapter());
+    return {
+      ...base,
+      close: base.close,
+    };
   }
 
   async function waitFor(predicate: () => boolean, timeoutMs = 500): Promise<void> {
@@ -1169,6 +1179,136 @@ describe('HTTP server', () => {
     // Should be 503 (structuredClient unavailable) not 400 (bad params)
     expect(res.status).toBe(503);
   });
+
+  it('supports hosted phase-5 HTTP routes on wrapped-sync SQLite deployments', async () => {
+    const base = await setup(13128);
+
+    expect((await fetch(`${base}/v1/discover`)).status).toBe(200);
+    expect((await fetch(`${base}/v1/report`)).status).toBe(200);
+
+    const exported = await fetch(`${base}/v1/bundles/export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'backup-http' }),
+    });
+    expect(exported.status).toBe(200);
+    const exportedBody = await exported.json();
+
+    const imported = await fetch(`${base}/v1/bundles/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bundle: exportedBody.bundle,
+        conflictResolution: 'skip',
+      }),
+    });
+    expect(imported.status).toBe(200);
+
+    const refreshed = await fetch(`${base}/v1/refresh-documents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ documents: [] }),
+    });
+    expect(refreshed.status).toBe(200);
+  });
+
+  it('returns 501 not_implemented for phase-5 HTTP routes on async-only deployments', async () => {
+    const base = await setup(13129, {
+      asyncAdapter: createAsyncOnlyAdapter(),
+    });
+
+    const discover = await fetch(`${base}/v1/discover`);
+    expect(discover.status).toBe(501);
+    await expect(discover.json()).resolves.toMatchObject({ code: 'not_implemented' });
+
+    const report = await fetch(`${base}/v1/report`);
+    expect(report.status).toBe(501);
+    await expect(report.json()).resolves.toMatchObject({ code: 'not_implemented' });
+
+    const exported = await fetch(`${base}/v1/bundles/export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'backup-http' }),
+    });
+    expect(exported.status).toBe(501);
+    await expect(exported.json()).resolves.toMatchObject({ code: 'not_implemented' });
+
+    const imported = await fetch(`${base}/v1/bundles/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bundle: { name: 'bundle' },
+        conflictResolution: 'skip',
+      }),
+    });
+    expect(imported.status).toBe(501);
+    await expect(imported.json()).resolves.toMatchObject({ code: 'not_implemented' });
+
+    const refreshed = await fetch(`${base}/v1/refresh-documents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ documents: [] }),
+    });
+    expect(refreshed.status).toBe(501);
+    await expect(refreshed.json()).resolves.toMatchObject({ code: 'not_implemented' });
+  });
+
+  it('persists aliases and ontology across cache churn and restart', async () => {
+    const dbPath = `/tmp/memory-layer-phase5-${Date.now()}-${Math.random()}.sqlite`;
+    const first = await startHttpServer({ port: 13130, dbPath, adminApiKey: 'secret-admin' });
+    cleanup = async () => {
+      await first.close();
+      rmSync(dbPath, { force: true });
+    };
+    const base = 'http://localhost:13130';
+    const aliasMap = { TypeScript: ['ts', 'TS'] };
+    const ontology = {
+      entityTypes: [{ name: 'tool', description: 'A dev tool', allowedRelationships: [] }],
+      relationshipConstraints: [],
+      validationRules: [],
+    };
+
+    expect(
+      (
+        await fetch(`${base}/v1/aliases`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ aliasMap }),
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await fetch(`${base}/v1/ontology`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ontology }),
+        })
+      ).status,
+    ).toBe(200);
+
+    for (let index = 0; index < 257; index += 1) {
+      const res = await fetch(
+        `${base}/v1/context/config?tenant_id=default&system_id=default&scope_id=scope-${index}`,
+        { headers: { 'x-admin-key': 'secret-admin' } },
+      );
+      expect(res.status).toBe(200);
+    }
+
+    await expect(fetch(`${base}/v1/aliases`).then((res) => res.json())).resolves.toEqual({ aliasMap });
+    await expect(fetch(`${base}/v1/ontology`).then((res) => res.json())).resolves.toEqual({ ontology });
+
+    await first.close();
+    const second = await startHttpServer({ port: 13131, dbPath, adminApiKey: 'secret-admin' });
+    cleanup = async () => {
+      await second.close();
+      rmSync(dbPath, { force: true });
+    };
+    const restartedBase = 'http://localhost:13131';
+
+    await expect(fetch(`${restartedBase}/v1/aliases`).then((res) => res.json())).resolves.toEqual({ aliasMap });
+    await expect(fetch(`${restartedBase}/v1/ontology`).then((res) => res.json())).resolves.toEqual({ ontology });
+  }, 15000);
 
   it('rejects malformed request validation inputs with 400s', async () => {
     const base = await setup(13113);

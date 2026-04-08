@@ -192,6 +192,18 @@ function cloneValue<T>(value: T): T {
   return structuredClone(value);
 }
 
+function scopeConfigKey(scope: MemoryScope, key: string): string {
+  const normalized = normalizeScope(scope);
+  return [
+    normalized.tenant_id,
+    normalized.system_id,
+    normalized.workspace_id,
+    normalized.collaboration_id,
+    normalized.scope_id,
+    key,
+  ].join('::');
+}
+
 function filterExistingIds<T extends { id: number }>(items: T[], ids: number[]): number[] {
   const existing = new Set(items.map((item) => item.id));
   const uniqueIds = [...new Set(ids)];
@@ -271,6 +283,7 @@ function paginateEvents(
 }
 
 export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdapter {
+  const scopedConfig = new Map<string, { value: string; createdAt: number; updatedAt: number }>();
   const state: MemoryState = {
     turns: [],
     workingMemory: [],
@@ -2240,6 +2253,21 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       if (patch.fact_count !== undefined) doc.fact_count = patch.fact_count;
       if (patch.processed_at !== undefined) doc.processed_at = patch.processed_at;
       return cloneValue(doc);
+    },
+
+    getScopeConfig(scope, key): string | null {
+      return scopedConfig.get(scopeConfigKey(scope, key))?.value ?? null;
+    },
+
+    setScopeConfig(scope, key, value): void {
+      const compositeKey = scopeConfigKey(scope, key);
+      const now = nowSeconds();
+      const existing = scopedConfig.get(compositeKey);
+      scopedConfig.set(compositeKey, {
+        value,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      });
     },
 
     transaction(fn) {
