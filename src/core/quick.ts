@@ -7,7 +7,11 @@ import type {
   MaintenancePolicy,
   MonitorPolicy,
 } from '../contracts/policy.js';
-import type { ContextContract, ContextInvariant } from '../contracts/context-contract.js';
+import type {
+  ContextContract,
+  ContextInvariant,
+  ContextEscalationPolicy,
+} from '../contracts/context-contract.js';
 import type { StorageAdapter } from '../contracts/storage.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import { createInMemoryAdapter, createInMemoryAdapterWithEmbeddings } from '../adapters/memory/index.js';
@@ -85,6 +89,7 @@ export interface CreateMemoryOptions {
   contextContract?: ContextContract;
   contextContracts?: Record<string, ContextContract>;
   invariants?: ContextInvariant[];
+  escalationPolicy?: ContextEscalationPolicy;
   failurePolicy?: MemoryManagerConfig['failurePolicy'];
   tokenEstimator?: TokenEstimator;
   autoDetectWorkspace?: boolean;
@@ -410,6 +415,7 @@ function createMemoryInternal(
     contextContract: options.contextContract,
     contextContracts: options.contextContracts,
     invariants: options.invariants,
+    escalationPolicy: options.escalationPolicy,
     monitorPolicy: {
       ...preset.monitorPolicy,
       ...qualityConfig.monitorPolicy,

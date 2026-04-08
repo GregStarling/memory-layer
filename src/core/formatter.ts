@@ -13,6 +13,8 @@ export interface SessionBootstrap {
   unresolvedWork: string[];
   coordinationState?: MemoryContext['coordinationState'] | null;
   invariants?: ContextInvariant[];
+  warnings?: MemoryContext['warnings'];
+  degradedContext?: MemoryContext['degradedContext'];
   profile?: Profile | null;
 }
 
@@ -74,6 +76,10 @@ function formatInvariantLine(invariant: ContextInvariant): string {
   return `- ${invariant.title}: ${invariant.instruction} [${meta}]`;
 }
 
+function formatWarningLine(warning: NonNullable<MemoryContext['warnings']>[number]): string {
+  return `- (${warning.severity}) ${warning.message}`;
+}
+
 export function formatContextForPrompt(
   context: MemoryContext,
   options?: FormatOptions,
@@ -117,6 +123,13 @@ export function formatContextForPrompt(
           '',
           formatHeading('Safety Invariants', options),
           ...context.invariants.map((invariant) => formatInvariantLine(invariant)),
+        ]
+      : []),
+    ...(context.warnings?.length
+      ? [
+          '',
+          formatHeading('Context Warnings', options),
+          ...context.warnings.map((warning) => formatWarningLine(warning)),
         ]
       : []),
     '',
@@ -259,6 +272,13 @@ export function formatBootstrapForPrompt(
           '',
           formatHeading('Bootstrap Invariants', options),
           ...bootstrap.invariants.map((invariant) => formatInvariantLine(invariant)),
+        ]
+      : []),
+    ...(bootstrap.warnings?.length
+      ? [
+          '',
+          formatHeading('Bootstrap Warnings', options),
+          ...bootstrap.warnings.map((warning) => formatWarningLine(warning)),
         ]
       : []),
     '',

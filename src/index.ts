@@ -84,12 +84,32 @@ export { widenScope } from './contracts/identity.js';
 export type { MemoryScope, NormalizedMemoryScope, ScopeLevel, ScopeQuery } from './contracts/identity.js';
 export type {
   ContextInvariantSeverity,
+  ContextWarningSeverity,
+  ContextWarningCode,
+  ContextEscalationChange,
+  ContextEscalationRuleDecision,
+  ContextEscalationDecision,
+  ContextRequestReason,
   ContextInvariant,
   ContextContract,
   ContextContractReference,
+  ContextEscalationPolicy,
   AppliedContextContract,
+  ContextWarning,
+  DegradedContext,
+  ContextRequest,
+  ContextRequestResolution,
+  ContextGovernanceSnapshot,
 } from './contracts/context-contract.js';
-export { CONTEXT_INVARIANT_SEVERITIES } from './contracts/context-contract.js';
+export {
+  CONTEXT_INVARIANT_SEVERITIES,
+  CONTEXT_WARNING_SEVERITIES,
+  CONTEXT_WARNING_CODES,
+  CONTEXT_ESCALATION_CHANGE_KINDS,
+  CONTEXT_ESCALATION_RULE_DECISIONS,
+  CONTEXT_ESCALATION_DECISIONS,
+  CONTEXT_REQUEST_REASONS,
+} from './contracts/context-contract.js';
 export type { StorageAdapter } from './contracts/storage.js';
 export type { AsyncStorageAdapter } from './contracts/async-storage.js';
 export type { SessionState } from './contracts/session-state.js';
@@ -337,6 +357,7 @@ export type {
   MemoryManager,
   MemoryManagerConfig,
   ContextQueryOptions,
+  ContextExpansionOptions,
 } from './core/manager.js';
 export type { CreateMemoryOptions, CreateMemoryAsyncOptions } from './core/quick.js';
 export type { MemoryQualityMode, MemoryQualityTier } from './core/quick.js';

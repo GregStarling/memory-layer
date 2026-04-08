@@ -7,6 +7,12 @@ import {
 import type { MemoryManager } from '../core/manager.js';
 import type { MemoryContext } from '../core/context.js';
 import type {
+  ContextContract,
+  ContextInvariant,
+  ContextEscalationPolicy,
+  ContextGovernanceSnapshot,
+} from '../contracts/context-contract.js';
+import type {
   TemporalIdInput,
   TemporalStateSnapshot,
   TimelineResult,
@@ -35,6 +41,10 @@ import type {
 } from '../contracts/types.js';
 import { EPISODE_DETAIL_LEVELS, PLAYBOOK_STATUSES, ASSOCIATION_TYPES, ASSOCIATION_TARGET_KINDS } from '../contracts/types.js';
 import { ACTOR_KINDS, CONTEXT_VIEW_POLICIES, MEMORY_VISIBILITY_CLASSES } from '../contracts/coordination.js';
+import {
+  CONTEXT_ESCALATION_RULE_DECISIONS,
+  CONTEXT_REQUEST_REASONS,
+} from '../contracts/context-contract.js';
 import type { CognitiveMemoryType } from '../contracts/cognitive.js';
 import type { ProfileSection, ProfileView } from '../contracts/profile.js';
 import { createSQLiteAdapterWithEmbeddings } from '../adapters/sqlite/index.js';
@@ -77,6 +87,14 @@ export interface HttpServerConfig {
   qualityTier?: CreateMemoryOptions['qualityTier'];
   /** Cross-scope retrieval level for hosted managers. */
   crossScopeLevel?: ScopeLevel;
+  /** Default context contract applied to server-backed managers. */
+  contextContract?: CreateMemoryOptions['contextContract'];
+  /** Named context contracts available to server-backed managers. */
+  contextContracts?: CreateMemoryOptions['contextContracts'];
+  /** Invariants injected into assembled contexts. */
+  invariants?: CreateMemoryOptions['invariants'];
+  /** Policy used to approve, review, or deny context expansion requests. */
+  escalationPolicy?: CreateMemoryOptions['escalationPolicy'];
   /** Auto-detect workspace from git remote or cwd when no scope provided. */
   autoDetectWorkspace?: boolean;
   /** Structured generation client for episodic recall, playbooks, and reflect. */
@@ -197,6 +215,15 @@ function serializeContextResponse(
       scope_level: invariant.scopeLevel,
     })),
     appliedContract: context.appliedContract ?? null,
+    warnings: context.warnings ?? [],
+    degradedContext: context.degradedContext ?? {
+      isDegraded: false,
+      droppedInvariantIds: [],
+      droppedKnowledgeIds: [],
+      droppedSummaryIds: [],
+      droppedPlaybookIds: [],
+      droppedAssociatedKnowledgeIds: [],
+    },
     coordinationState: context.coordinationState
       ? {
           ownedClaims: context.coordinationState.ownedClaims.map(serializeWorkClaim),
@@ -407,6 +434,13 @@ function optionalString(value: unknown, name: string): string | undefined {
   return value;
 }
 
+function requireStringArray(value: unknown, name: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || item.trim().length === 0)) {
+    throw new HttpRequestError(400, `Invalid field: ${name}`);
+  }
+  return value.map((item) => item.trim());
+}
+
 function requireEnum<T extends string>(value: unknown, allowed: readonly T[], name: string): T {
   if (typeof value !== 'string' || !allowed.includes(value as T)) {
     throw new HttpRequestError(400, `Invalid field: ${name}`);
@@ -419,6 +453,140 @@ function parseContextViewPolicy(
   name = 'view',
 ): ContextViewPolicy | undefined {
   return value ? requireEnum(value, CONTEXT_VIEW_POLICIES, name) : undefined;
+}
+
+function parseContextContract(value: unknown, name = 'contract'): ContextContract | undefined {
+  if (value == null) return undefined;
+  if (!isRecord(value)) {
+    throw new HttpRequestError(400, `Invalid field: ${name}`);
+  }
+  const scopeLevels = ['scope', 'workspace', 'system', 'tenant'] as const;
+  return {
+    name: optionalString(value.name, `${name}.name`),
+    view:
+      typeof value.view === 'string'
+        ? requireEnum(value.view, CONTEXT_VIEW_POLICIES, `${name}.view`)
+        : undefined,
+    crossScopeLevel:
+      typeof value.crossScopeLevel === 'string'
+        ? requireEnum(value.crossScopeLevel, scopeLevels, `${name}.crossScopeLevel`)
+        : undefined,
+    tokenBudget:
+      value.tokenBudget == null
+        ? undefined
+        : parseOptionalFiniteInteger(value.tokenBudget, { name: `${name}.tokenBudget`, min: 0 }, failHttpValidation) ?? undefined,
+    maxKnowledgeItems:
+      value.maxKnowledgeItems == null
+        ? undefined
+        : parseOptionalFiniteInteger(value.maxKnowledgeItems, { name: `${name}.maxKnowledgeItems`, min: 0 }, failHttpValidation) ?? undefined,
+    maxRecentSummaries:
+      value.maxRecentSummaries == null
+        ? undefined
+        : parseOptionalFiniteInteger(value.maxRecentSummaries, { name: `${name}.maxRecentSummaries`, min: 0 }, failHttpValidation) ?? undefined,
+    knowledgeClasses:
+      value.knowledgeClasses == null
+        ? undefined
+        : requireStringArray(value.knowledgeClasses, `${name}.knowledgeClasses`) as ContextContract['knowledgeClasses'],
+    minimumTrustScore:
+      value.minimumTrustScore == null
+        ? undefined
+        : parseOptionalFiniteNumber(value.minimumTrustScore, { name: `${name}.minimumTrustScore` }, failHttpValidation) ?? undefined,
+    includeCoordinationState:
+      value.includeCoordinationState == null
+        ? undefined
+        : Boolean(value.includeCoordinationState),
+  };
+}
+
+function parseContextInvariant(value: unknown, name = 'invariant'): ContextInvariant {
+  if (!isRecord(value)) {
+    throw new HttpRequestError(400, `Invalid field: ${name}`);
+  }
+  const scopeLevels = ['scope', 'workspace', 'system', 'tenant'] as const;
+  const severities = ['critical', 'important', 'advisory'] as const;
+  return {
+    id: requireString(value.id, `${name}.id`),
+    title: requireString(value.title, `${name}.title`),
+    instruction: requireString(value.instruction, `${name}.instruction`),
+    severity:
+      value.severity == null
+        ? undefined
+        : requireEnum(value.severity, severities, `${name}.severity`),
+    scopeLevel:
+      value.scopeLevel == null
+        ? undefined
+        : requireEnum(value.scopeLevel, scopeLevels, `${name}.scopeLevel`),
+  };
+}
+
+function parseContextEscalationPolicy(
+  value: unknown,
+  name = 'policy',
+): ContextEscalationPolicy {
+  if (!isRecord(value)) {
+    throw new HttpRequestError(400, `Invalid field: ${name}`);
+  }
+  const scopeLevels = ['scope', 'workspace', 'system', 'tenant'] as const;
+  return {
+    defaultDecision:
+      value.defaultDecision == null
+        ? undefined
+        : requireEnum(value.defaultDecision, CONTEXT_ESCALATION_RULE_DECISIONS, `${name}.defaultDecision`),
+    byChange:
+      value.byChange == null
+        ? undefined
+        : (() => {
+            if (!isRecord(value.byChange)) {
+              throw new HttpRequestError(400, `Invalid field: ${name}.byChange`);
+            }
+            const parsed: NonNullable<ContextEscalationPolicy['byChange']> = {};
+            for (const [key, decision] of Object.entries(value.byChange)) {
+              parsed[key as keyof typeof parsed] = requireEnum(
+                decision,
+                CONTEXT_ESCALATION_RULE_DECISIONS,
+                `${name}.byChange.${key}`,
+              );
+            }
+            return parsed;
+          })(),
+    maxView:
+      value.maxView == null
+        ? undefined
+        : requireEnum(value.maxView, CONTEXT_VIEW_POLICIES, `${name}.maxView`),
+    maxScopeLevel:
+      value.maxScopeLevel == null
+        ? undefined
+        : requireEnum(value.maxScopeLevel, scopeLevels, `${name}.maxScopeLevel`),
+    maxTokenBudget:
+      value.maxTokenBudget == null
+        ? undefined
+        : parseOptionalFiniteInteger(value.maxTokenBudget, { name: `${name}.maxTokenBudget`, min: 0 }, failHttpValidation) ?? undefined,
+    minimumAllowedTrustScore:
+      value.minimumAllowedTrustScore == null
+        ? undefined
+        : parseOptionalFiniteNumber(
+            value.minimumAllowedTrustScore,
+            { name: `${name}.minimumAllowedTrustScore` },
+            failHttpValidation,
+          ) ?? undefined,
+  };
+}
+
+function serializeContextGovernance(
+  snapshot: ContextGovernanceSnapshot,
+): Record<string, unknown> {
+  return {
+    defaultContract: snapshot.defaultContract,
+    contracts: snapshot.contracts,
+    invariants: snapshot.invariants.map((invariant) => ({
+      id: invariant.id,
+      title: invariant.title,
+      instruction: invariant.instruction,
+      severity: invariant.severity,
+      scopeLevel: invariant.scopeLevel,
+    })),
+    escalationPolicy: snapshot.escalationPolicy,
+  };
 }
 
 function parseViewerFromQuery(query: Record<string, string | undefined>): ActorRef | undefined {
@@ -744,6 +912,10 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       qualityMode: config.qualityMode,
       qualityTier: config.qualityTier,
       crossScopeLevel: config.crossScopeLevel,
+      contextContract: config.contextContract,
+      contextContracts: config.contextContracts,
+      invariants: config.invariants,
+      escalationPolicy: config.escalationPolicy,
       autoDetectWorkspace: config.autoDetectWorkspace,
       structuredClient: config.structuredClient,
     };
@@ -819,6 +991,31 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
     return manager;
   }
 
+  function requireAdmin(req: IncomingMessage): void {
+    if (adminApiKey && !safeSecretEquals(req.headers['x-admin-key'], adminApiKey)) {
+      throw new HttpRequestError(403, 'Admin key required');
+    }
+  }
+
+  async function withScopeManagers(
+    scopeInput: string | MemoryScope,
+    callback: (manager: MemoryManager) => Promise<void>,
+  ): Promise<void> {
+    const baseKey = scopeKeyFor(scopeInput);
+    const seen = new Set<MemoryManager>();
+    const scopedManagers: MemoryManager[] = [getManager(scopeInput)];
+    for (const [key, manager] of sessionManagers.entries()) {
+      if (key.startsWith(`${baseKey}|session:`)) {
+        scopedManagers.push(manager);
+      }
+    }
+    for (const manager of scopedManagers) {
+      if (seen.has(manager)) continue;
+      seen.add(manager);
+      await callback(manager);
+    }
+  }
+
   const manager = getManager(config.scope ?? 'default');
 
   const server = createServer(async (req, res) => {
@@ -888,10 +1085,139 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           view: parseContextViewPolicy(query.view),
           viewer: parseViewerFromQuery(query),
           includeCoordinationState: query.include_coordination === 'true',
+          contract: query.contract || undefined,
         });
         writeJson(res, 200, serializeContextResponse(context, {
           includeDebug: query.debug === 'true',
         }));
+        return;
+      }
+
+      // POST /v1/context/request
+      if (path === '/v1/context/request' && req.method === 'POST') {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = getManager(resolveRequestScope(config.scope, req, query, body));
+        const resolution = await requestManager.requestContextExpansion(
+          {
+            reason: requireEnum(body.reason, CONTEXT_REQUEST_REASONS, 'reason'),
+            note: optionalString(body.note, 'note'),
+            contract: parseContextContract(body.contract, 'contract'),
+          },
+          {
+            currentContract: optionalString(body.currentContract, 'currentContract'),
+          },
+        );
+        writeJson(res, 200, resolution);
+        return;
+      }
+
+      if (path === '/v1/context/config' && req.method === 'GET') {
+        requireAdmin(req);
+        const scopeInput = resolveRequestScope(config.scope, req, query);
+        const requestManager = getManager(scopeInput);
+        const snapshot = await requestManager.getContextGovernance();
+        writeJson(res, 200, serializeContextGovernance(snapshot));
+        return;
+      }
+
+      if (path === '/v1/context/config/default-contract' && req.method === 'PUT') {
+        requireAdmin(req);
+        const body = await readBody(req, bodyLimitBytes);
+        const scopeInput = resolveRequestScope(config.scope, req, query, body);
+        const contract = parseContextContract(body.contract, 'contract');
+        await withScopeManagers(scopeInput, async (managed) => {
+          await managed.setDefaultContextContract(contract ?? null);
+        });
+        const snapshot = await getManager(scopeInput).getContextGovernance();
+        writeJson(res, 200, serializeContextGovernance(snapshot));
+        return;
+      }
+
+      if (path === '/v1/context/config/default-contract' && req.method === 'DELETE') {
+        requireAdmin(req);
+        const scopeInput = resolveRequestScope(config.scope, req, query);
+        await withScopeManagers(scopeInput, async (managed) => {
+          await managed.setDefaultContextContract(null);
+        });
+        const snapshot = await getManager(scopeInput).getContextGovernance();
+        writeJson(res, 200, serializeContextGovernance(snapshot));
+        return;
+      }
+
+      const contextContractMatch = path.match(/^\/v1\/context\/config\/contracts\/([^/]+)$/);
+      if (contextContractMatch && req.method === 'PUT') {
+        requireAdmin(req);
+        const body = await readBody(req, bodyLimitBytes);
+        const scopeInput = resolveRequestScope(config.scope, req, query, body);
+        const name = decodeURIComponent(contextContractMatch[1]);
+        const contract = parseContextContract(body.contract, 'contract');
+        if (!contract) {
+          writeError(res, 400, 'Missing contract');
+          return;
+        }
+        await withScopeManagers(scopeInput, async (managed) => {
+          await managed.putContextContract(name, contract);
+        });
+        const snapshot = await getManager(scopeInput).getContextGovernance();
+        writeJson(res, 200, serializeContextGovernance(snapshot));
+        return;
+      }
+
+      if (contextContractMatch && req.method === 'DELETE') {
+        requireAdmin(req);
+        const scopeInput = resolveRequestScope(config.scope, req, query);
+        const name = decodeURIComponent(contextContractMatch[1]);
+        let deleted = false;
+        await withScopeManagers(scopeInput, async (managed) => {
+          deleted = (await managed.deleteContextContract(name)) || deleted;
+        });
+        writeJson(res, 200, { deleted, name });
+        return;
+      }
+
+      const contextInvariantMatch = path.match(/^\/v1\/context\/config\/invariants\/([^/]+)$/);
+      if (contextInvariantMatch && req.method === 'PUT') {
+        requireAdmin(req);
+        const body = await readBody(req, bodyLimitBytes);
+        const scopeInput = resolveRequestScope(config.scope, req, query, body);
+        const invariantId = decodeURIComponent(contextInvariantMatch[1]);
+        const invariant = parseContextInvariant(
+          {
+            ...(isRecord(body.invariant) ? body.invariant : {}),
+            id: invariantId,
+          },
+          'invariant',
+        );
+        await withScopeManagers(scopeInput, async (managed) => {
+          await managed.putContextInvariant(invariant);
+        });
+        const snapshot = await getManager(scopeInput).getContextGovernance();
+        writeJson(res, 200, serializeContextGovernance(snapshot));
+        return;
+      }
+
+      if (contextInvariantMatch && req.method === 'DELETE') {
+        requireAdmin(req);
+        const scopeInput = resolveRequestScope(config.scope, req, query);
+        const invariantId = decodeURIComponent(contextInvariantMatch[1]);
+        let deleted = false;
+        await withScopeManagers(scopeInput, async (managed) => {
+          deleted = (await managed.deleteContextInvariant(invariantId)) || deleted;
+        });
+        writeJson(res, 200, { deleted, id: invariantId });
+        return;
+      }
+
+      if (path === '/v1/context/config/escalation-policy' && req.method === 'PUT') {
+        requireAdmin(req);
+        const body = await readBody(req, bodyLimitBytes);
+        const scopeInput = resolveRequestScope(config.scope, req, query, body);
+        const policy = parseContextEscalationPolicy(body.policy, 'policy');
+        await withScopeManagers(scopeInput, async (managed) => {
+          await managed.setContextEscalationPolicy(policy);
+        });
+        const snapshot = await getManager(scopeInput).getContextGovernance();
+        writeJson(res, 200, serializeContextGovernance(snapshot));
         return;
       }
 
@@ -908,6 +1234,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           view: parseContextViewPolicy(query.view),
           viewer: parseViewerFromQuery(query),
           includeCoordinationState: query.include_coordination === 'true',
+          contract: query.contract || undefined,
         });
         writeJson(res, 200, serializeTemporalState(state, {
           includeDebug: query.include_debug === 'true',
@@ -1900,7 +2227,14 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const requestManager = getSessionManager(scopeInput, sessionId);
         const scopeKey = scopeKeyFor(scopeInput);
         const relevanceQuery = typeof body.relevanceQuery === 'string' ? body.relevanceQuery : undefined;
-        const snapshotData = await requestManager.captureSnapshot(relevanceQuery);
+        const snapshotData = await requestManager.captureSnapshot(relevanceQuery, {
+          contract:
+            typeof body.contract === 'string'
+              ? body.contract
+              : typeof query.contract === 'string'
+                ? query.contract
+                : undefined,
+        });
         const snapshot = {
           scopeKey,
           snapshotId: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
@@ -1939,7 +2273,14 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         const requestManager = getSessionManager(scopeInput, sessionId);
         const scopeKey = scopeKeyFor(scopeInput);
         const relevanceQuery = typeof body.relevanceQuery === 'string' ? body.relevanceQuery : undefined;
-        const snapshotData = await requestManager.captureSnapshot(relevanceQuery);
+        const snapshotData = await requestManager.captureSnapshot(relevanceQuery, {
+          contract:
+            typeof body.contract === 'string'
+              ? body.contract
+              : typeof query.contract === 'string'
+                ? query.contract
+                : undefined,
+        });
         const snapshot = {
           scopeKey,
           snapshotId: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,

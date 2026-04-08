@@ -15,7 +15,9 @@ import type { SessionState } from '../contracts/session-state.js';
 import type {
   AppliedContextContract,
   ContextContract,
+  ContextWarning,
   ContextInvariant,
+  DegradedContext,
 } from '../contracts/context-contract.js';
 import type {
   Association,
@@ -136,6 +138,8 @@ export interface MemoryContext {
   associatedKnowledge: KnowledgeMemory[];
   invariants?: ContextInvariant[];
   appliedContract?: AppliedContextContract | null;
+  warnings?: ContextWarning[];
+  degradedContext?: DegradedContext;
   knowledgeSelectionReasons: KnowledgeSelectionReason[];
   debugTrace: ContextDebugTrace;
   tokenEstimate: number;
@@ -422,6 +426,72 @@ function sortContextInvariants(invariants: ContextInvariant[]): ContextInvariant
     if (scopeDelta !== 0) return scopeDelta;
     return left.id.localeCompare(right.id);
   });
+}
+
+function buildContextWarnings(input: {
+  appliedContract: AppliedContextContract | null;
+  tokenTrimming: TokenTrimTrace;
+  originalInvariants: ContextInvariant[];
+  retainedInvariants: ContextInvariant[];
+}): ContextWarning[] {
+  const warnings: ContextWarning[] = [];
+  if (input.appliedContract) {
+    const contractDetails: string[] = [];
+    if (input.appliedContract.knowledgeClasses?.length) {
+      contractDetails.push(`classes=${input.appliedContract.knowledgeClasses.join(',')}`);
+    }
+    if (input.appliedContract.minimumTrustScore != null) {
+      contractDetails.push(`minTrust=${input.appliedContract.minimumTrustScore.toFixed(2)}`);
+    }
+    if (input.appliedContract.view) {
+      contractDetails.push(`view=${input.appliedContract.view}`);
+    }
+    if (input.appliedContract.crossScopeLevel) {
+      contractDetails.push(`scope=${input.appliedContract.crossScopeLevel}`);
+    }
+    if (contractDetails.length > 0) {
+      warnings.push({
+        code: 'contract_filtered',
+        severity: 'info',
+        message: `Context is filtered by contract${input.appliedContract.name ? ` ${input.appliedContract.name}` : ''}.`,
+        metadata: { details: contractDetails },
+      });
+    }
+  }
+  const tokenBudgetApplied =
+    input.tokenTrimming.droppedKnowledgeIds.length > 0 ||
+    input.tokenTrimming.droppedSummaryIds.length > 0 ||
+    input.tokenTrimming.droppedPlaybookIds.length > 0 ||
+    input.tokenTrimming.droppedAssociatedKnowledgeIds.length > 0;
+  if (tokenBudgetApplied) {
+    warnings.push({
+      code: 'token_budget_trimmed',
+      severity: 'warning',
+      message: 'Context was trimmed to fit the token budget. Some knowledge or summaries were omitted.',
+      metadata: {
+        droppedKnowledgeIds: input.tokenTrimming.droppedKnowledgeIds,
+        droppedSummaryIds: input.tokenTrimming.droppedSummaryIds,
+        droppedPlaybookIds: input.tokenTrimming.droppedPlaybookIds,
+        droppedAssociatedKnowledgeIds: input.tokenTrimming.droppedAssociatedKnowledgeIds,
+      },
+    });
+  }
+  if (input.tokenTrimming.droppedInvariantIds.length > 0) {
+    const dropped = input.originalInvariants
+      .filter((invariant) => input.tokenTrimming.droppedInvariantIds.includes(invariant.id))
+      .map((invariant) => invariant.title);
+    warnings.push({
+      code: 'invariants_trimmed',
+      severity: 'warning',
+      message: 'Some lower-priority invariants were omitted to fit the token budget. Ask for broader context if they matter.',
+      metadata: {
+        droppedInvariantIds: input.tokenTrimming.droppedInvariantIds,
+        droppedInvariantTitles: dropped,
+        retainedInvariantIds: input.retainedInvariants.map((invariant) => invariant.id),
+      },
+    });
+  }
+  return warnings;
 }
 
 function deriveCurrentObjective(
@@ -841,6 +911,7 @@ export async function buildMemoryContext(
     includeCoordinationState,
   );
   const invariants = sortContextInvariants(normalizeContextInvariants(options?.invariants));
+  const originalInvariants = [...invariants];
 
   let activeTurns = await adapter.getActiveTurns(normalizedScope, options?.sessionId);
   if (asOf != null) {
@@ -1339,6 +1410,25 @@ export async function buildMemoryContext(
     associationExpansion: associationTrace,
     tokenTrimming: tokenTrimTrace,
   };
+  const warnings = buildContextWarnings({
+    appliedContract,
+    tokenTrimming: tokenTrimTrace,
+    originalInvariants,
+    retainedInvariants: trimmedInvariants,
+  });
+  const degradedContext: DegradedContext = {
+    isDegraded:
+      tokenTrimTrace.droppedInvariantIds.length > 0 ||
+      tokenTrimTrace.droppedKnowledgeIds.length > 0 ||
+      tokenTrimTrace.droppedSummaryIds.length > 0 ||
+      tokenTrimTrace.droppedPlaybookIds.length > 0 ||
+      tokenTrimTrace.droppedAssociatedKnowledgeIds.length > 0,
+    droppedInvariantIds: tokenTrimTrace.droppedInvariantIds,
+    droppedKnowledgeIds: tokenTrimTrace.droppedKnowledgeIds,
+    droppedSummaryIds: tokenTrimTrace.droppedSummaryIds,
+    droppedPlaybookIds: tokenTrimTrace.droppedPlaybookIds,
+    droppedAssociatedKnowledgeIds: tokenTrimTrace.droppedAssociatedKnowledgeIds,
+  };
 
   emitMemoryEvent('context_assembly', normalizedScope, options, Date.now() - startedAt, {
     mode: policy.mode,
@@ -1378,6 +1468,8 @@ export async function buildMemoryContext(
     associatedKnowledge: trimmedAssociated,
     invariants: trimmedInvariants,
     appliedContract,
+    warnings,
+    degradedContext,
     unresolvedWork,
     knowledgeSelectionReasons,
     debugTrace,

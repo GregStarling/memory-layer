@@ -454,6 +454,177 @@ components:
           nullable: true
         tokenEstimate:
           type: integer
+        invariants:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContextInvariant'
+        appliedContract:
+          allOf:
+            - $ref: '#/components/schemas/ContextContract'
+          nullable: true
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContextWarning'
+        degradedContext:
+          $ref: '#/components/schemas/DegradedContext'
+    ContextContract:
+      type: object
+      properties:
+        name:
+          type: string
+        view:
+          type: string
+          enum: [local_only, local_plus_shared_collaboration, operator_supervisor, workspace_shared]
+        crossScopeLevel:
+          type: string
+          enum: [scope, workspace, system, tenant]
+        tokenBudget:
+          type: integer
+        maxKnowledgeItems:
+          type: integer
+        maxRecentSummaries:
+          type: integer
+        knowledgeClasses:
+          type: array
+          nullable: true
+          items:
+            type: string
+        minimumTrustScore:
+          type: number
+          nullable: true
+        includeCoordinationState:
+          type: boolean
+    ContextInvariant:
+      type: object
+      required: [id, title, instruction]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        instruction:
+          type: string
+        severity:
+          type: string
+          enum: [critical, important, advisory]
+        scopeLevel:
+          type: string
+          enum: [scope, workspace, system, tenant]
+    ContextWarning:
+      type: object
+      required: [code, severity, message]
+      properties:
+        code:
+          type: string
+          enum: [contract_filtered, token_budget_trimmed, invariants_trimmed]
+        severity:
+          type: string
+          enum: [info, warning]
+        message:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+    DegradedContext:
+      type: object
+      required: [isDegraded, droppedInvariantIds, droppedKnowledgeIds, droppedSummaryIds, droppedPlaybookIds, droppedAssociatedKnowledgeIds]
+      properties:
+        isDegraded:
+          type: boolean
+        droppedInvariantIds:
+          type: array
+          items:
+            type: string
+        droppedKnowledgeIds:
+          type: array
+          items:
+            type: integer
+        droppedSummaryIds:
+          type: array
+          items:
+            type: integer
+        droppedPlaybookIds:
+          type: array
+          items:
+            type: integer
+        droppedAssociatedKnowledgeIds:
+          type: array
+          items:
+            type: integer
+    ContextEscalationPolicy:
+      type: object
+      properties:
+        defaultDecision:
+          type: string
+          enum: [allow, review, deny]
+        byChange:
+          type: object
+          additionalProperties: true
+        maxView:
+          type: string
+          enum: [local_only, local_plus_shared_collaboration, operator_supervisor, workspace_shared]
+        maxScopeLevel:
+          type: string
+          enum: [scope, workspace, system, tenant]
+        maxTokenBudget:
+          type: integer
+        minimumAllowedTrustScore:
+          type: number
+    ContextGovernanceResponse:
+      type: object
+      properties:
+        defaultContract:
+          allOf:
+            - $ref: '#/components/schemas/ContextContract'
+          nullable: true
+        contracts:
+          type: object
+          additionalProperties: true
+        invariants:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContextInvariant'
+        escalationPolicy:
+          $ref: '#/components/schemas/ContextEscalationPolicy'
+    ContextRequestResponse:
+      type: object
+      properties:
+        requestId:
+          type: string
+        requestedAt:
+          type: integer
+        reason:
+          type: string
+        note:
+          type: string
+          nullable: true
+        currentContract:
+          allOf:
+            - $ref: '#/components/schemas/ContextContract'
+          nullable: true
+        proposedContract:
+          $ref: '#/components/schemas/ContextContract'
+        proposedContractInput:
+          $ref: '#/components/schemas/ContextContract'
+        changeKinds:
+          type: array
+          items:
+            type: string
+            enum: [broaden_view, widen_scope, lower_minimum_trust, broaden_knowledge_classes, include_coordination_state, increase_token_budget]
+        decision:
+          type: string
+          enum: [approved, requires_approval, denied]
+        requiresEscalation:
+          type: boolean
+        rationale:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContextWarning'
     SearchResponse:
       type: object
       properties:
@@ -1102,6 +1273,10 @@ paths:
           in: query
           schema:
             type: boolean
+        - name: contract
+          in: query
+          schema:
+            type: string
         - name: viewer_actor_kind
           in: query
           schema:
@@ -1131,6 +1306,209 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ContextResponse'
+  /v1/context/request:
+    post:
+      tags: [retrieval]
+      summary: Resolve a context expansion request against the configured escalation policy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  enum: [blocked, missing_constraint, missing_procedure, missing_workspace_context, need_coordination_state, need_higher_budget, other]
+                note:
+                  type: string
+                currentContract:
+                  type: string
+                contract:
+                  $ref: '#/components/schemas/ContextContract'
+      responses:
+        '200':
+          description: Context expansion decision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContextRequestResponse'
+  /v1/context/config:
+    get:
+      tags: [retrieval]
+      summary: Inspect the managed default contract, named contracts, invariants, and escalation policy
+      parameters:
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Context governance snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContextGovernanceResponse'
+  /v1/context/config/default-contract:
+    put:
+      tags: [retrieval]
+      summary: Set the default context contract
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                contract:
+                  $ref: '#/components/schemas/ContextContract'
+      responses:
+        '200':
+          description: Updated context governance snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContextGovernanceResponse'
+    delete:
+      tags: [retrieval]
+      summary: Clear the default context contract
+      responses:
+        '200':
+          description: Updated context governance snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContextGovernanceResponse'
+  /v1/context/config/contracts/{name}:
+    put:
+      tags: [retrieval]
+      summary: Create or update a named context contract
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contract]
+              properties:
+                contract:
+                  $ref: '#/components/schemas/ContextContract'
+      responses:
+        '200':
+          description: Updated context governance snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContextGovernanceResponse'
+    delete:
+      tags: [retrieval]
+      summary: Delete a named context contract
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Deletion result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: boolean
+                  name:
+                    type: string
+  /v1/context/config/invariants/{id}:
+    put:
+      tags: [retrieval]
+      summary: Create or update a managed invariant
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [invariant]
+              properties:
+                invariant:
+                  type: object
+                  properties:
+                    title:
+                      type: string
+                    instruction:
+                      type: string
+                    severity:
+                      type: string
+                      enum: [critical, important, advisory]
+                    scopeLevel:
+                      type: string
+                      enum: [scope, workspace, system, tenant]
+      responses:
+        '200':
+          description: Updated context governance snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContextGovernanceResponse'
+    delete:
+      tags: [retrieval]
+      summary: Delete a managed invariant
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Deletion result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: boolean
+                  id:
+                    type: string
+  /v1/context/config/escalation-policy:
+    put:
+      tags: [retrieval]
+      summary: Replace the context escalation policy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [policy]
+              properties:
+                policy:
+                  $ref: '#/components/schemas/ContextEscalationPolicy'
+      responses:
+        '200':
+          description: Updated context governance snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContextGovernanceResponse'
   /v1/state:
     get:
       tags: [retrieval]
@@ -1151,6 +1529,10 @@ paths:
           in: query
           schema:
             type: boolean
+        - name: contract
+          in: query
+          schema:
+            type: string
         - name: viewer_actor_kind
           in: query
           schema:

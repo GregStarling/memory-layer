@@ -77,6 +77,15 @@ function makeContext(): MemoryContext {
     activeState: ['topic:memory'],
     associatedKnowledge: [],
     invariants: [],
+    warnings: [],
+    degradedContext: {
+      isDegraded: false,
+      droppedInvariantIds: [],
+      droppedKnowledgeIds: [],
+      droppedSummaryIds: [],
+      droppedPlaybookIds: [],
+      droppedAssociatedKnowledgeIds: [],
+    },
     unresolvedWork: ['Need to add prompt formatter'],
     knowledgeSelectionReasons: [],
     debugTrace: {
@@ -167,6 +176,29 @@ describe('formatter helpers', () => {
     expect(text).toContain('Safety Invariants');
     expect(text).toContain('Production data safety');
     expect(text).toContain('Never delete production data without explicit approval.');
+  });
+
+  it('renders context warnings when the context is degraded', () => {
+    const context = makeContext();
+    context.warnings = [
+      {
+        code: 'invariants_trimmed',
+        severity: 'warning',
+        message: 'Some lower-priority invariants were omitted to fit the token budget.',
+      },
+    ];
+    context.degradedContext = {
+      isDegraded: true,
+      droppedInvariantIds: ['style'],
+      droppedKnowledgeIds: [],
+      droppedSummaryIds: [],
+      droppedPlaybookIds: [],
+      droppedAssociatedKnowledgeIds: [],
+    };
+
+    const text = formatContextForPrompt(context);
+    expect(text).toContain('Context Warnings');
+    expect(text).toContain('Some lower-priority invariants were omitted');
   });
 
   it('appends temporal qualifier for fact with valid_from', () => {

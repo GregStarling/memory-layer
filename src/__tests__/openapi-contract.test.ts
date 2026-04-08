@@ -57,8 +57,11 @@ describe('OpenAPI contract validation — Phase 1-3 endpoints', () => {
     }
   });
 
-  async function setup(port: number) {
-    const instance = await startHttpServer({ port, dbPath: ':memory:' });
+  async function setup(
+    port: number,
+    overrides: Parameters<typeof startHttpServer>[0] = {},
+  ) {
+    const instance = await startHttpServer({ port, dbPath: ':memory:', ...overrides });
     cleanup = instance.close;
     return `http://localhost:${port}`;
   }
@@ -168,8 +171,36 @@ describe('OpenAPI contract validation — Phase 1-3 endpoints', () => {
     assertMatchesOpenApi('/v1/context', 'get', '200', body);
   });
 
+  it('POST /v1/context/request response matches the documented schema', async () => {
+    const base = await setup(13808);
+    const res = await fetch(`${base}/v1/context/request`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reason: 'missing_workspace_context',
+        contract: {
+          view: 'workspace_shared',
+          crossScopeLevel: 'workspace',
+        },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    assertMatchesOpenApi('/v1/context/request', 'post', '200', body);
+  });
+
+  it('GET /v1/context/config response matches the documented schema', async () => {
+    const base = await setup(13809, { adminApiKey: 'secret-admin' });
+    const res = await fetch(`${base}/v1/context/config`, {
+      headers: { 'x-admin-key': 'secret-admin' },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    assertMatchesOpenApi('/v1/context/config', 'get', '200', body);
+  });
+
   it('GET /v1/changes 200 response matches the documented schema', async () => {
-    const base = await setup(13807);
+    const base = await setup(13810);
     await fetch(`${base}/v1/facts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

@@ -538,6 +538,66 @@ Contracts bundle existing context knobs into a reusable lens:
 Invariants are injected separately from ranked retrieval. They always surface ahead of normal prompt sections, and when the token budget is tight the system drops lower-priority invariants before `critical` ones.
 Within the non-critical set, more local invariants outrank broader ones (`scope` before `system`, `workspace`, then `tenant`).
 
+When an agent is blocked, it can request a broader contract explicitly:
+
+```typescript
+const expansion = await memory.requestContextExpansion(
+  {
+    reason: 'missing_workspace_context',
+    note: 'Need the shared rollback procedure before executing the deploy step.',
+    contract: {
+      view: 'workspace_shared',
+      crossScopeLevel: 'workspace',
+      knowledgeClasses: ['constraint', 'procedure'],
+    },
+  },
+  { currentContract: 'executor' },
+);
+
+if (expansion.requiresEscalation) {
+  // Ask the orchestrator or human operator to approve the broader lens.
+}
+```
+
+Expansion requests now return a real decision surface:
+
+- `decision: 'approved' | 'requires_approval' | 'denied'`
+- `changeKinds` explaining what boundary the agent tried to widen
+- `warnings` and `rationale` that can be shown back to an orchestrator or operator
+
+You can also manage the feature at runtime instead of baking it into constructor config:
+
+```typescript
+await memory.putContextContract('executor', {
+  tokenBudget: 2000,
+  knowledgeClasses: ['constraint'],
+});
+
+await memory.putContextInvariant({
+  id: 'english-only',
+  title: 'Language',
+  instruction: 'All responses must be in English.',
+  severity: 'important',
+});
+
+await memory.setContextEscalationPolicy({
+  defaultDecision: 'allow',
+  byChange: {
+    increase_token_budget: 'deny',
+    broaden_view: 'review',
+  },
+});
+
+const governance = await memory.getContextGovernance();
+```
+
+The HTTP and MCP transports expose the same control plane:
+
+- HTTP: `GET /v1/context/config`, `PUT /v1/context/config/default-contract`, `PUT /v1/context/config/contracts/:name`, `PUT /v1/context/config/invariants/:id`, `PUT /v1/context/config/escalation-policy`
+- MCP: `memory_get_context_config`, `memory_put_context_contract`, `memory_put_context_invariant`, `memory_set_context_escalation_policy`
+
+Assembled contexts expose `appliedContract`, `warnings`, and `degradedContext` so callers can tell when a contract filtered the context or when token pressure forced lower-priority material out.
+
 ### Quality Modes
 
 Orthogonal to presets. Controls how aggressively the system trusts and retains knowledge.
@@ -655,6 +715,15 @@ interface MemoryManager {
   // --- Retrieve ---
   getContext(relevanceQuery?, options?): Promise<MemoryContext>
   getContextAt(asOf, relevanceQuery?, options?): Promise<MemoryContext>
+  requestContextExpansion(request, options?): Promise<ContextRequestResolution>
+  getContextGovernance(): Promise<ContextGovernanceSnapshot>
+  setDefaultContextContract(contract): Promise<ContextContract | null>
+  putContextContract(name, contract): Promise<ContextContract>
+  deleteContextContract(name): Promise<boolean>
+  putContextInvariant(invariant): Promise<ContextInvariant>
+  deleteContextInvariant(id): Promise<boolean>
+  getContextEscalationPolicy(): Promise<ContextEscalationPolicy>
+  setContextEscalationPolicy(policy): Promise<ContextEscalationPolicy>
   getSessionBootstrap(relevanceQuery?, options?): Promise<SessionBootstrap>
   getSessionBootstrapAt(asOf, relevanceQuery?, options?): Promise<SessionBootstrap>
   captureSnapshot(relevanceQuery?, options?): Promise<SnapshotData>

@@ -439,6 +439,12 @@ describe('buildMemoryContext', () => {
     expect(context.relevantKnowledge.map((item) => item.fact)).toEqual([
       'Never skip the deployment checklist',
     ]);
+    expect(context.warnings).toContainEqual(
+      expect.objectContaining({
+        code: 'contract_filtered',
+        severity: 'info',
+      }),
+    );
     expect(context.invariants).toEqual([
       expect.objectContaining({
         id: 'prod-data',
@@ -473,5 +479,12 @@ describe('buildMemoryContext', () => {
 
     expect(context.invariants?.map((item) => item.id)).toEqual(['critical']);
     expect(context.debugTrace.tokenTrimming.droppedInvariantIds).toEqual(['advisory']);
+    expect(context.degradedContext?.isDegraded).toBe(true);
+    expect(context.warnings).toContainEqual(
+      expect.objectContaining({
+        code: 'invariants_trimmed',
+        severity: 'warning',
+      }),
+    );
   });
 });

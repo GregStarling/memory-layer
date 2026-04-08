@@ -4,6 +4,12 @@ import {
 } from '../core/quick.js';
 import type { MemoryManager } from '../core/manager.js';
 import type { MemoryContext } from '../core/context.js';
+import type {
+  ContextContract,
+  ContextInvariant,
+  ContextEscalationPolicy,
+  ContextGovernanceSnapshot,
+} from '../contracts/context-contract.js';
 import { createMemoryRuntime, type MemoryRuntime } from '../core/runtime.js';
 import type {
   ActorRef,
@@ -18,6 +24,10 @@ import type { TemporalStateSnapshot, TimelineResult } from '../contracts/tempora
 import type { FactType, FactConfidence, EpisodeDetailLevel, AssociationTargetKind, AssociationType } from '../contracts/types.js';
 import { ASSOCIATION_TARGET_KINDS, ASSOCIATION_TYPES } from '../contracts/types.js';
 import { ACTOR_KINDS, CONTEXT_VIEW_POLICIES, MEMORY_VISIBILITY_CLASSES } from '../contracts/coordination.js';
+import {
+  CONTEXT_ESCALATION_RULE_DECISIONS,
+  CONTEXT_REQUEST_REASONS,
+} from '../contracts/context-contract.js';
 import type { ProfileView, ProfileSection } from '../contracts/profile.js';
 import type { CognitiveMemoryType } from '../contracts/cognitive.js';
 import { createSQLiteAdapterWithEmbeddings } from '../adapters/sqlite/index.js';
@@ -47,6 +57,14 @@ export interface McpServerConfig {
   qualityTier?: CreateMemoryOptions['qualityTier'];
   /** Cross-scope retrieval level for hosted managers. */
   crossScopeLevel?: ScopeLevel;
+  /** Default context contract applied to MCP-backed managers. */
+  contextContract?: CreateMemoryOptions['contextContract'];
+  /** Named context contracts available to MCP-backed managers. */
+  contextContracts?: CreateMemoryOptions['contextContracts'];
+  /** Invariants injected into contexts assembled by MCP-backed managers. */
+  invariants?: CreateMemoryOptions['invariants'];
+  /** Policy used to approve, review, or deny context expansion requests. */
+  escalationPolicy?: CreateMemoryOptions['escalationPolicy'];
   /** Auto-detect workspace from git remote or cwd when no scope provided. */
   autoDetectWorkspace?: boolean;
   /** Structured generation client for episodic recall, playbooks, and reflect. */
@@ -158,6 +176,7 @@ const TOOLS: McpTool[] = [
         },
         viewer: { type: 'object', description: 'Optional viewer actor for operator/supervisor coordination views' },
         includeCoordinationState: { type: 'boolean', description: 'Include coordination state in the response' },
+        contract: { type: 'string', description: 'Optional named context contract' },
         includeDebug: { type: 'boolean', description: 'Include selection reasons and debug trace' },
       },
     },
@@ -177,9 +196,106 @@ const TOOLS: McpTool[] = [
         },
         viewer: { type: 'object', description: 'Optional viewer actor for operator/supervisor coordination views' },
         includeCoordinationState: { type: 'boolean', description: 'Include coordination state in the response' },
+        contract: { type: 'string', description: 'Optional named context contract' },
         includeDebug: { type: 'boolean', description: 'Include debug traces in the context payload' },
       },
       required: ['asOf'],
+    },
+  },
+  {
+    name: 'memory_request_context',
+    description: 'Request a broader or different context contract when the current one is insufficient.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        reason: {
+          type: 'string',
+          enum: [...CONTEXT_REQUEST_REASONS],
+          description: 'Why the current context is insufficient',
+        },
+        note: { type: 'string', description: 'Optional human-readable explanation of what is missing' },
+        currentContract: { type: 'string', description: 'Optional current named contract' },
+        contract: { type: 'object', description: 'Requested contract delta or inline contract' },
+      },
+      required: ['reason'],
+    },
+  },
+  {
+    name: 'memory_get_context_config',
+    description: 'Return the managed default contract, named contracts, invariants, and escalation policy.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'memory_set_default_context_contract',
+    description: 'Set or clear the default context contract applied before named or inline overrides.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        contract: { type: 'object', description: 'Default contract to store; omit or null to clear it' },
+      },
+    },
+  },
+  {
+    name: 'memory_put_context_contract',
+    description: 'Create or update a named context contract.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Contract name' },
+        contract: { type: 'object', description: 'Contract definition' },
+      },
+      required: ['name', 'contract'],
+    },
+  },
+  {
+    name: 'memory_delete_context_contract',
+    description: 'Delete a named context contract.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Contract name' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'memory_put_context_invariant',
+    description: 'Create or update a managed context invariant.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Invariant id' },
+        title: { type: 'string', description: 'Short invariant title' },
+        instruction: { type: 'string', description: 'Invariant instruction text' },
+        severity: { type: 'string', enum: ['critical', 'important', 'advisory'] },
+        scopeLevel: { type: 'string', enum: ['scope', 'workspace', 'system', 'tenant'] },
+      },
+      required: ['id', 'title', 'instruction'],
+    },
+  },
+  {
+    name: 'memory_delete_context_invariant',
+    description: 'Delete a managed context invariant.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Invariant id' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'memory_set_context_escalation_policy',
+    description: 'Replace the escalation policy used to approve, review, or deny context expansion requests.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        policy: { type: 'object', description: 'Escalation policy definition' },
+      },
+      required: ['policy'],
     },
   },
   {
@@ -993,6 +1109,15 @@ function serializeContextResponse(
       scope_level: invariant.scopeLevel,
     })),
     appliedContract: context.appliedContract ?? null,
+    warnings: context.warnings ?? [],
+    degradedContext: context.degradedContext ?? {
+      isDegraded: false,
+      droppedInvariantIds: [],
+      droppedKnowledgeIds: [],
+      droppedSummaryIds: [],
+      droppedPlaybookIds: [],
+      droppedAssociatedKnowledgeIds: [],
+    },
     coordinationState: context.coordinationState
       ? {
           ownedClaims: context.coordinationState.ownedClaims.map(serializeWorkClaim),
@@ -1139,9 +1264,148 @@ function optionalString(value: unknown, name: string): string | undefined {
   return value;
 }
 
+function requireStringArray(value: unknown, name: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || item.trim().length === 0)) {
+    throw new McpValidationError(`Invalid field: ${name}`);
+  }
+  return value.map((item) => item.trim());
+}
+
 function parseContextViewPolicy(value: unknown, name = 'view') {
   if (value == null) return undefined;
   return requireEnum(value, CONTEXT_VIEW_POLICIES, name);
+}
+
+function parseContextContract(value: unknown, name = 'contract'): ContextContract | undefined {
+  if (value == null) return undefined;
+  if (!isRecord(value)) {
+    throw new McpValidationError(`Invalid field: ${name}`);
+  }
+  const scopeLevels = ['scope', 'workspace', 'system', 'tenant'] as const;
+  return {
+    name: optionalString(value.name, `${name}.name`),
+    view:
+      typeof value.view === 'string'
+        ? requireEnum(value.view, CONTEXT_VIEW_POLICIES, `${name}.view`)
+        : undefined,
+    crossScopeLevel:
+      typeof value.crossScopeLevel === 'string'
+        ? requireEnum(value.crossScopeLevel, scopeLevels, `${name}.crossScopeLevel`)
+        : undefined,
+    tokenBudget:
+      value.tokenBudget == null
+        ? undefined
+        : parseOptionalFiniteInteger(value.tokenBudget, { name: `${name}.tokenBudget`, min: 0 }, failMcpValidation) ?? undefined,
+    maxKnowledgeItems:
+      value.maxKnowledgeItems == null
+        ? undefined
+        : parseOptionalFiniteInteger(value.maxKnowledgeItems, { name: `${name}.maxKnowledgeItems`, min: 0 }, failMcpValidation) ?? undefined,
+    maxRecentSummaries:
+      value.maxRecentSummaries == null
+        ? undefined
+        : parseOptionalFiniteInteger(value.maxRecentSummaries, { name: `${name}.maxRecentSummaries`, min: 0 }, failMcpValidation) ?? undefined,
+    knowledgeClasses:
+      value.knowledgeClasses == null
+        ? undefined
+        : requireStringArray(value.knowledgeClasses, `${name}.knowledgeClasses`) as ContextContract['knowledgeClasses'],
+    minimumTrustScore:
+      value.minimumTrustScore == null
+        ? undefined
+        : parseOptionalFiniteNumber(value.minimumTrustScore, { name: `${name}.minimumTrustScore` }, failMcpValidation) ?? undefined,
+    includeCoordinationState:
+      value.includeCoordinationState == null
+        ? undefined
+        : Boolean(value.includeCoordinationState),
+  };
+}
+
+function parseContextInvariant(value: unknown, name = 'invariant'): ContextInvariant {
+  if (!isRecord(value)) {
+    throw new McpValidationError(`Invalid field: ${name}`);
+  }
+  const scopeLevels = ['scope', 'workspace', 'system', 'tenant'] as const;
+  const severities = ['critical', 'important', 'advisory'] as const;
+  return {
+    id: requireString(value.id, `${name}.id`),
+    title: requireString(value.title, `${name}.title`),
+    instruction: requireString(value.instruction, `${name}.instruction`),
+    severity:
+      value.severity == null
+        ? undefined
+        : requireEnum(value.severity, severities, `${name}.severity`),
+    scopeLevel:
+      value.scopeLevel == null
+        ? undefined
+        : requireEnum(value.scopeLevel, scopeLevels, `${name}.scopeLevel`),
+  };
+}
+
+function parseContextEscalationPolicy(
+  value: unknown,
+  name = 'policy',
+): ContextEscalationPolicy {
+  if (!isRecord(value)) {
+    throw new McpValidationError(`Invalid field: ${name}`);
+  }
+  const scopeLevels = ['scope', 'workspace', 'system', 'tenant'] as const;
+  return {
+    defaultDecision:
+      value.defaultDecision == null
+        ? undefined
+        : requireEnum(value.defaultDecision, CONTEXT_ESCALATION_RULE_DECISIONS, `${name}.defaultDecision`),
+    byChange:
+      value.byChange == null
+        ? undefined
+        : (() => {
+            if (!isRecord(value.byChange)) {
+              throw new McpValidationError(`Invalid field: ${name}.byChange`);
+            }
+            const parsed: NonNullable<ContextEscalationPolicy['byChange']> = {};
+            for (const [key, decision] of Object.entries(value.byChange)) {
+              parsed[key as keyof typeof parsed] = requireEnum(
+                decision,
+                CONTEXT_ESCALATION_RULE_DECISIONS,
+                `${name}.byChange.${key}`,
+              );
+            }
+            return parsed;
+          })(),
+    maxView:
+      value.maxView == null
+        ? undefined
+        : requireEnum(value.maxView, CONTEXT_VIEW_POLICIES, `${name}.maxView`),
+    maxScopeLevel:
+      value.maxScopeLevel == null
+        ? undefined
+        : requireEnum(value.maxScopeLevel, scopeLevels, `${name}.maxScopeLevel`),
+    maxTokenBudget:
+      value.maxTokenBudget == null
+        ? undefined
+        : parseOptionalFiniteInteger(value.maxTokenBudget, { name: `${name}.maxTokenBudget`, min: 0 }, failMcpValidation) ?? undefined,
+    minimumAllowedTrustScore:
+      value.minimumAllowedTrustScore == null
+        ? undefined
+        : parseOptionalFiniteNumber(
+            value.minimumAllowedTrustScore,
+            { name: `${name}.minimumAllowedTrustScore` },
+            failMcpValidation,
+          ) ?? undefined,
+  };
+}
+
+function serializeContextGovernance(snapshot: ContextGovernanceSnapshot): Record<string, unknown> {
+  return {
+    defaultContract: snapshot.defaultContract,
+    contracts: snapshot.contracts,
+    invariants: snapshot.invariants.map((invariant) => ({
+      id: invariant.id,
+      title: invariant.title,
+      instruction: invariant.instruction,
+      severity: invariant.severity,
+      scopeLevel: invariant.scopeLevel,
+    })),
+    escalationPolicy: snapshot.escalationPolicy,
+  };
 }
 
 function parseActorRef(value: unknown, name = 'actor'): ActorRef | undefined {
@@ -1328,6 +1592,10 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
       qualityMode: config.qualityMode,
       qualityTier: config.qualityTier,
       crossScopeLevel: config.crossScopeLevel,
+      contextContract: config.contextContract,
+      contextContracts: config.contextContracts,
+      invariants: config.invariants,
+      escalationPolicy: config.escalationPolicy,
       autoDetectWorkspace: config.autoDetectWorkspace,
       structuredClient: config.structuredClient,
     };
@@ -1391,6 +1659,10 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
       qualityMode: config.qualityMode,
       qualityTier: config.qualityTier,
       crossScopeLevel: config.crossScopeLevel,
+      contextContract: config.contextContract,
+      contextContracts: config.contextContracts,
+      invariants: config.invariants,
+      escalationPolicy: config.escalationPolicy,
       autoDetectWorkspace: config.autoDetectWorkspace,
       structuredClient: config.structuredClient,
     };
@@ -1414,6 +1686,28 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
     const runtime = createMemoryRuntime(manager, { snapshotMode: true });
     touchCache(sessionRuntimes, key, runtime, RUNTIME_CACHE_LIMIT);
     return runtime;
+  }
+
+  async function withScopeManagers(
+    scopeInput: string | MemoryScope,
+    callback: (manager: MemoryManager) => Promise<void>,
+  ): Promise<void> {
+    const baseKey =
+      typeof scopeInput === 'string'
+        ? `scope:${scopeInput}`
+        : JSON.stringify(normalizeScope(scopeInput));
+    const seen = new Set<MemoryManager>();
+    const scopedManagers: MemoryManager[] = [await getManager(scopeInput)];
+    for (const [key, manager] of sessionManagers.entries()) {
+      if (key.startsWith(`${baseKey}|session:`)) {
+        scopedManagers.push(manager);
+      }
+    }
+    for (const manager of scopedManagers) {
+      if (seen.has(manager)) continue;
+      seen.add(manager);
+      await callback(manager);
+    }
   }
 
   async function callTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
@@ -1447,6 +1741,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
               view: parseContextViewPolicy(args.view),
               viewer: parseActorRef(args.viewer, 'viewer'),
               includeCoordinationState: args.includeCoordinationState === true,
+              contract: optionalString(args.contract, 'contract'),
             },
           );
           return jsonResult(
@@ -1465,11 +1760,89 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
             view: parseContextViewPolicy(args.view),
             viewer: parseActorRef(args.viewer, 'viewer'),
             includeCoordinationState: args.includeCoordinationState === true,
+            contract: optionalString(args.contract, 'contract'),
           });
           return jsonResult(
             serializeTemporalState(state, {
               includeDebug: args.includeDebug === true,
             }),
+          );
+        }
+        case 'memory_request_context': {
+          const resolution = await requestManager.requestContextExpansion(
+            {
+              reason: requireEnum(args.reason, CONTEXT_REQUEST_REASONS, 'reason'),
+              note: optionalString(args.note, 'note'),
+              contract: parseContextContract(args.contract, 'contract'),
+            },
+            {
+              currentContract: optionalString(args.currentContract, 'currentContract'),
+            },
+          );
+          return jsonResult(resolution);
+        }
+        case 'memory_get_context_config': {
+          return jsonResult(serializeContextGovernance(await requestManager.getContextGovernance()));
+        }
+        case 'memory_set_default_context_contract': {
+          await withScopeManagers(resolveScopeInput(config.scope, args), async (managed) => {
+            await managed.setDefaultContextContract(parseContextContract(args.contract, 'contract') ?? null);
+          });
+          return jsonResult(
+            serializeContextGovernance(
+              await (await getManager(resolveScopeInput(config.scope, args))).getContextGovernance(),
+            ),
+          );
+        }
+        case 'memory_put_context_contract': {
+          const contract = parseContextContract(args.contract, 'contract');
+          if (!contract) {
+            throw new McpValidationError('Missing or invalid field: contract');
+          }
+          const scopeInput = resolveScopeInput(config.scope, args);
+          await withScopeManagers(scopeInput, async (managed) => {
+            await managed.putContextContract(requireString(args.name, 'name'), contract);
+          });
+          return jsonResult(
+            serializeContextGovernance(await (await getManager(scopeInput)).getContextGovernance()),
+          );
+        }
+        case 'memory_delete_context_contract': {
+          const scopeInput = resolveScopeInput(config.scope, args);
+          const contractName = requireString(args.name, 'name');
+          let deleted = false;
+          await withScopeManagers(scopeInput, async (managed) => {
+            deleted = (await managed.deleteContextContract(contractName)) || deleted;
+          });
+          return jsonResult({ deleted, name: contractName });
+        }
+        case 'memory_put_context_invariant': {
+          const scopeInput = resolveScopeInput(config.scope, args);
+          const invariant = parseContextInvariant(args, 'invariant');
+          await withScopeManagers(scopeInput, async (managed) => {
+            await managed.putContextInvariant(invariant);
+          });
+          return jsonResult(
+            serializeContextGovernance(await (await getManager(scopeInput)).getContextGovernance()),
+          );
+        }
+        case 'memory_delete_context_invariant': {
+          const scopeInput = resolveScopeInput(config.scope, args);
+          const invariantId = requireString(args.id, 'id');
+          let deleted = false;
+          await withScopeManagers(scopeInput, async (managed) => {
+            deleted = (await managed.deleteContextInvariant(invariantId)) || deleted;
+          });
+          return jsonResult({ deleted, id: invariantId });
+        }
+        case 'memory_set_context_escalation_policy': {
+          const scopeInput = resolveScopeInput(config.scope, args);
+          const policy = parseContextEscalationPolicy(args.policy, 'policy');
+          await withScopeManagers(scopeInput, async (managed) => {
+            await managed.setContextEscalationPolicy(policy);
+          });
+          return jsonResult(
+            serializeContextGovernance(await (await getManager(scopeInput)).getContextGovernance()),
           );
         }
         case 'memory_get_timeline': {

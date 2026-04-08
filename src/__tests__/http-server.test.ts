@@ -13,8 +13,11 @@ describe('HTTP server', () => {
     }
   });
 
-  async function setup(port: number) {
-    const instance = await startHttpServer({ port, dbPath: ':memory:' });
+  async function setup(
+    port: number,
+    overrides: Parameters<typeof startHttpServer>[0] = {},
+  ) {
+    const instance = await startHttpServer({ port, dbPath: ':memory:', ...overrides });
     cleanup = instance.close;
     return `http://localhost:${port}`;
   }
@@ -92,6 +95,96 @@ describe('HTTP server', () => {
       },
     };
   }
+
+  it('returns context expansion resolutions over HTTP', async () => {
+    const base = await setup(3217);
+    const response = await fetch(`${base}/v1/context/request`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reason: 'need_higher_budget',
+        note: 'Need more room for deployment invariants.',
+        contract: {
+          tokenBudget: 4000,
+          view: 'workspace_shared',
+          crossScopeLevel: 'workspace',
+        },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload.proposedContract.tokenBudget).toBe(4000);
+    expect(payload.proposedContract.view).toBe('workspace_shared');
+  });
+
+  it('manages context governance over HTTP and applies escalation policy', async () => {
+    const base = await setup(3218, {
+      adminApiKey: 'secret-admin',
+      contextContracts: {
+        executor: {
+          tokenBudget: 2000,
+          knowledgeClasses: ['constraint'],
+        },
+      },
+    });
+    const adminHeaders = {
+      'Content-Type': 'application/json',
+      'x-admin-key': 'secret-admin',
+    };
+
+    const updateConfig = await fetch(`${base}/v1/context/config/escalation-policy`, {
+      method: 'PUT',
+      headers: adminHeaders,
+      body: JSON.stringify({
+        policy: {
+          defaultDecision: 'allow',
+          byChange: {
+            increase_token_budget: 'deny',
+          },
+        },
+      }),
+    });
+    expect(updateConfig.status).toBe(200);
+
+    const addInvariant = await fetch(`${base}/v1/context/config/invariants/english-only`, {
+      method: 'PUT',
+      headers: adminHeaders,
+      body: JSON.stringify({
+        invariant: {
+          title: 'Language',
+          instruction: 'All responses must be in English.',
+          severity: 'important',
+        },
+      }),
+    });
+    expect(addInvariant.status).toBe(200);
+    const governance = await addInvariant.json();
+    expect(governance.invariants[0].id).toBe('english-only');
+
+    const request = await fetch(`${base}/v1/context/request`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reason: 'need_higher_budget',
+        currentContract: 'executor',
+        contract: {
+          tokenBudget: 4000,
+        },
+      }),
+    });
+    expect(request.status).toBe(200);
+    const resolution = await request.json();
+    expect(resolution.decision).toBe('denied');
+
+    const readConfig = await fetch(`${base}/v1/context/config`, {
+      headers: { 'x-admin-key': 'secret-admin' },
+    });
+    expect(readConfig.status).toBe(200);
+    const snapshot = await readConfig.json();
+    expect(snapshot.contracts.executor.tokenBudget).toBe(2000);
+    expect(snapshot.escalationPolicy.byChange.increase_token_budget).toBe('deny');
+  });
 
   it('stores and retrieves turns', async () => {
     const base = await setup(13101);

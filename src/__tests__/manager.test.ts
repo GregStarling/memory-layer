@@ -195,6 +195,110 @@ describe('memory manager', () => {
     await manager.close();
   });
 
+  it('returns a first-class context expansion request resolution for blocked agents', async () => {
+    const manager = createMemoryManager({
+      adapter,
+      scope: makeScope(),
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      autoCompact: false,
+      contextContracts: {
+        executor: {
+          view: 'local_only',
+          crossScopeLevel: 'scope',
+          knowledgeClasses: ['constraint'],
+          minimumTrustScore: 0.8,
+        },
+      },
+    });
+
+    const resolution = await manager.requestContextExpansion(
+      {
+        reason: 'missing_workspace_context',
+        note: 'Need workspace-wide rollback procedure context.',
+        contract: {
+          view: 'workspace_shared',
+          crossScopeLevel: 'workspace',
+          knowledgeClasses: ['constraint', 'procedure'],
+        },
+      },
+      { currentContract: 'executor' },
+    );
+
+    expect(resolution.requiresEscalation).toBe(true);
+    expect(resolution.decision).toBe('requires_approval');
+    expect(resolution.proposedContract.view).toBe('workspace_shared');
+    expect(resolution.proposedContract.crossScopeLevel).toBe('workspace');
+    expect(resolution.rationale.length).toBeGreaterThan(0);
+    await manager.close();
+  });
+
+  it('manages governance state and enforces escalation policy decisions', async () => {
+    const manager = createMemoryManager({
+      adapter,
+      scope: makeScope(),
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      autoCompact: false,
+    });
+
+    await manager.setDefaultContextContract({ maxKnowledgeItems: 5 });
+    await manager.putContextContract('executor', {
+      view: 'local_only',
+      crossScopeLevel: 'scope',
+      tokenBudget: 2000,
+      knowledgeClasses: ['constraint'],
+    });
+    await manager.putContextInvariant({
+      id: 'english-only',
+      title: 'Language',
+      instruction: 'All responses must be in English.',
+      severity: 'important',
+      scopeLevel: 'workspace',
+    });
+    await manager.setContextEscalationPolicy({
+      defaultDecision: 'allow',
+      byChange: {
+        increase_token_budget: 'deny',
+      },
+      maxScopeLevel: 'workspace',
+    });
+
+    const snapshot = await manager.getContextGovernance();
+    expect(snapshot.defaultContract?.maxKnowledgeItems).toBe(5);
+    expect(snapshot.contracts.executor?.knowledgeClasses).toEqual(['constraint']);
+    expect(snapshot.invariants.map((item) => item.id)).toEqual(['english-only']);
+    expect(snapshot.escalationPolicy.defaultDecision).toBe('allow');
+
+    const denied = await manager.requestContextExpansion(
+      {
+        reason: 'need_higher_budget',
+        contract: {
+          tokenBudget: 6000,
+        },
+      },
+      { currentContract: 'executor' },
+    );
+
+    expect(denied.decision).toBe('denied');
+    expect(denied.requiresEscalation).toBe(false);
+
+    expect(await manager.deleteContextInvariant('english-only')).toBe(true);
+    expect(await manager.deleteContextContract('executor')).toBe(true);
+    const afterDelete = await manager.getContextGovernance();
+    expect(afterDelete.contracts.executor).toBeUndefined();
+    expect(afterDelete.invariants).toHaveLength(0);
+    await manager.close();
+  });
+
   it('can build temporal snapshots with getContextAt', async () => {
     const scope = makeScope();
     const manager = createMemoryManager({

@@ -26,6 +26,15 @@ import type {
   ContextContract,
   ContextContractReference,
   ContextInvariant,
+  ContextRequest,
+  ContextRequestResolution,
+  AppliedContextContract,
+  ContextWarning,
+  ContextEscalationPolicy,
+  ContextEscalationChange,
+  ContextEscalationRuleDecision,
+  ContextEscalationDecision,
+  ContextGovernanceSnapshot,
 } from '../contracts/context-contract.js';
 import {
   DEFAULT_CONTEXT_POLICY,
@@ -186,6 +195,7 @@ export interface MemoryManagerConfig {
   contextContract?: ContextContract;
   contextContracts?: Record<string, ContextContract>;
   invariants?: ContextInvariant[];
+  escalationPolicy?: ContextEscalationPolicy;
   tokenEstimator?: TokenEstimator;
   autoCompact?: boolean;
   autoExtract?: boolean;
@@ -211,6 +221,10 @@ export interface ContextQueryOptions {
   includeCoordinationState?: boolean;
   contract?: ContextContractReference;
   invariants?: ContextInvariant[];
+}
+
+export interface ContextExpansionOptions {
+  currentContract?: ContextContractReference;
 }
 
 export interface KnowledgeChangeRecord {
@@ -241,6 +255,20 @@ export interface MemoryManager {
     relevanceQuery?: string,
     options?: ContextQueryOptions,
   ): Promise<MemoryContext>;
+  requestContextExpansion(
+    request: ContextRequest,
+    options?: ContextExpansionOptions,
+  ): Promise<ContextRequestResolution>;
+  getContextGovernance(): Promise<ContextGovernanceSnapshot>;
+  setDefaultContextContract(contract: ContextContract | null): Promise<ContextContract | null>;
+  putContextContract(name: string, contract: ContextContract): Promise<ContextContract>;
+  deleteContextContract(name: string): Promise<boolean>;
+  putContextInvariant(invariant: ContextInvariant): Promise<ContextInvariant>;
+  deleteContextInvariant(id: string): Promise<boolean>;
+  getContextEscalationPolicy(): Promise<ContextGovernanceSnapshot['escalationPolicy']>;
+  setContextEscalationPolicy(
+    policy: ContextEscalationPolicy,
+  ): Promise<ContextGovernanceSnapshot['escalationPolicy']>;
   getStateAt(
     asOf: number,
     options?: {
@@ -515,6 +543,68 @@ function mergeContextInvariants(
   return [...deduped.values()];
 }
 
+function normalizeContextEscalationPolicy(
+  policy: ContextEscalationPolicy | undefined,
+): ContextGovernanceSnapshot['escalationPolicy'] {
+  return {
+    defaultDecision: policy?.defaultDecision ?? 'review',
+    byChange: { ...(policy?.byChange ?? {}) },
+    maxView: policy?.maxView,
+    maxScopeLevel: policy?.maxScopeLevel,
+    maxTokenBudget: policy?.maxTokenBudget,
+    minimumAllowedTrustScore: policy?.minimumAllowedTrustScore,
+  };
+}
+
+function cloneContextContract(contract: ContextContract | null | undefined): ContextContract | null {
+  if (!contract) return null;
+  return {
+    ...contract,
+    knowledgeClasses: contract.knowledgeClasses ? [...contract.knowledgeClasses] : undefined,
+  };
+}
+
+function cloneContextInvariant(invariant: ContextInvariant): ContextInvariant {
+  return { ...invariant };
+}
+
+function cloneContextEscalationPolicy(
+  policy: ContextGovernanceSnapshot['escalationPolicy'],
+): ContextGovernanceSnapshot['escalationPolicy'] {
+  return {
+    ...policy,
+    byChange: { ...(policy.byChange ?? {}) },
+  };
+}
+
+function viewRank(view: ContextViewPolicy | undefined): number {
+  switch (view) {
+    case 'operator_supervisor':
+      return 4;
+    case 'workspace_shared':
+      return 3;
+    case 'local_plus_shared_collaboration':
+      return 2;
+    case 'local_only':
+    default:
+      return 1;
+  }
+}
+
+function scopeLevelRank(level: ScopeLevel | undefined): number {
+  switch (level) {
+    case 'tenant':
+      return 4;
+    case 'system':
+      return 3;
+    case 'workspace':
+      return 2;
+    case 'scope':
+    default:
+      return 1;
+  }
+}
+
 /**
  * Resolve an association endpoint (source or target) and verify it exists
  * and belongs to the caller's normalized scope. Throws a descriptive error
@@ -664,6 +754,18 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
   let lastReflectionTimestamp: number | undefined;
   let lastDerivedOutputs: import('../contracts/derived.js').DerivedOutput[] | undefined;
   let lastDerivedTimestamp: number | undefined;
+  let defaultContextContract = cloneContextContract(config.contextContract);
+  const namedContextContracts = new Map<string, ContextContract>(
+    Object.entries(config.contextContracts ?? {}).map(([name, contract]) => [
+      name,
+      cloneContextContract({ name: contract.name ?? name, ...contract })!,
+    ]),
+  );
+  const configuredInvariants = mergeContextInvariants(config.invariants, undefined);
+  const contextInvariants = new Map<string, ContextInvariant>(
+    configuredInvariants.map((invariant) => [invariant.id, cloneContextInvariant(invariant)]),
+  );
+  let escalationPolicy = normalizeContextEscalationPolicy(config.escalationPolicy);
 
   const onEvent: EventHook = (event) => {
     config.onEvent?.(event);
@@ -680,19 +782,38 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     reference?: ContextContractReference,
   ): ContextContract | undefined {
     if (reference == null) {
-      return config.contextContract;
+      return defaultContextContract ?? undefined;
     }
     if (typeof reference === 'string') {
-      const named = config.contextContracts?.[reference];
+      const named = namedContextContracts.get(reference);
       if (!named) {
         throw new ValidationError(`Unknown context contract: ${reference}`);
       }
-      return mergeContextContract(config.contextContract, {
+      return mergeContextContract(defaultContextContract ?? undefined, {
         name: named.name ?? reference,
         ...named,
       });
     }
-    return mergeContextContract(config.contextContract, reference);
+    return mergeContextContract(defaultContextContract ?? undefined, reference);
+  }
+
+  function getManagedInvariants(): ContextInvariant[] {
+    return [...contextInvariants.values()].map(cloneContextInvariant);
+  }
+
+  function getGovernanceSnapshot(): ContextGovernanceSnapshot {
+    const contracts = Object.fromEntries(
+      [...namedContextContracts.entries()].map(([name, contract]) => [
+        name,
+        cloneContextContract(contract)!,
+      ]),
+    );
+    return {
+      defaultContract: cloneContextContract(defaultContextContract),
+      contracts,
+      invariants: getManagedInvariants(),
+      escalationPolicy: cloneContextEscalationPolicy(escalationPolicy),
+    };
   }
 
   function resolveContextQueryOptions(options?: ContextQueryOptions): {
@@ -704,10 +825,193 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
   } {
     return {
       contract: resolveContextContractReference(options?.contract),
-      invariants: mergeContextInvariants(config.invariants, options?.invariants),
+      invariants: mergeContextInvariants(getManagedInvariants(), options?.invariants),
       view: options?.view,
       viewer: options?.viewer,
       includeCoordinationState: options?.includeCoordinationState,
+    };
+  }
+
+  function materializeAppliedContextContract(contract?: ContextContract): AppliedContextContract {
+    const view = contract?.view;
+    const crossScopeLevel = resolveContextScopeLevel(
+      contract?.crossScopeLevel ?? config.crossScopeLevel,
+      view,
+    );
+    return {
+      name: contract?.name,
+      view,
+      crossScopeLevel,
+      tokenBudget:
+        contract?.tokenBudget ??
+        config.contextPolicy?.tokenBudget ??
+        DEFAULT_CONTEXT_POLICY.tokenBudget,
+      maxKnowledgeItems:
+        contract?.maxKnowledgeItems ??
+        config.contextPolicy?.maxKnowledgeItems ??
+        DEFAULT_CONTEXT_POLICY.maxKnowledgeItems,
+      maxRecentSummaries:
+        contract?.maxRecentSummaries ??
+        config.contextPolicy?.maxRecentSummaries ??
+        DEFAULT_CONTEXT_POLICY.maxRecentSummaries,
+      knowledgeClasses: contract?.knowledgeClasses ? [...contract.knowledgeClasses] : null,
+      minimumTrustScore: contract?.minimumTrustScore ?? null,
+      includeCoordinationState: contract?.includeCoordinationState ?? false,
+    };
+  }
+
+  function knowledgeClassesAreBroader(
+    current: AppliedContextContract['knowledgeClasses'],
+    proposed: AppliedContextContract['knowledgeClasses'],
+  ): boolean {
+    if (current == null) return false;
+    if (proposed == null) return true;
+    const currentSet = new Set(current);
+    return proposed.some((item) => !currentSet.has(item));
+  }
+
+  function buildContextExpansionResolution(
+    request: ContextRequest,
+    currentContract: ContextContract | undefined,
+  ): ContextRequestResolution {
+    const mergedContract = mergeContextContract(currentContract, request.contract);
+    const currentApplied = currentContract ? materializeAppliedContextContract(currentContract) : null;
+    const proposedApplied = materializeAppliedContextContract(mergedContract);
+    const rationale: string[] = [];
+    const changeKinds: ContextEscalationChange[] = [];
+
+    if ((currentApplied?.view ? viewRank(proposedApplied.view) : 0) > viewRank(currentApplied?.view)) {
+      changeKinds.push('broaden_view');
+      rationale.push('Requested a broader visibility view.');
+    }
+    if (
+      (currentApplied?.crossScopeLevel
+        ? scopeLevelRank(proposedApplied.crossScopeLevel)
+        : 0) > scopeLevelRank(currentApplied?.crossScopeLevel)
+    ) {
+      changeKinds.push('widen_scope');
+      rationale.push('Requested a wider cross-scope retrieval level.');
+    }
+    if (
+      currentApplied?.minimumTrustScore != null &&
+      proposedApplied.minimumTrustScore != null &&
+      proposedApplied.minimumTrustScore < currentApplied.minimumTrustScore
+    ) {
+      changeKinds.push('lower_minimum_trust');
+      rationale.push('Requested a lower minimum trust threshold.');
+    }
+    if (knowledgeClassesAreBroader(currentApplied?.knowledgeClasses ?? null, proposedApplied.knowledgeClasses)) {
+      changeKinds.push('broaden_knowledge_classes');
+      rationale.push('Requested additional knowledge classes.');
+    }
+    if (
+      currentApplied &&
+      !currentApplied.includeCoordinationState &&
+      proposedApplied.includeCoordinationState
+    ) {
+      changeKinds.push('include_coordination_state');
+      rationale.push('Requested coordination state that is not currently exposed.');
+    }
+    if (
+      currentApplied &&
+      proposedApplied.tokenBudget > currentApplied.tokenBudget
+    ) {
+      changeKinds.push('increase_token_budget');
+      rationale.push('Requested a larger token budget.');
+    }
+    if (rationale.length === 0) {
+      rationale.push('Request can be satisfied within the current context boundary.');
+    }
+    let decision: ContextEscalationDecision = 'approved';
+
+    if (
+      escalationPolicy.maxView &&
+      viewRank(proposedApplied.view) > viewRank(escalationPolicy.maxView)
+    ) {
+      decision = 'denied';
+      rationale.push(`Policy caps visibility at ${escalationPolicy.maxView}.`);
+    }
+    if (
+      escalationPolicy.maxScopeLevel &&
+      scopeLevelRank(proposedApplied.crossScopeLevel) > scopeLevelRank(escalationPolicy.maxScopeLevel)
+    ) {
+      decision = 'denied';
+      rationale.push(`Policy caps cross-scope retrieval at ${escalationPolicy.maxScopeLevel}.`);
+    }
+    if (
+      escalationPolicy.maxTokenBudget != null &&
+      proposedApplied.tokenBudget > escalationPolicy.maxTokenBudget
+    ) {
+      decision = 'denied';
+      rationale.push(`Policy caps token budget at ${escalationPolicy.maxTokenBudget}.`);
+    }
+    if (
+      escalationPolicy.minimumAllowedTrustScore != null &&
+      proposedApplied.minimumTrustScore != null &&
+      proposedApplied.minimumTrustScore < escalationPolicy.minimumAllowedTrustScore
+    ) {
+      decision = 'denied';
+      rationale.push(
+        `Policy does not allow trust thresholds below ${escalationPolicy.minimumAllowedTrustScore.toFixed(2)}.`,
+      );
+    }
+
+    if (decision !== 'denied' && changeKinds.length > 0) {
+      let strongestDecision: ContextEscalationRuleDecision = 'allow';
+      for (const changeKind of changeKinds) {
+        const ruleDecision = escalationPolicy.byChange?.[changeKind] ?? escalationPolicy.defaultDecision;
+        if (ruleDecision === 'deny') {
+          strongestDecision = 'deny';
+          rationale.push(`Policy denies ${changeKind}.`);
+          break;
+        }
+        if (ruleDecision === 'review') {
+          strongestDecision = 'review';
+        }
+      }
+      decision =
+        strongestDecision === 'deny'
+          ? 'denied'
+          : strongestDecision === 'review'
+            ? 'requires_approval'
+            : 'approved';
+    }
+
+    const requiresEscalation = decision === 'requires_approval';
+    const warnings: ContextWarning[] =
+      decision === 'approved'
+        ? []
+        : [
+            {
+              code: 'contract_filtered',
+              severity: 'warning',
+              message:
+                decision === 'denied'
+                  ? 'This request exceeds the configured escalation policy and was denied.'
+                  : 'This request broadens the current contract and requires approval by the orchestrator.',
+              metadata: {
+                decision,
+                changeKinds,
+              },
+            },
+          ];
+
+    return {
+      requestId: createHash('sha1')
+        .update(JSON.stringify({ request, mergedContract, scope: config.scope, sessionId: config.sessionId }))
+        .digest('hex')
+        .slice(0, 16),
+      requestedAt: Math.floor(Date.now() / 1000),
+      reason: request.reason,
+      note: request.note ?? null,
+      currentContract: currentApplied,
+      proposedContract: proposedApplied,
+      proposedContractInput: mergedContract ?? {},
+      changeKinds,
+      decision,
+      requiresEscalation,
+      rationale,
+      warnings,
     };
   }
 
@@ -1559,6 +1863,8 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       unresolvedWork: context.unresolvedWork,
       coordinationState: context.coordinationState,
       invariants: context.invariants,
+      warnings: context.warnings,
+      degradedContext: context.degradedContext,
       profile,
     };
   }
@@ -1767,6 +2073,57 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
     async getContextAt(asOf, relevanceQuery, options) {
       return (await buildReplayedContext(asOf, relevanceQuery, options)).context;
+    },
+
+    async requestContextExpansion(request, options) {
+      const currentContract = resolveContextContractReference(options?.currentContract);
+      return buildContextExpansionResolution(request, currentContract);
+    },
+
+    async getContextGovernance() {
+      return getGovernanceSnapshot();
+    },
+
+    async setDefaultContextContract(contract) {
+      defaultContextContract = cloneContextContract(contract);
+      return cloneContextContract(defaultContextContract);
+    },
+
+    async putContextContract(name, contract) {
+      if (!name.trim()) {
+        throw new ValidationError('Context contract name is required');
+      }
+      const stored = cloneContextContract({
+        ...contract,
+        name: contract.name ?? name,
+      })!;
+      namedContextContracts.set(name, stored);
+      return cloneContextContract(stored)!;
+    },
+
+    async deleteContextContract(name) {
+      return namedContextContracts.delete(name);
+    },
+
+    async putContextInvariant(invariant) {
+      if (!invariant.id.trim()) {
+        throw new ValidationError('Context invariant id is required');
+      }
+      contextInvariants.set(invariant.id, cloneContextInvariant(invariant));
+      return cloneContextInvariant(contextInvariants.get(invariant.id)!);
+    },
+
+    async deleteContextInvariant(id) {
+      return contextInvariants.delete(id);
+    },
+
+    async getContextEscalationPolicy() {
+      return cloneContextEscalationPolicy(escalationPolicy);
+    },
+
+    async setContextEscalationPolicy(policy) {
+      escalationPolicy = normalizeContextEscalationPolicy(policy);
+      return cloneContextEscalationPolicy(escalationPolicy);
     },
 
     async getStateAt(asOf, options) {

@@ -7,7 +7,11 @@ import type {
   MaintenancePolicy,
   MonitorPolicy,
 } from '../contracts/policy.js';
-import type { ContextContract, ContextInvariant } from '../contracts/context-contract.js';
+import type {
+  ContextContract,
+  ContextInvariant,
+  ContextEscalationPolicy,
+} from '../contracts/context-contract.js';
 import type { MemoryEventEmitter } from './events.js';
 import {
   createSQLiteAdapter,
@@ -65,6 +69,7 @@ interface ProviderMemoryManagerBaseOptions {
   contextContract?: ContextContract;
   contextContracts?: Record<string, ContextContract>;
   invariants?: ContextInvariant[];
+  escalationPolicy?: ContextEscalationPolicy;
   monitorPolicy?: Partial<MonitorPolicy>;
   extractionPolicy?: Partial<ExtractionPolicy>;
   contextPolicy?: Partial<ContextPolicy>;
@@ -165,6 +170,7 @@ export function createClaudeMemoryManager(
     contextContract: options.contextContract,
     contextContracts: options.contextContracts,
     invariants: options.invariants,
+    escalationPolicy: options.escalationPolicy,
     failurePolicy: resolved.failurePolicy,
   });
 }
@@ -199,6 +205,7 @@ export function createOpenAIMemoryManager(
     contextContract: options.contextContract,
     contextContracts: options.contextContracts,
     invariants: options.invariants,
+    escalationPolicy: options.escalationPolicy,
     failurePolicy: resolved.failurePolicy,
   });
 }

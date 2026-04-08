@@ -33,11 +33,19 @@ describe('MCP server handler', () => {
 
   it('lists all expected tools', () => {
     handler = createMcpServerHandler();
-    expect(handler.tools.length).toBe(54);
+    expect(handler.tools.length).toBe(62);
     const names = handler.tools.map((t) => t.name);
     expect(names).toContain('memory_store_turn');
     expect(names).toContain('memory_store_exchange');
     expect(names).toContain('memory_get_context');
+    expect(names).toContain('memory_request_context');
+    expect(names).toContain('memory_get_context_config');
+    expect(names).toContain('memory_set_default_context_contract');
+    expect(names).toContain('memory_put_context_contract');
+    expect(names).toContain('memory_delete_context_contract');
+    expect(names).toContain('memory_put_context_invariant');
+    expect(names).toContain('memory_delete_context_invariant');
+    expect(names).toContain('memory_set_context_escalation_policy');
     expect(names).toContain('memory_search');
     expect(names).toContain('memory_search_cross_scope');
     expect(names).toContain('memory_learn_fact');
@@ -109,6 +117,65 @@ describe('MCP server handler', () => {
     expect(context.activeTurnCount).toBeGreaterThan(0);
     expect(context.sessionState).toBeTruthy();
     expect(context.debugTrace).toBeTruthy();
+  });
+
+  it('returns context expansion resolutions via tool calls', async () => {
+    handler = createMcpServerHandler();
+
+    const result = await handler.callTool('memory_request_context', {
+      reason: 'missing_workspace_context',
+      contract: {
+        view: 'workspace_shared',
+        crossScopeLevel: 'workspace',
+      },
+    });
+    expect(result.isError).toBeUndefined();
+    const resolution = JSON.parse(result.content[0].text);
+    expect(resolution.requiresEscalation).toBe(false);
+    expect(resolution.proposedContract.view).toBe('workspace_shared');
+  });
+
+  it('manages context governance via tool calls', async () => {
+    handler = createMcpServerHandler();
+
+    const configResult = await handler.callTool('memory_put_context_contract', {
+      name: 'executor',
+      contract: {
+        tokenBudget: 2000,
+        knowledgeClasses: ['constraint'],
+      },
+    });
+    expect(configResult.isError).toBeUndefined();
+
+    await handler.callTool('memory_put_context_invariant', {
+      id: 'english-only',
+      title: 'Language',
+      instruction: 'All responses must be in English.',
+      severity: 'important',
+    });
+    await handler.callTool('memory_set_context_escalation_policy', {
+      policy: {
+        defaultDecision: 'allow',
+        byChange: {
+          increase_token_budget: 'deny',
+        },
+      },
+    });
+
+    const governance = await handler.callTool('memory_get_context_config', {});
+    const snapshot = JSON.parse(governance.content[0].text);
+    expect(snapshot.contracts.executor.tokenBudget).toBe(2000);
+    expect(snapshot.invariants[0].id).toBe('english-only');
+
+    const resolutionResult = await handler.callTool('memory_request_context', {
+      reason: 'need_higher_budget',
+      currentContract: 'executor',
+      contract: {
+        tokenBudget: 4000,
+      },
+    });
+    const resolution = JSON.parse(resolutionResult.content[0].text);
+    expect(resolution.decision).toBe('denied');
   });
 
   it('learns facts and searches for them', async () => {
