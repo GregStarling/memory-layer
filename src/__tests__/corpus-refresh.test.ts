@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createInMemoryAdapter } from '../adapters/memory/index.js';
 import { refreshDocuments } from '../core/corpus-refresh.js';
 import type { MemoryScope } from '../contracts/identity.js';
@@ -238,5 +238,35 @@ describe('corpus-refresh', () => {
     for (const fact of facts) {
       expect(adapter.getKnowledgeMemoryById(fact.id)?.knowledge_state).toBe('trusted');
     }
+  });
+
+  it('propagates the original error even when fact restore partially fails', () => {
+    const { facts } = ingestFakeDocument('doc1.md', 'hash-aaa', ['Fact A', 'Fact B', 'Fact C']);
+
+    const originalUpdate = adapter.updateKnowledgeMemory.bind(adapter);
+    let restoreCallCount = 0;
+    const spy = vi.spyOn(adapter, 'updateKnowledgeMemory').mockImplementation((id, patch) => {
+      // During restore (after re-ingest fails), fail on the second fact
+      if (patch.knowledge_state && patch.knowledge_state !== 'candidate') {
+        restoreCallCount++;
+        if (restoreCallCount === 2) {
+          throw new Error('restore failed on fact');
+        }
+      }
+      return originalUpdate(id, patch);
+    });
+
+    expect(() =>
+      refreshDocuments(
+        adapter,
+        scope,
+        [{ title: 'doc1.md', contentHash: 'hash-new', content: 'updated content' }],
+        () => {
+          throw new Error('re-ingest exploded');
+        },
+      ),
+    ).toThrow(/re-ingest exploded/);
+
+    spy.mockRestore();
   });
 });

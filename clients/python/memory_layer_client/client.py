@@ -302,8 +302,9 @@ class MemoryClient:
             "include_coordination": str(include_coordination).lower() if include_coordination is not None else None,
         }
         params.update(_viewer_query_params(viewer))
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/context", params),
@@ -328,8 +329,9 @@ class MemoryClient:
             "include_coordination": str(include_coordination).lower() if include_coordination is not None else None,
         }
         params.update(_viewer_query_params(viewer))
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/state", params),
@@ -358,8 +360,9 @@ class MemoryClient:
             "limit": limit,
             "cursor": cursor,
         }
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/timeline", params),
@@ -386,8 +389,9 @@ class MemoryClient:
             "entity_id": entity_id,
             "max_events": max_events,
         }
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/state/diff", params),
@@ -416,8 +420,9 @@ class MemoryClient:
             "limit": limit,
             "cursor": cursor,
         }
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/events/log", params),
@@ -433,8 +438,9 @@ class MemoryClient:
         scope: Optional[MemoryScope] = None,
     ) -> SearchResponse:
         params: dict[str, Any] = {"q": query, "limit": limit}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/search", params),
@@ -451,8 +457,9 @@ class MemoryClient:
         scope: Optional[MemoryScope] = None,
     ) -> SearchResponse:
         params: dict[str, Any] = {"q": query, "scope_level": scope_level, "limit": limit}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/search/cross-scope", params),
@@ -598,8 +605,9 @@ class MemoryClient:
 
     def list_work_claims(self, *, scope: Optional[MemoryScope] = None) -> WorkClaimListResponse:
         params: dict[str, Any] = {}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/work-claims", params),
@@ -664,8 +672,9 @@ class MemoryClient:
 
     def list_pending_handoffs(self, *, scope: Optional[MemoryScope] = None) -> HandoffListResponse:
         params: dict[str, Any] = {}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/handoffs", params),
@@ -691,8 +700,9 @@ class MemoryClient:
 
     def health(self, *, scope: Optional[MemoryScope] = None) -> HealthResponse:
         params: dict[str, Any] = {}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/health", params),
@@ -739,8 +749,9 @@ class MemoryClient:
                 params["start_at"] = time_range["start_at"]
             if "end_at" in time_range:
                 params["end_at"] = time_range["end_at"]
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/episodes", params),
@@ -813,8 +824,9 @@ class MemoryClient:
             "minimumTrustScore": minimum_trust_score,
             "activeOnly": str(active_only).lower() if active_only is not None else None,
         }
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/memory", params),
@@ -839,8 +851,9 @@ class MemoryClient:
             "includeProvisional": str(include_provisional).lower() if include_provisional is not None else None,
             "includeDisputed": str(include_disputed).lower() if include_disputed is not None else None,
         }
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/profile", params),
@@ -879,8 +892,9 @@ class MemoryClient:
             body["scripts"] = scripts
         if assets is not None:
             body["assets"] = assets
-        if scope or self.default_scope:
-            body["scope"] = (scope or self.default_scope).to_dict()  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            body["scope"] = resolved_scope.to_dict()
         payload = self._request("POST", "/v1/playbooks", body, headers=_scope_headers(scope, self.default_scope))
         return Playbook.from_dict(payload["playbook"])
 
@@ -890,8 +904,9 @@ class MemoryClient:
         scope: Optional[MemoryScope] = None,
     ) -> list[Playbook]:
         params: dict[str, Any] = {}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/playbooks", params),
@@ -909,8 +924,9 @@ class MemoryClient:
         """Search playbooks by query. Returns ranked hits preserving rank and
         the full playbook payload including scope metadata."""
         params: dict[str, Any] = {"q": query, "limit": limit}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/playbooks", params),
@@ -947,8 +963,9 @@ class MemoryClient:
         }
         if source_session_id is not None:
             body["sourceSessionId"] = source_session_id
-        if scope or self.default_scope:
-            body["scope"] = (scope or self.default_scope).to_dict()  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            body["scope"] = resolved_scope.to_dict()
         payload = self._request(
             "POST",
             f"/v1/playbooks/{playbook_id}/revise",
@@ -989,8 +1006,9 @@ class MemoryClient:
             body["tags"] = tags
         if source_working_memory_id is not None:
             body["sourceWorkingMemoryId"] = source_working_memory_id
-        if scope or self.default_scope:
-            body["scope"] = (scope or self.default_scope).to_dict()  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            body["scope"] = resolved_scope.to_dict()
         payload = self._request(
             "POST",
             "/v1/playbooks/from-task",
@@ -1038,8 +1056,9 @@ class MemoryClient:
         scope: Optional[MemoryScope] = None,
     ) -> dict[str, list[Association]]:
         params: dict[str, Any] = {}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params(f"/v1/associations/{kind}/{target_id}", params),
@@ -1219,8 +1238,9 @@ class MemoryClient:
         scope: Optional[MemoryScope] = None,
     ) -> KnowledgeListResponse:
         params: dict[str, Any] = {"limit": limit, "cursor": cursor}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/inspect/knowledge", params),
@@ -1235,8 +1255,9 @@ class MemoryClient:
         scope: Optional[MemoryScope] = None,
     ) -> KnowledgeInspectionResponse:
         params: dict[str, Any] = {}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params(f"/v1/inspect/knowledge/{knowledge_id}", params),
@@ -1252,8 +1273,9 @@ class MemoryClient:
         scope: Optional[MemoryScope] = None,
     ) -> AuditListResponse:
         params: dict[str, Any] = {"knowledge_id": knowledge_id, "limit": limit}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/inspect/audits", params),
@@ -1263,8 +1285,9 @@ class MemoryClient:
 
     def inspect_monitor(self, *, scope: Optional[MemoryScope] = None) -> MonitorResponse:
         params: dict[str, Any] = {}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/inspect/monitor", params),
@@ -1279,8 +1302,9 @@ class MemoryClient:
         scope: Optional[MemoryScope] = None,
     ) -> CompactionLogListResponse:
         params: dict[str, Any] = {"limit": limit}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/inspect/compactions", params),
@@ -1295,8 +1319,9 @@ class MemoryClient:
         scope: Optional[MemoryScope] = None,
     ) -> DueReverificationResponse:
         params: dict[str, Any] = {"limit": limit}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = self._request(
             "GET",
             _append_query_params("/v1/inspect/reverification", params),
@@ -1705,8 +1730,9 @@ class AsyncMemoryClient:
             "include_coordination": str(include_coordination).lower() if include_coordination is not None else None,
         }
         params.update(_viewer_query_params(viewer))
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/context", params),
@@ -1731,8 +1757,9 @@ class AsyncMemoryClient:
             "include_coordination": str(include_coordination).lower() if include_coordination is not None else None,
         }
         params.update(_viewer_query_params(viewer))
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/state", params),
@@ -1761,8 +1788,9 @@ class AsyncMemoryClient:
             "limit": limit,
             "cursor": cursor,
         }
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/timeline", params),
@@ -1789,8 +1817,9 @@ class AsyncMemoryClient:
             "entity_id": entity_id,
             "max_events": max_events,
         }
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/state/diff", params),
@@ -1819,8 +1848,9 @@ class AsyncMemoryClient:
             "limit": limit,
             "cursor": cursor,
         }
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/events/log", params),
@@ -1836,8 +1866,9 @@ class AsyncMemoryClient:
         scope: Optional[MemoryScope] = None,
     ) -> SearchResponse:
         params: dict[str, Any] = {"q": query, "limit": limit}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/search", params),
@@ -1854,8 +1885,9 @@ class AsyncMemoryClient:
         scope: Optional[MemoryScope] = None,
     ) -> SearchResponse:
         params: dict[str, Any] = {"q": query, "scope_level": scope_level, "limit": limit}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/search/cross-scope", params),
@@ -2001,8 +2033,9 @@ class AsyncMemoryClient:
 
     async def list_work_claims(self, *, scope: Optional[MemoryScope] = None) -> WorkClaimListResponse:
         params: dict[str, Any] = {}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/work-claims", params),
@@ -2073,8 +2106,9 @@ class AsyncMemoryClient:
 
     async def list_pending_handoffs(self, *, scope: Optional[MemoryScope] = None) -> HandoffListResponse:
         params: dict[str, Any] = {}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/handoffs", params),
@@ -2100,8 +2134,9 @@ class AsyncMemoryClient:
 
     async def health(self, *, scope: Optional[MemoryScope] = None) -> HealthResponse:
         params: dict[str, Any] = {}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/health", params),
@@ -2148,8 +2183,9 @@ class AsyncMemoryClient:
                 params["start_at"] = time_range["start_at"]
             if "end_at" in time_range:
                 params["end_at"] = time_range["end_at"]
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/episodes", params),
@@ -2222,8 +2258,9 @@ class AsyncMemoryClient:
             "minimumTrustScore": minimum_trust_score,
             "activeOnly": str(active_only).lower() if active_only is not None else None,
         }
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/memory", params),
@@ -2248,8 +2285,9 @@ class AsyncMemoryClient:
             "includeProvisional": str(include_provisional).lower() if include_provisional is not None else None,
             "includeDisputed": str(include_disputed).lower() if include_disputed is not None else None,
         }
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/profile", params),
@@ -2288,8 +2326,9 @@ class AsyncMemoryClient:
             body["scripts"] = scripts
         if assets is not None:
             body["assets"] = assets
-        if scope or self.default_scope:
-            body["scope"] = (scope or self.default_scope).to_dict()  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            body["scope"] = resolved_scope.to_dict()
         payload = await self._request("POST", "/v1/playbooks", body, headers=_scope_headers(scope, self.default_scope))
         return Playbook.from_dict(payload["playbook"])
 
@@ -2299,8 +2338,9 @@ class AsyncMemoryClient:
         scope: Optional[MemoryScope] = None,
     ) -> list[Playbook]:
         params: dict[str, Any] = {}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/playbooks", params),
@@ -2318,8 +2358,9 @@ class AsyncMemoryClient:
         """Search playbooks by query. Returns ranked hits preserving rank and
         the full playbook payload including scope metadata."""
         params: dict[str, Any] = {"q": query, "limit": limit}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/playbooks", params),
@@ -2356,8 +2397,9 @@ class AsyncMemoryClient:
         }
         if source_session_id is not None:
             body["sourceSessionId"] = source_session_id
-        if scope or self.default_scope:
-            body["scope"] = (scope or self.default_scope).to_dict()  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            body["scope"] = resolved_scope.to_dict()
         payload = await self._request(
             "POST",
             f"/v1/playbooks/{playbook_id}/revise",
@@ -2398,8 +2440,9 @@ class AsyncMemoryClient:
             body["tags"] = tags
         if source_working_memory_id is not None:
             body["sourceWorkingMemoryId"] = source_working_memory_id
-        if scope or self.default_scope:
-            body["scope"] = (scope or self.default_scope).to_dict()  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            body["scope"] = resolved_scope.to_dict()
         payload = await self._request(
             "POST",
             "/v1/playbooks/from-task",
@@ -2447,8 +2490,9 @@ class AsyncMemoryClient:
         scope: Optional[MemoryScope] = None,
     ) -> dict[str, list[Association]]:
         params: dict[str, Any] = {}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params(f"/v1/associations/{kind}/{target_id}", params),
@@ -2628,8 +2672,9 @@ class AsyncMemoryClient:
         scope: Optional[MemoryScope] = None,
     ) -> KnowledgeListResponse:
         params: dict[str, Any] = {"limit": limit, "cursor": cursor}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/inspect/knowledge", params),
@@ -2644,8 +2689,9 @@ class AsyncMemoryClient:
         scope: Optional[MemoryScope] = None,
     ) -> KnowledgeInspectionResponse:
         params: dict[str, Any] = {}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params(f"/v1/inspect/knowledge/{knowledge_id}", params),
@@ -2661,8 +2707,9 @@ class AsyncMemoryClient:
         scope: Optional[MemoryScope] = None,
     ) -> AuditListResponse:
         params: dict[str, Any] = {"knowledge_id": knowledge_id, "limit": limit}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/inspect/audits", params),
@@ -2672,8 +2719,9 @@ class AsyncMemoryClient:
 
     async def inspect_monitor(self, *, scope: Optional[MemoryScope] = None) -> MonitorResponse:
         params: dict[str, Any] = {}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/inspect/monitor", params),
@@ -2688,8 +2736,9 @@ class AsyncMemoryClient:
         scope: Optional[MemoryScope] = None,
     ) -> CompactionLogListResponse:
         params: dict[str, Any] = {"limit": limit}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/inspect/compactions", params),
@@ -2704,8 +2753,9 @@ class AsyncMemoryClient:
         scope: Optional[MemoryScope] = None,
     ) -> DueReverificationResponse:
         params: dict[str, Any] = {"limit": limit}
-        if scope or self.default_scope:
-            params.update((scope or self.default_scope).to_dict())  # type: ignore[union-attr]
+        resolved_scope = _resolve_scope(scope, self.default_scope)
+        if resolved_scope is not None:
+            params.update(resolved_scope.to_dict())
         payload = await self._request(
             "GET",
             _append_query_params("/v1/inspect/reverification", params),

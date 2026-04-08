@@ -395,31 +395,45 @@ export function createSQLiteSchema(database: Database.Database): void {
     }
   }
 
-  const collaborationBackfills = [
-    "UPDATE turns SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-    "UPDATE working_memory SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-    "UPDATE knowledge_memory SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-    "UPDATE knowledge_memory SET source_collaboration_id = '' WHERE source_collaboration_id = 'default'",
-    "UPDATE knowledge_memory_audit SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-    "UPDATE knowledge_candidate SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-    "UPDATE knowledge_evidence SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-    "UPDATE context_monitor SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-    "UPDATE compaction_log SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-    "UPDATE work_items SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-    "UPDATE playbooks SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-    "UPDATE playbook_revisions SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-    "UPDATE associations SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-    "UPDATE memory_event_log SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-    "UPDATE session_state_current SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-    "UPDATE work_claims_current SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-    "UPDATE handoff_records SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-  ];
+  // Only run the collaboration_id backfill on databases created before v16,
+  // which may contain rows with the legacy sentinel 'default' instead of ''.
+  // Note: schema_meta is guaranteed to exist here (CREATE TABLE IF NOT EXISTS
+  // runs above), but will have no rows on a fresh database — yielding
+  // undefined, which falls back to version 0, correctly triggering the backfill.
+  const COLLABORATION_BACKFILL_VERSION = 16;
+  const existingVersion = (
+    database.prepare('SELECT schema_version FROM schema_meta WHERE id = 1').get() as
+      | { schema_version: number }
+      | undefined
+  )?.schema_version ?? 0;
 
-  for (const statement of collaborationBackfills) {
-    try {
-      database.exec(statement);
-    } catch {
-      // Best-effort backfill for upgraded databases.
+  if (existingVersion < COLLABORATION_BACKFILL_VERSION) {
+    const collaborationBackfills = [
+      "UPDATE turns SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+      "UPDATE working_memory SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+      "UPDATE knowledge_memory SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+      "UPDATE knowledge_memory SET source_collaboration_id = '' WHERE source_collaboration_id = 'default'",
+      "UPDATE knowledge_memory_audit SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+      "UPDATE knowledge_candidate SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+      "UPDATE knowledge_evidence SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+      "UPDATE context_monitor SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+      "UPDATE compaction_log SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+      "UPDATE work_items SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+      "UPDATE playbooks SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+      "UPDATE playbook_revisions SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+      "UPDATE associations SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+      "UPDATE memory_event_log SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+      "UPDATE session_state_current SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+      "UPDATE work_claims_current SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+      "UPDATE handoff_records SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+    ];
+
+    for (const statement of collaborationBackfills) {
+      try {
+        database.exec(statement);
+      } catch {
+        // Best-effort backfill for upgraded databases.
+      }
     }
   }
 

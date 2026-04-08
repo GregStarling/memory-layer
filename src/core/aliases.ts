@@ -221,6 +221,8 @@ export interface DiscoverAliasCandidatesOptions {
   threshold?: number;
   /** Maximum candidates to return. Default: 20 */
   maxCandidates?: number;
+  /** Maximum entity names to compare. Bounds quadratic scaling. Default: 500 */
+  maxEntities?: number;
   /** Existing alias map to skip already-known pairs. */
   existingAliases?: AliasMap;
 }
@@ -238,9 +240,13 @@ export function discoverAliasCandidates(
 ): AliasCandidate[] {
   const threshold = options.threshold ?? DEFAULT_SIMILARITY_THRESHOLD;
   const maxCandidates = options.maxCandidates ?? 20;
+  const maxEntities = options.maxEntities ?? 500;
 
-  const entityNames = collectEntityNames(knowledge);
+  let entityNames = collectEntityNames(knowledge);
   if (entityNames.length < 2) return [];
+  if (entityNames.length > maxEntities) {
+    entityNames = entityNames.slice(0, maxEntities);
+  }
 
   // Build set of already-known alias pairs for exclusion
   const knownPairs = new Set<string>();
@@ -263,6 +269,11 @@ export function discoverAliasCandidates(
 
       // Skip already-known alias pairs
       if (knownPairs.has(pairKey(a.toLowerCase(), b.toLowerCase()))) continue;
+
+      // Length-ratio pre-filter: normalized similarity cannot exceed
+      // min(len)/max(len), so skip pairs that can never meet threshold.
+      const maxLen = Math.max(a.length, b.length);
+      if (maxLen > 0 && Math.min(a.length, b.length) / maxLen < threshold) continue;
 
       const similarity = normalizedStringSimilarity(a, b);
       if (similarity >= threshold) {

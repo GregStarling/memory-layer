@@ -57,6 +57,8 @@ describe('sqlite collaboration_id migration repair', () => {
       1,
       1,
     );
+    // Simulate a pre-v16 database so the backfill runs on next open
+    raw.prepare('UPDATE schema_meta SET schema_version = 15 WHERE id = 1').run();
     raw.close();
 
     const repaired = createSQLiteAdapter(dbPath);
@@ -105,6 +107,8 @@ describe('sqlite collaboration_id migration repair', () => {
       1,
       1,
     );
+    // Simulate a pre-v16 database so the backfill runs on next open
+    raw.prepare('UPDATE schema_meta SET schema_version = 15 WHERE id = 1').run();
     raw.close();
 
     const repaired = createSQLiteAdapter(dbPath);

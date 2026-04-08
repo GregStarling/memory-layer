@@ -1167,10 +1167,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     return {
       ...knowledge,
       ...normalizeScope(knowledge),
-      source_collaboration_id:
-        knowledge.source_collaboration_id === 'default'
-          ? ''
-          : knowledge.source_collaboration_id,
+      source_collaboration_id: knowledge.source_collaboration_id,
     };
   }
 

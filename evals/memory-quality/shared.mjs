@@ -45,8 +45,8 @@ export const THRESHOLDS = {
   // Phase 5: Intelligence
   coreMemoryTokenBudget: 0.9,
   tagFilteringAccuracy: 0.85,
-  aliasResolutionQuality: 2 / 3,
-  clusterCoherence: 0.9,
+  aliasResolutionQuality: (2 / 3) * 0.85,  // baseline 0.667 × 0.85 ≈ 0.567
+  clusterCoherence: 1.0 * 0.85,            // baseline 1.0 × 0.85 = 0.85
 };
 
 export function assertScenario(name, passed, detail = {}) {

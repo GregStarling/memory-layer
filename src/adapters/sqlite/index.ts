@@ -124,23 +124,11 @@ import { createSQLiteSchema } from './schema.js';
 
 const SCOPE_WHERE =
   `tenant_id = ? AND system_id = ? AND workspace_id = ? ` +
-  `AND (collaboration_id = ? OR (? = '' AND collaboration_id = 'default')) AND scope_id = ?`;
+  `AND collaboration_id = ? AND scope_id = ?`;
 const require = createRequire(import.meta.url);
 
-function normalizeStoredCollaborationId(value: unknown): string {
-  const normalized = value == null ? '' : String(value);
-  return normalized === 'default' ? '' : normalized;
-}
 
-function scopeValues(scope: Parameters<typeof normalizeScope>[0]): string[] {
-  const normalized = normalizeScope(scope);
-  const values = baseScopeValues(normalized);
-  return [values[0], values[1], values[2], values[3], values[3], values[4]];
-}
-
-function canonicalScopeValues(
-  scope: Parameters<typeof normalizeScope>[0],
-): [string, string, string, string, string] {
+function scopeValues(scope: Parameters<typeof normalizeScope>[0]): [string, string, string, string, string] {
   return baseScopeValues(normalizeScope(scope));
 }
 
@@ -651,7 +639,7 @@ function createAdapterFromDatabase(
       tenant_id: String(row.tenant_id),
       system_id: String(row.system_id),
       workspace_id: String(row.workspace_id ?? ''),
-      collaboration_id: normalizeStoredCollaborationId(row.collaboration_id),
+      collaboration_id: String(row.collaboration_id ?? ''),
       scope_id: String(row.scope_id),
       work_item_id: Number(row.work_item_id),
       actor: parseActorRef(row),
@@ -674,7 +662,7 @@ function createAdapterFromDatabase(
       tenant_id: String(row.tenant_id),
       system_id: String(row.system_id),
       workspace_id: String(row.workspace_id ?? ''),
-      collaboration_id: normalizeStoredCollaborationId(row.collaboration_id),
+      collaboration_id: String(row.collaboration_id ?? ''),
       scope_id: String(row.scope_id),
       work_item_id: Number(row.work_item_id),
       from_actor: parseActorRef(row, 'from_'),
@@ -701,7 +689,7 @@ function createAdapterFromDatabase(
       tenant_id: String(row.tenant_id ?? ''),
       system_id: String(row.system_id ?? ''),
       workspace_id: String(row.workspace_id ?? ''),
-      collaboration_id: normalizeStoredCollaborationId(row.collaboration_id),
+      collaboration_id: String(row.collaboration_id ?? ''),
       scope_id: String(row.scope_id ?? ''),
       title: String(row.title),
       content_hash: String(row.content_hash),
@@ -3391,7 +3379,7 @@ function createAdapterFromDatabase(
            RETURNING *`,
         )
         .get(
-          ...canonicalScopeValues(n),
+          ...scopeValues(n),
           input.title,
           input.content_hash,
           input.mime_type ?? 'text/plain',

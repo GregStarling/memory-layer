@@ -119,7 +119,12 @@ export function refreshDocuments(
           fact_count: existing.fact_count,
           processed_at: existing.processed_at,
         });
-        restoreInvalidatedFacts(adapter, invalidatedFacts);
+        try {
+          restoreInvalidatedFacts(adapter, invalidatedFacts);
+        } catch {
+          // Restore is best-effort during rollback; the original error is
+          // more actionable, so swallow the restore failure and re-throw below.
+        }
         throw error;
       }
     }
@@ -203,8 +208,12 @@ function restoreInvalidatedFacts(
   invalidatedFacts: InvalidatedFactSnapshot[],
 ): void {
   for (const invalidated of invalidatedFacts) {
-    adapter.updateKnowledgeMemory(invalidated.id, {
-      knowledge_state: invalidated.knowledge_state,
-    });
+    try {
+      adapter.updateKnowledgeMemory(invalidated.id, {
+        knowledge_state: invalidated.knowledge_state,
+      });
+    } catch {
+      // Best-effort: a single fact restore failure should not block the rest.
+    }
   }
 }

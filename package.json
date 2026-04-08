@@ -107,7 +107,8 @@
     "export:memory": "node scripts/export-memory.mjs",
     "import:memory": "node scripts/import-memory.mjs",
     "pack:check": "npm pack --dry-run",
-    "release:check": "npm run lint && npm run build && npm run test:coverage && npm run eval:retrieval:enforce && npm run eval:gate && npm run eval:memory-quality:enforce && npm run eval:memory-quality:delta:enforce && npm run python:check && npm run eval:platform-quality:enforce && npm run pack:check",
+    "release:check": "npm run lint && npm run build && npm run test:coverage && npm run eval:retrieval:enforce && npm run eval:gate && npm run eval:memory-quality:enforce && npm run eval:memory-quality:delta:enforce && npm run python:check && npm run eval:platform-quality:enforce && npm run pack:check && npm run release:check:postgres",
+    "release:check:postgres": "node -e \"if(!process.env.POSTGRES_TEST_URL){console.log('POSTGRES_TEST_URL unset — skipping Postgres (CI runs this via postgres-integration job)')}else{require('child_process').execSync('npm run test:postgres',{stdio:'inherit'})}\"",
     "prepublishOnly": "npm run release:check"
   },
   "peerDependencies": {

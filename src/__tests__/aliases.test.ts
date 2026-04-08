@@ -288,4 +288,42 @@ describe('discoverAliasCandidates', () => {
     const candidates = discoverAliasCandidates(knowledge);
     expect(candidates.every((c) => c.confirmed === false)).toBe(true);
   });
+
+  it('length-ratio pre-filter skips pairs where lengths differ too much', () => {
+    const knowledge = [
+      makeKnowledgeMemory({ id: 1, fact_value: 'PostgreSQL', fact_type: 'entity' }),
+      makeKnowledgeMemory({ id: 2, fact_value: 'PostreSQL', fact_type: 'entity' }),
+      makeKnowledgeMemory({ id: 3, fact_value: 'PG', fact_type: 'entity' }),
+    ];
+    // 'PostgreSQL'/'PostreSQL' have similar lengths (10 vs 9), so length filter passes
+    // 'PostgreSQL'/'PG' have ratio 2/10 = 0.2 < 0.85 threshold, so length filter prunes
+    const candidates = discoverAliasCandidates(knowledge);
+    expect(candidates.some((c) =>
+      (c.entity1 === 'PostgreSQL' && c.entity2 === 'PostreSQL') ||
+      (c.entity1 === 'PostreSQL' && c.entity2 === 'PostgreSQL'),
+    )).toBe(true);
+    expect(candidates.some((c) => c.entity1 === 'PG' || c.entity2 === 'PG')).toBe(false);
+  });
+
+  it('respects maxEntities cap', () => {
+    const knowledge = Array.from({ length: 600 }, (_, i) =>
+      makeKnowledgeMemory({ id: i + 1, fact_value: `Entity_${i}`, fact_type: 'entity' }),
+    );
+    const start = performance.now();
+    const candidates = discoverAliasCandidates(knowledge, { maxEntities: 100 });
+    const elapsed = performance.now() - start;
+    // Should complete quickly with only 100 entities compared
+    expect(elapsed).toBeLessThan(1000);
+    expect(candidates).toBeDefined();
+  });
+
+  it('completes in reasonable time with 200 entities', () => {
+    const knowledge = Array.from({ length: 200 }, (_, i) =>
+      makeKnowledgeMemory({ id: i + 1, fact_value: `EntityName${String(i).padStart(3, '0')}`, fact_type: 'entity' }),
+    );
+    const start = performance.now();
+    discoverAliasCandidates(knowledge);
+    const elapsed = performance.now() - start;
+    expect(elapsed).toBeLessThan(1000);
+  });
 });
