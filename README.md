@@ -238,15 +238,17 @@ Every record belongs to a five-tuple scope that enables isolation and selective 
 ```typescript
 const memory = createMemory({
   scope: {
-    tenant_id: 'acme-corp',
-    system_id: 'code-assistant',
-    workspace_id: 'backend-repo',
-    collaboration_id: 'incident-7',
-    scope_id: 'task-refactor-auth',
+    tenant_id: 'acme-corp',            // Organization boundary
+    system_id: 'code-assistant',       // Which agent or system
+    workspace_id: 'backend-repo',      // Shared project context
+    collaboration_id: 'incident-7',    // Cross-system collaboration boundary
+    scope_id: 'task-refactor-auth',    // This specific task or thread
   },
-  crossScopeLevel: 'workspace',
+  crossScopeLevel: 'workspace',       // Read workspace-wide knowledge
 });
 ```
+
+Each agent gets its own `scope_id`. Agents in the same `workspace_id` can share knowledge via cross-scope retrieval. The `system_id` distinguishes different agent types, while `tenant_id` provides the outermost organizational boundary. By default, an agent only sees its own scope — widening requires explicit `crossScopeLevel` configuration or a context contract.
 
 ### Cross-Scope Retrieval
 
