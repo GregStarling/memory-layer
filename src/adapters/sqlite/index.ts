@@ -3450,11 +3450,31 @@ function createAdapterFromDatabase(
     getGovernanceState(scope): PersistedGovernanceState | null {
       const sv = scopeValues(scope);
       const contractRows = db
-        .prepare(`SELECT name, is_default, contract_json FROM context_contracts WHERE ${SCOPE_WHERE}`)
-        .all(...sv) as Array<{ name: string; is_default: number; contract_json: string }>;
+        .prepare(
+          `SELECT name, is_default, is_deleted, contract_json
+           FROM context_contracts
+           WHERE ${SCOPE_WHERE}`,
+        )
+        .all(...sv) as Array<{
+          name: string | null;
+          is_default: number;
+          is_deleted: number;
+          contract_json: string | null;
+        }>;
       const invariantRows = db
-        .prepare(`SELECT invariant_id, title, instruction, severity, scope_level FROM context_invariants WHERE ${SCOPE_WHERE}`)
-        .all(...sv) as Array<{ invariant_id: string; title: string; instruction: string; severity: string | null; scope_level: string | null }>;
+        .prepare(
+          `SELECT invariant_id, title, instruction, severity, scope_level, is_deleted
+           FROM context_invariants
+           WHERE ${SCOPE_WHERE}`,
+        )
+        .all(...sv) as Array<{
+          invariant_id: string;
+          title: string | null;
+          instruction: string | null;
+          severity: string | null;
+          scope_level: string | null;
+          is_deleted: number;
+        }>;
       const policyRow = db
         .prepare(`SELECT policy_json FROM context_escalation_policies WHERE ${SCOPE_WHERE}`)
         .get(...sv) as { policy_json: string } | undefined;
@@ -3463,29 +3483,48 @@ function createAdapterFromDatabase(
         return null;
       }
 
-      let defaultContract: ContextContract | null = null;
+      let defaultContract: PersistedGovernanceState['defaultContract'] = null;
       const namedContracts: Record<string, ContextContract> = {};
+      const deletedContractNames: string[] = [];
       for (const row of contractRows) {
-        const contract: ContextContract = JSON.parse(row.contract_json);
         if (row.is_default) {
-          defaultContract = contract;
+          defaultContract = row.is_deleted
+            ? { state: 'cleared' }
+            : {
+                state: 'set',
+                contract: JSON.parse(row.contract_json!) as ContextContract,
+              };
+        } else if (row.is_deleted) {
+          if (row.name) {
+            deletedContractNames.push(row.name);
+          }
         } else {
-          namedContracts[row.name] = contract;
+          namedContracts[row.name!] = JSON.parse(row.contract_json!) as ContextContract;
         }
       }
 
-      const invariants: ContextInvariant[] = invariantRows.map((row) => ({
-        id: row.invariant_id,
-        title: row.title,
-        instruction: row.instruction,
-        severity: row.severity as ContextInvariant['severity'],
-        scopeLevel: row.scope_level as ContextInvariant['scopeLevel'],
-      }));
+      const invariants: ContextInvariant[] = [];
+      const deletedInvariantIds: string[] = [];
+      for (const row of invariantRows) {
+        if (row.is_deleted) {
+          deletedInvariantIds.push(row.invariant_id);
+          continue;
+        }
+        invariants.push({
+          id: row.invariant_id,
+          title: row.title!,
+          instruction: row.instruction!,
+          severity: row.severity as ContextInvariant['severity'],
+          scopeLevel: row.scope_level as ContextInvariant['scopeLevel'],
+        });
+      }
 
       return {
         defaultContract,
         namedContracts,
+        deletedContractNames,
         invariants,
+        deletedInvariantIds,
         escalationPolicy: policyRow ? JSON.parse(policyRow.policy_json) : null,
       };
     },
@@ -3493,52 +3532,211 @@ function createAdapterFromDatabase(
     upsertDefaultContextContract(scope, contract) {
       const sv = scopeValues(scope);
       const now = nowSeconds();
-      if (contract == null) {
-        db.prepare(`DELETE FROM context_contracts WHERE ${SCOPE_WHERE} AND is_default = 1`).run(...sv);
+      const isDeleted = contract == null ? 1 : 0;
+      const contractJson = contract == null ? null : JSON.stringify(contract);
+      const updated = db
+        .prepare(
+          `UPDATE context_contracts
+           SET name = NULL,
+               is_default = 1,
+               is_deleted = ?,
+               contract_json = ?,
+               updated_at = ?
+           WHERE ${SCOPE_WHERE} AND is_default = 1`,
+        )
+        .run(isDeleted, contractJson, now, ...sv);
+      if (updated.changes > 0) {
         return;
       }
       db.prepare(
-        `INSERT INTO context_contracts (tenant_id, system_id, workspace_id, collaboration_id, scope_id, name, is_default, contract_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, '__default__', 1, ?, ?, ?)
-         ON CONFLICT(tenant_id, system_id, workspace_id, collaboration_id, scope_id, name)
-         DO UPDATE SET contract_json = excluded.contract_json, updated_at = excluded.updated_at`,
-      ).run(...sv, JSON.stringify(contract), now, now);
+        `INSERT INTO context_contracts (
+           tenant_id,
+           system_id,
+           workspace_id,
+           collaboration_id,
+           scope_id,
+           name,
+           is_default,
+           is_deleted,
+           contract_json,
+           created_at,
+           updated_at
+         )
+         VALUES (?, ?, ?, ?, ?, NULL, 1, ?, ?, ?, ?)`,
+      ).run(...sv, isDeleted, contractJson, now, now);
     },
 
     upsertNamedContextContract(scope, name, contract) {
       const sv = scopeValues(scope);
       const now = nowSeconds();
+      const contractJson = JSON.stringify(contract);
+      const updated = db
+        .prepare(
+          `UPDATE context_contracts
+           SET is_default = 0,
+               is_deleted = 0,
+               contract_json = ?,
+               updated_at = ?
+           WHERE ${SCOPE_WHERE} AND is_default = 0 AND name = ?`,
+        )
+        .run(contractJson, now, ...sv, name);
+      if (updated.changes > 0) {
+        return;
+      }
       db.prepare(
-        `INSERT INTO context_contracts (tenant_id, system_id, workspace_id, collaboration_id, scope_id, name, is_default, contract_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
-         ON CONFLICT(tenant_id, system_id, workspace_id, collaboration_id, scope_id, name)
-         DO UPDATE SET contract_json = excluded.contract_json, updated_at = excluded.updated_at`,
-      ).run(...sv, name, JSON.stringify(contract), now, now);
+        `INSERT INTO context_contracts (
+           tenant_id,
+           system_id,
+           workspace_id,
+           collaboration_id,
+           scope_id,
+           name,
+           is_default,
+           is_deleted,
+           contract_json,
+           created_at,
+           updated_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
+      ).run(...sv, name, contractJson, now, now);
     },
 
     deleteNamedContextContract(scope, name): boolean {
-      const result = db
-        .prepare(`DELETE FROM context_contracts WHERE ${SCOPE_WHERE} AND name = ? AND is_default = 0`)
-        .run(...scopeValues(scope), name);
-      return result.changes > 0;
+      const sv = scopeValues(scope);
+      const now = nowSeconds();
+      const existing = db
+        .prepare(
+          `SELECT is_deleted
+           FROM context_contracts
+           WHERE ${SCOPE_WHERE} AND is_default = 0 AND name = ?`,
+        )
+        .get(...sv, name) as { is_deleted: number } | undefined;
+      if (existing) {
+        db.prepare(
+          `UPDATE context_contracts
+           SET is_deleted = 1,
+               contract_json = NULL,
+               updated_at = ?
+           WHERE ${SCOPE_WHERE} AND is_default = 0 AND name = ?`,
+        ).run(now, ...sv, name);
+        return existing.is_deleted === 0;
+      }
+      db.prepare(
+        `INSERT INTO context_contracts (
+           tenant_id,
+           system_id,
+           workspace_id,
+           collaboration_id,
+           scope_id,
+           name,
+           is_default,
+           is_deleted,
+           contract_json,
+           created_at,
+           updated_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, 0, 1, NULL, ?, ?)`,
+      ).run(...sv, name, now, now);
+      return false;
     },
 
     upsertContextInvariant(scope, invariant) {
       const sv = scopeValues(scope);
       const now = nowSeconds();
+      const updated = db
+        .prepare(
+          `UPDATE context_invariants
+           SET title = ?,
+               instruction = ?,
+               severity = ?,
+               scope_level = ?,
+               is_deleted = 0,
+               updated_at = ?
+           WHERE ${SCOPE_WHERE} AND invariant_id = ?`,
+        )
+        .run(
+          invariant.title,
+          invariant.instruction,
+          invariant.severity ?? null,
+          invariant.scopeLevel ?? null,
+          now,
+          ...sv,
+          invariant.id,
+        );
+      if (updated.changes > 0) {
+        return;
+      }
       db.prepare(
-        `INSERT INTO context_invariants (tenant_id, system_id, workspace_id, collaboration_id, scope_id, invariant_id, title, instruction, severity, scope_level, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(tenant_id, system_id, workspace_id, collaboration_id, scope_id, invariant_id)
-         DO UPDATE SET title = excluded.title, instruction = excluded.instruction, severity = excluded.severity, scope_level = excluded.scope_level, updated_at = excluded.updated_at`,
-      ).run(...sv, invariant.id, invariant.title, invariant.instruction, invariant.severity ?? null, invariant.scopeLevel ?? null, now, now);
+        `INSERT INTO context_invariants (
+           tenant_id,
+           system_id,
+           workspace_id,
+           collaboration_id,
+           scope_id,
+           invariant_id,
+           title,
+           instruction,
+           severity,
+           scope_level,
+           is_deleted,
+           created_at,
+           updated_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      ).run(
+        ...sv,
+        invariant.id,
+        invariant.title,
+        invariant.instruction,
+        invariant.severity ?? null,
+        invariant.scopeLevel ?? null,
+        now,
+        now,
+      );
     },
 
     deleteContextInvariant(scope, invariantId): boolean {
-      const result = db
-        .prepare(`DELETE FROM context_invariants WHERE ${SCOPE_WHERE} AND invariant_id = ?`)
-        .run(...scopeValues(scope), invariantId);
-      return result.changes > 0;
+      const sv = scopeValues(scope);
+      const now = nowSeconds();
+      const existing = db
+        .prepare(
+          `SELECT is_deleted
+           FROM context_invariants
+           WHERE ${SCOPE_WHERE} AND invariant_id = ?`,
+        )
+        .get(...sv, invariantId) as { is_deleted: number } | undefined;
+      if (existing) {
+        db.prepare(
+          `UPDATE context_invariants
+           SET title = NULL,
+               instruction = NULL,
+               severity = NULL,
+               scope_level = NULL,
+               is_deleted = 1,
+               updated_at = ?
+           WHERE ${SCOPE_WHERE} AND invariant_id = ?`,
+        ).run(now, ...sv, invariantId);
+        return existing.is_deleted === 0;
+      }
+      db.prepare(
+        `INSERT INTO context_invariants (
+           tenant_id,
+           system_id,
+           workspace_id,
+           collaboration_id,
+           scope_id,
+           invariant_id,
+           title,
+           instruction,
+           severity,
+           scope_level,
+           is_deleted,
+           created_at,
+           updated_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 1, ?, ?)`,
+      ).run(...sv, invariantId, now, now);
+      return false;
     },
 
     upsertContextEscalationPolicy(scope, policy) {

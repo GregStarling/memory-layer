@@ -147,10 +147,21 @@ export interface ContextRequestResolution {
   warnings: ContextWarning[];
 }
 
+export type PersistedDefaultContextContractState =
+  | {
+      state: 'set';
+      contract: ContextContract;
+    }
+  | {
+      state: 'cleared';
+    };
+
 export interface PersistedGovernanceState {
-  defaultContract: ContextContract | null;
+  defaultContract: PersistedDefaultContextContractState | null;
   namedContracts: Record<string, ContextContract>;
+  deletedContractNames: string[];
   invariants: ContextInvariant[];
+  deletedInvariantIds: string[];
   escalationPolicy: ContextEscalationPolicy | null;
 }
 

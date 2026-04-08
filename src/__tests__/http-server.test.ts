@@ -349,6 +349,13 @@ describe('HTTP server', () => {
       body: JSON.stringify({ policy: { defaultDecision: 'yolo' } }),
     });
     expect(badPolicy.status).toBe(400);
+
+    const badPolicyChange = await fetch(`${base}/v1/context/config/escalation-policy`, {
+      method: 'PUT',
+      headers: adminHeaders,
+      body: JSON.stringify({ policy: { byChange: { broaden_viwe: 'deny' } } }),
+    });
+    expect(badPolicyChange.status).toBe(400);
   });
 
   it('denies expansion when maxTokenBudget ceiling is exceeded', async () => {
@@ -379,7 +386,7 @@ describe('HTTP server', () => {
       adminApiKey: 'secret-admin',
       escalationPolicy: {
         defaultDecision: 'allow',
-        maxView: 'user',
+        maxView: 'local_only',
       },
     });
 

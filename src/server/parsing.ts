@@ -6,6 +6,7 @@ import type {
   ContextGovernanceSnapshot,
 } from '../contracts/context-contract.js';
 import {
+  CONTEXT_ESCALATION_CHANGE_KINDS,
   CONTEXT_ESCALATION_RULE_DECISIONS,
 } from '../contracts/context-contract.js';
 import type { ActorRef, ContextViewPolicy } from '../contracts/coordination.js';
@@ -234,7 +235,13 @@ export function parseContextEscalationPolicy(
             }
             const parsed: NonNullable<ContextEscalationPolicy['byChange']> = {};
             for (const [key, decision] of Object.entries(value.byChange)) {
-              parsed[key as keyof typeof parsed] = requireEnum(
+              const changeKind = requireEnum(
+                key,
+                CONTEXT_ESCALATION_CHANGE_KINDS,
+                `${name}.byChange.${key}`,
+                fail,
+              );
+              parsed[changeKind] = requireEnum(
                 decision,
                 CONTEXT_ESCALATION_RULE_DECISIONS,
                 `${name}.byChange.${key}`,

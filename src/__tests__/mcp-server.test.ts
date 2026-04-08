@@ -248,6 +248,15 @@ describe('MCP server handler', () => {
       title: 'Missing instruction',
     });
     expect(badInvariant.isError).toBe(true);
+
+    const badPolicy = await handler.callTool('memory_set_context_escalation_policy', {
+      policy: {
+        byChange: {
+          broaden_viwe: 'deny',
+        },
+      },
+    } as never);
+    expect(badPolicy.isError).toBe(true);
   });
 
   it('denies expansion when maxTokenBudget ceiling is exceeded', async () => {

@@ -776,16 +776,22 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     governanceLoadPromise = (async () => {
       const persisted = await asyncAdapter.getGovernanceState?.(config.scope);
       if (persisted) {
-        defaultContextContract = persisted.defaultContract
-          ? cloneContextContract(persisted.defaultContract)
-          : null;
-        namedContextContracts.clear();
+        if (persisted.defaultContract?.state === 'set') {
+          defaultContextContract = cloneContextContract(persisted.defaultContract.contract);
+        } else if (persisted.defaultContract?.state === 'cleared') {
+          defaultContextContract = null;
+        }
         for (const [name, contract] of Object.entries(persisted.namedContracts)) {
           namedContextContracts.set(name, cloneContextContract({ name: contract.name ?? name, ...contract })!);
         }
-        contextInvariants.clear();
+        for (const name of persisted.deletedContractNames) {
+          namedContextContracts.delete(name);
+        }
         for (const inv of persisted.invariants) {
           contextInvariants.set(inv.id, cloneContextInvariant(inv));
+        }
+        for (const invariantId of persisted.deletedInvariantIds) {
+          contextInvariants.delete(invariantId);
         }
         if (persisted.escalationPolicy) {
           escalationPolicy = normalizeContextEscalationPolicy(persisted.escalationPolicy);
@@ -2141,7 +2147,9 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     async deleteContextContract(name) {
       await ensureGovernanceLoaded();
       const deleted = namedContextContracts.delete(name);
-      await asyncAdapter.deleteNamedContextContract?.(config.scope, name);
+      if (deleted) {
+        await asyncAdapter.deleteNamedContextContract?.(config.scope, name);
+      }
       return deleted;
     },
 
@@ -2158,7 +2166,9 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     async deleteContextInvariant(id) {
       await ensureGovernanceLoaded();
       const deleted = contextInvariants.delete(id);
-      await asyncAdapter.deleteContextInvariant?.(config.scope, id);
+      if (deleted) {
+        await asyncAdapter.deleteContextInvariant?.(config.scope, id);
+      }
       return deleted;
     },
 

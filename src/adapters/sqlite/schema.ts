@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-export const CURRENT_SCHEMA_VERSION = 17;
+export const CURRENT_SCHEMA_VERSION = 18;
 
 export function createSQLiteSchema(database: Database.Database): void {
   database.pragma('journal_mode = WAL');
@@ -775,7 +775,7 @@ export function createSQLiteSchema(database: Database.Database): void {
     );
   `);
 
-  // ──────────────────────────── context governance (v17) ────────────────────────────
+  // ──────────────────────────── context governance (v18) ────────────────────────────
   database.exec(`
     CREATE TABLE IF NOT EXISTS context_contracts (
       id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -784,14 +784,27 @@ export function createSQLiteSchema(database: Database.Database): void {
       workspace_id      TEXT    NOT NULL DEFAULT 'default',
       collaboration_id  TEXT    NOT NULL DEFAULT '',
       scope_id          TEXT    NOT NULL,
-      name              TEXT    NOT NULL,
-      is_default        INTEGER NOT NULL DEFAULT 0,
-      contract_json     TEXT    NOT NULL,
+      name              TEXT,
+      is_default        INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+      is_deleted        INTEGER NOT NULL DEFAULT 0 CHECK (is_deleted IN (0, 1)),
+      contract_json     TEXT,
       created_at        INTEGER NOT NULL,
-      updated_at        INTEGER NOT NULL
+      updated_at        INTEGER NOT NULL,
+      CHECK (
+        (is_default = 1 AND name IS NULL) OR
+        (is_default = 0 AND name IS NOT NULL)
+      ),
+      CHECK (
+        (is_deleted = 0 AND contract_json IS NOT NULL) OR
+        (is_deleted = 1 AND contract_json IS NULL)
+      )
     );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ctx_contract_scope_default
+      ON context_contracts(tenant_id, system_id, workspace_id, collaboration_id, scope_id)
+      WHERE is_default = 1;
     CREATE UNIQUE INDEX IF NOT EXISTS idx_ctx_contract_scope_name
-      ON context_contracts(tenant_id, system_id, workspace_id, collaboration_id, scope_id, name);
+      ON context_contracts(tenant_id, system_id, workspace_id, collaboration_id, scope_id, name)
+      WHERE is_default = 0;
 
     CREATE TABLE IF NOT EXISTS context_invariants (
       id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -801,12 +814,17 @@ export function createSQLiteSchema(database: Database.Database): void {
       collaboration_id  TEXT    NOT NULL DEFAULT '',
       scope_id          TEXT    NOT NULL,
       invariant_id      TEXT    NOT NULL,
-      title             TEXT    NOT NULL,
-      instruction       TEXT    NOT NULL,
+      title             TEXT,
+      instruction       TEXT,
       severity          TEXT,
       scope_level       TEXT,
+      is_deleted        INTEGER NOT NULL DEFAULT 0 CHECK (is_deleted IN (0, 1)),
       created_at        INTEGER NOT NULL,
-      updated_at        INTEGER NOT NULL
+      updated_at        INTEGER NOT NULL,
+      CHECK (
+        (is_deleted = 0 AND title IS NOT NULL AND instruction IS NOT NULL) OR
+        (is_deleted = 1 AND title IS NULL AND instruction IS NULL AND severity IS NULL AND scope_level IS NULL)
+      )
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_ctx_invariant_scope_id
       ON context_invariants(tenant_id, system_id, workspace_id, collaboration_id, scope_id, invariant_id);
@@ -825,4 +843,135 @@ export function createSQLiteSchema(database: Database.Database): void {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_ctx_escalation_scope
       ON context_escalation_policies(tenant_id, system_id, workspace_id, collaboration_id, scope_id);
   `);
+
+  if (existingVersion >= 17 && existingVersion < 18) {
+    database.exec(`
+      DROP INDEX IF EXISTS idx_ctx_contract_scope_default;
+      DROP INDEX IF EXISTS idx_ctx_contract_scope_name;
+      DROP INDEX IF EXISTS idx_ctx_invariant_scope_id;
+      ALTER TABLE context_contracts RENAME TO context_contracts_v17;
+      ALTER TABLE context_invariants RENAME TO context_invariants_v17;
+    `);
+
+    database.exec(`
+      CREATE TABLE context_contracts (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id         TEXT    NOT NULL,
+        system_id         TEXT    NOT NULL,
+        workspace_id      TEXT    NOT NULL DEFAULT 'default',
+        collaboration_id  TEXT    NOT NULL DEFAULT '',
+        scope_id          TEXT    NOT NULL,
+        name              TEXT,
+        is_default        INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+        is_deleted        INTEGER NOT NULL DEFAULT 0 CHECK (is_deleted IN (0, 1)),
+        contract_json     TEXT,
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL,
+        CHECK (
+          (is_default = 1 AND name IS NULL) OR
+          (is_default = 0 AND name IS NOT NULL)
+        ),
+        CHECK (
+          (is_deleted = 0 AND contract_json IS NOT NULL) OR
+          (is_deleted = 1 AND contract_json IS NULL)
+        )
+      );
+      CREATE UNIQUE INDEX idx_ctx_contract_scope_default
+        ON context_contracts(tenant_id, system_id, workspace_id, collaboration_id, scope_id)
+        WHERE is_default = 1;
+      CREATE UNIQUE INDEX idx_ctx_contract_scope_name
+        ON context_contracts(tenant_id, system_id, workspace_id, collaboration_id, scope_id, name)
+        WHERE is_default = 0;
+
+      INSERT INTO context_contracts (
+        tenant_id,
+        system_id,
+        workspace_id,
+        collaboration_id,
+        scope_id,
+        name,
+        is_default,
+        is_deleted,
+        contract_json,
+        created_at,
+        updated_at
+      )
+      SELECT
+        tenant_id,
+        system_id,
+        workspace_id,
+        collaboration_id,
+        scope_id,
+        CASE
+          WHEN is_default = 1 AND name = '__default__' THEN NULL
+          ELSE name
+        END,
+        CASE
+          WHEN is_default = 1 AND name = '__default__' THEN 1
+          ELSE 0
+        END,
+        0,
+        contract_json,
+        created_at,
+        updated_at
+      FROM context_contracts_v17;
+
+      CREATE TABLE context_invariants (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id         TEXT    NOT NULL,
+        system_id         TEXT    NOT NULL,
+        workspace_id      TEXT    NOT NULL DEFAULT 'default',
+        collaboration_id  TEXT    NOT NULL DEFAULT '',
+        scope_id          TEXT    NOT NULL,
+        invariant_id      TEXT    NOT NULL,
+        title             TEXT,
+        instruction       TEXT,
+        severity          TEXT,
+        scope_level       TEXT,
+        is_deleted        INTEGER NOT NULL DEFAULT 0 CHECK (is_deleted IN (0, 1)),
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL,
+        CHECK (
+          (is_deleted = 0 AND title IS NOT NULL AND instruction IS NOT NULL) OR
+          (is_deleted = 1 AND title IS NULL AND instruction IS NULL AND severity IS NULL AND scope_level IS NULL)
+        )
+      );
+      CREATE UNIQUE INDEX idx_ctx_invariant_scope_id
+        ON context_invariants(tenant_id, system_id, workspace_id, collaboration_id, scope_id, invariant_id);
+
+      INSERT INTO context_invariants (
+        tenant_id,
+        system_id,
+        workspace_id,
+        collaboration_id,
+        scope_id,
+        invariant_id,
+        title,
+        instruction,
+        severity,
+        scope_level,
+        is_deleted,
+        created_at,
+        updated_at
+      )
+      SELECT
+        tenant_id,
+        system_id,
+        workspace_id,
+        collaboration_id,
+        scope_id,
+        invariant_id,
+        title,
+        instruction,
+        severity,
+        scope_level,
+        0,
+        created_at,
+        updated_at
+      FROM context_invariants_v17;
+
+      DROP TABLE context_contracts_v17;
+      DROP TABLE context_invariants_v17;
+    `);
+  }
 }
