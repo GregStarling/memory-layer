@@ -57,6 +57,7 @@ function makeSnapshotContext(): MemoryContext {
       tokenTrimming: {
         initialTokenEstimate: 42,
         finalTokenEstimate: 42,
+        droppedInvariantIds: [],
         droppedTurnIds: [],
         droppedSummaryIds: [],
         droppedPlaybookIds: [],

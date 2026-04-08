@@ -1,4 +1,5 @@
 import type { KnowledgeMemory, Playbook, WorkItem, WorkingMemory } from '../contracts/types.js';
+import type { ContextInvariant } from '../contracts/context-contract.js';
 import type { Profile, ProfileSection } from '../contracts/profile.js';
 import type { MemoryContext } from './context.js';
 
@@ -11,6 +12,7 @@ export interface SessionBootstrap {
   activeObjectives: WorkItem[];
   unresolvedWork: string[];
   coordinationState?: MemoryContext['coordinationState'] | null;
+  invariants?: ContextInvariant[];
   profile?: Profile | null;
 }
 
@@ -67,6 +69,11 @@ function formatKnowledgeLine(knowledge: KnowledgeMemory, options?: FormatOptions
   return suffix.length > 0 ? `- ${knowledge.fact} [${suffix.join(', ')}]` : `- ${knowledge.fact}`;
 }
 
+function formatInvariantLine(invariant: ContextInvariant): string {
+  const meta = [invariant.severity ?? 'important', invariant.scopeLevel ?? 'scope'].join(', ');
+  return `- ${invariant.title}: ${invariant.instruction} [${meta}]`;
+}
+
 export function formatContextForPrompt(
   context: MemoryContext,
   options?: FormatOptions,
@@ -105,6 +112,13 @@ export function formatContextForPrompt(
         ? context.sessionState.recentOutputs.join(' | ')
         : 'None'
     }`,
+    ...(context.invariants?.length
+      ? [
+          '',
+          formatHeading('Safety Invariants', options),
+          ...context.invariants.map((invariant) => formatInvariantLine(invariant)),
+        ]
+      : []),
     '',
     formatHeading('Active State', options),
     ...(context.activeState.length > 0 ? context.activeState.map((item) => `- ${item}`) : ['- None']),
@@ -240,6 +254,13 @@ export function formatBootstrapForPrompt(
         ? bootstrap.sessionState.recentOutputs.join(' | ')
         : 'None'
     }`,
+    ...(bootstrap.invariants?.length
+      ? [
+          '',
+          formatHeading('Bootstrap Invariants', options),
+          ...bootstrap.invariants.map((invariant) => formatInvariantLine(invariant)),
+        ]
+      : []),
     '',
     formatHeading('Bootstrap Working Memory', options),
     bootstrap.workingMemory?.summary ?? 'None',

@@ -76,6 +76,7 @@ function makeContext(): MemoryContext {
     activeObjectives: [],
     activeState: ['topic:memory'],
     associatedKnowledge: [],
+    invariants: [],
     unresolvedWork: ['Need to add prompt formatter'],
     knowledgeSelectionReasons: [],
     debugTrace: {
@@ -104,6 +105,7 @@ function makeContext(): MemoryContext {
       tokenTrimming: {
         initialTokenEstimate: 100,
         finalTokenEstimate: 100,
+        droppedInvariantIds: [],
         droppedTurnIds: [],
         droppedSummaryIds: [],
         droppedPlaybookIds: [],
@@ -147,6 +149,24 @@ describe('formatter helpers', () => {
     expect(text).toContain('confidence=high');
     expect(text).toContain('status=verified');
     expect(text).toContain('state=trusted');
+  });
+
+  it('renders injected safety invariants in the prompt', () => {
+    const context = makeContext();
+    context.invariants = [
+      {
+        id: 'prod-data',
+        title: 'Production data safety',
+        instruction: 'Never delete production data without explicit approval.',
+        severity: 'critical',
+        scopeLevel: 'workspace',
+      },
+    ];
+
+    const text = formatContextForPrompt(context);
+    expect(text).toContain('Safety Invariants');
+    expect(text).toContain('Production data safety');
+    expect(text).toContain('Never delete production data without explicit approval.');
   });
 
   it('appends temporal qualifier for fact with valid_from', () => {

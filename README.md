@@ -485,6 +485,59 @@ Start with a preset. Override only when you need to.
 const memory = createMemory({ preset: 'autonomous_agent' });
 ```
 
+### Context Contracts
+
+Use context contracts when different agents should see different slices of the same memory graph.
+
+```typescript
+const memory = createMemory({
+  preset: 'ai_ide',
+  contextContracts: {
+    planner: {
+      view: 'workspace_shared',
+      crossScopeLevel: 'workspace',
+      maxKnowledgeItems: 12,
+      knowledgeClasses: ['constraint', 'procedure', 'strategy'],
+      minimumTrustScore: 0.75,
+      includeCoordinationState: true,
+    },
+    executor: {
+      view: 'local_only',
+      crossScopeLevel: 'scope',
+      maxKnowledgeItems: 8,
+      knowledgeClasses: ['constraint', 'procedure'],
+      minimumTrustScore: 0.8,
+    },
+  },
+  invariants: [
+    {
+      id: 'prod-data',
+      title: 'Production data safety',
+      instruction: 'Never delete production data without explicit approval.',
+      severity: 'critical',
+      scopeLevel: 'workspace',
+    },
+  ],
+});
+
+const plannerContext = await memory.getContext('rollback plan', {
+  contract: 'planner',
+});
+const executorContext = await memory.getContext('apply rollback', {
+  contract: 'executor',
+});
+```
+
+Contracts bundle existing context knobs into a reusable lens:
+
+- `view` and `crossScopeLevel` control visibility and widening
+- `knowledgeClasses` and `minimumTrustScore` narrow the eligible knowledge set
+- `tokenBudget`, `maxKnowledgeItems`, and `maxRecentSummaries` control prompt size
+- `includeCoordinationState` opts coordination artifacts into the assembled context
+
+Invariants are injected separately from ranked retrieval. They always surface ahead of normal prompt sections, and when the token budget is tight the system drops lower-priority invariants before `critical` ones.
+Within the non-critical set, more local invariants outrank broader ones (`scope` before `system`, `workspace`, then `tenant`).
+
 ### Quality Modes
 
 Orthogonal to presets. Controls how aggressively the system trusts and retains knowledge.
@@ -600,11 +653,11 @@ interface MemoryManager {
   }>
 
   // --- Retrieve ---
-  getContext(relevanceQuery?): Promise<MemoryContext>
-  getContextAt(asOf, relevanceQuery?): Promise<MemoryContext>
-  getSessionBootstrap(relevanceQuery?): Promise<SessionBootstrap>
-  getSessionBootstrapAt(asOf, relevanceQuery?): Promise<SessionBootstrap>
-  captureSnapshot(relevanceQuery?): Promise<SnapshotData>
+  getContext(relevanceQuery?, options?): Promise<MemoryContext>
+  getContextAt(asOf, relevanceQuery?, options?): Promise<MemoryContext>
+  getSessionBootstrap(relevanceQuery?, options?): Promise<SessionBootstrap>
+  getSessionBootstrapAt(asOf, relevanceQuery?, options?): Promise<SessionBootstrap>
+  captureSnapshot(relevanceQuery?, options?): Promise<SnapshotData>
   search(query, options?): Promise<{ turns, knowledge }>
   searchCrossScope(query, level, options?): Promise<{ knowledge }>
   listKnowledgeChanges(options?): Promise<{ changes, nextCursor }>

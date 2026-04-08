@@ -13,7 +13,13 @@ import type { ContextMode, ContextPolicy } from '../contracts/policy.js';
 import { DEFAULT_CONTEXT_POLICY } from '../contracts/policy.js';
 import type { SessionState } from '../contracts/session-state.js';
 import type {
+  AppliedContextContract,
+  ContextContract,
+  ContextInvariant,
+} from '../contracts/context-contract.js';
+import type {
   Association,
+  KnowledgeClass,
   KnowledgeMemory,
   Playbook,
   SearchResult,
@@ -48,6 +54,10 @@ export interface ContextAssemblyOptions {
   view?: ContextViewPolicy;
   viewer?: ActorRef;
   includeCoordinationState?: boolean;
+  contract?: ContextContract;
+  invariants?: ContextInvariant[];
+  knowledgeClasses?: KnowledgeClass[];
+  minimumTrustScore?: number;
 }
 
 export interface KnowledgeSelectionReason {
@@ -82,6 +92,7 @@ export interface AssociationExpansionTrace {
 export interface TokenTrimTrace {
   initialTokenEstimate: number;
   finalTokenEstimate: number;
+  droppedInvariantIds: string[];
   droppedTurnIds: number[];
   droppedSummaryIds: number[];
   droppedPlaybookIds: number[];
@@ -123,6 +134,8 @@ export interface MemoryContext {
   coordinationState: CoordinationState | null;
   relevantPlaybooks?: Playbook[];
   associatedKnowledge: KnowledgeMemory[];
+  invariants?: ContextInvariant[];
+  appliedContract?: AppliedContextContract | null;
   knowledgeSelectionReasons: KnowledgeSelectionReason[];
   debugTrace: ContextDebugTrace;
   tokenEstimate: number;
@@ -215,6 +228,28 @@ export function resolveVisibleKnowledge(
   return items.filter((item) => isVisibilityAllowed(item.visibility_class, item, scope, view));
 }
 
+export function filterKnowledgeByContextRequirements(
+  items: KnowledgeMemory[],
+  options?: {
+    knowledgeClasses?: KnowledgeClass[];
+    minimumTrustScore?: number;
+  },
+): KnowledgeMemory[] {
+  return items.filter((item) => {
+    if (
+      options?.knowledgeClasses &&
+      options.knowledgeClasses.length > 0 &&
+      !options.knowledgeClasses.includes(item.knowledge_class)
+    ) {
+      return false;
+    }
+    if (options?.minimumTrustScore != null && item.trust_score < options.minimumTrustScore) {
+      return false;
+    }
+    return true;
+  });
+}
+
 export function resolveVisibleWorkItems(
   items: WorkItem[],
   scope: MemoryScope,
@@ -228,6 +263,14 @@ export function resolveVisiblePlaybooks(
   scope: MemoryScope,
   view: ContextViewPolicy,
 ): Playbook[] {
+  return items.filter((item) => isVisibilityAllowed(item.visibility_class, item, scope, view));
+}
+
+export function resolveVisibleAssociations(
+  items: Association[],
+  scope: MemoryScope,
+  view: ContextViewPolicy,
+): Association[] {
   return items.filter((item) => isVisibilityAllowed(item.visibility_class, item, scope, view));
 }
 
@@ -248,20 +291,26 @@ export function resolveVisibleHandoffs(
 }
 
 function resolveContextPolicy(options?: ContextAssemblyOptions): Required<ContextPolicy> {
+  const contract = options?.contract;
   const base = {
     ...DEFAULT_CONTEXT_POLICY,
     ...options?.policy,
     mode: options?.mode ?? options?.policy?.mode ?? DEFAULT_CONTEXT_POLICY.mode,
     maxKnowledgeItems:
       options?.maxKnowledgeItems ??
+      contract?.maxKnowledgeItems ??
       options?.policy?.maxKnowledgeItems ??
       DEFAULT_CONTEXT_POLICY.maxKnowledgeItems,
     maxRecentSummaries:
       options?.maxRecentSummaries ??
+      contract?.maxRecentSummaries ??
       options?.policy?.maxRecentSummaries ??
       DEFAULT_CONTEXT_POLICY.maxRecentSummaries,
     tokenBudget:
-      options?.tokenBudget ?? options?.policy?.tokenBudget ?? DEFAULT_CONTEXT_POLICY.tokenBudget,
+      options?.tokenBudget ??
+      contract?.tokenBudget ??
+      options?.policy?.tokenBudget ??
+      DEFAULT_CONTEXT_POLICY.tokenBudget,
   };
   if (base.mode === 'coding') {
     return {
@@ -285,6 +334,94 @@ function resolveContextPolicy(options?: ContextAssemblyOptions): Required<Contex
     };
   }
   return base;
+}
+
+function resolveAppliedContextContract(
+  options: ContextAssemblyOptions | undefined,
+  policy: Required<ContextPolicy>,
+  view: ContextViewPolicy | undefined,
+  crossScopeLevel: ScopeLevel | undefined,
+  includeCoordinationState: boolean,
+): AppliedContextContract | null {
+  const contract = options?.contract;
+  const knowledgeClasses = options?.knowledgeClasses ?? contract?.knowledgeClasses;
+  const minimumTrustScore = options?.minimumTrustScore ?? contract?.minimumTrustScore ?? null;
+  const hasContractFields =
+    contract != null ||
+    options?.knowledgeClasses != null ||
+    options?.minimumTrustScore != null ||
+    options?.includeCoordinationState != null ||
+    options?.view != null ||
+    options?.crossScopeLevel != null ||
+    options?.tokenBudget != null ||
+    options?.maxKnowledgeItems != null ||
+    options?.maxRecentSummaries != null;
+  if (!hasContractFields) return null;
+  return {
+    name: contract?.name,
+    view,
+    crossScopeLevel,
+    tokenBudget: policy.tokenBudget,
+    maxKnowledgeItems: policy.maxKnowledgeItems,
+    maxRecentSummaries: policy.maxRecentSummaries,
+    knowledgeClasses: knowledgeClasses ? [...knowledgeClasses] : null,
+    minimumTrustScore,
+    includeCoordinationState,
+  };
+}
+
+function normalizeContextInvariants(invariants: ContextInvariant[] | undefined): ContextInvariant[] {
+  if (!invariants || invariants.length === 0) return [];
+  const seen = new Set<string>();
+  const normalized: ContextInvariant[] = [];
+  for (const invariant of invariants) {
+    if (!invariant?.id || seen.has(invariant.id)) continue;
+    seen.add(invariant.id);
+    normalized.push({
+      ...invariant,
+      severity: invariant.severity ?? 'important',
+      scopeLevel: invariant.scopeLevel ?? 'scope',
+    });
+  }
+  return normalized;
+}
+
+function scopeLevelPriority(level: ScopeLevel): number {
+  switch (level) {
+    case 'scope':
+      return 4;
+    case 'system':
+      return 3;
+    case 'workspace':
+      return 2;
+    case 'tenant':
+    default:
+      return 1;
+  }
+}
+
+function severityPriority(severity: NonNullable<ContextInvariant['severity']>): number {
+  switch (severity) {
+    case 'critical':
+      return 3;
+    case 'important':
+      return 2;
+    case 'advisory':
+    default:
+      return 1;
+  }
+}
+
+function sortContextInvariants(invariants: ContextInvariant[]): ContextInvariant[] {
+  return [...invariants].sort((left, right) => {
+    const severityDelta =
+      severityPriority(right.severity ?? 'important') - severityPriority(left.severity ?? 'important');
+    if (severityDelta !== 0) return severityDelta;
+    const scopeDelta =
+      scopeLevelPriority(right.scopeLevel ?? 'scope') - scopeLevelPriority(left.scopeLevel ?? 'scope');
+    if (scopeDelta !== 0) return scopeDelta;
+    return left.id.localeCompare(right.id);
+  });
 }
 
 function deriveCurrentObjective(
@@ -691,8 +828,19 @@ export async function buildMemoryContext(
   const policy = resolveContextPolicy(options);
   const tokenEstimator = options?.tokenEstimator ?? estimateTokens;
   const asOf = options?.asOf;
-  const view = options?.view;
-  const effectiveScopeLevel = resolveContextScopeLevel(options?.crossScopeLevel, view);
+  const view = options?.view ?? options?.contract?.view;
+  const configuredScopeLevel = options?.crossScopeLevel ?? options?.contract?.crossScopeLevel;
+  const effectiveScopeLevel = resolveContextScopeLevel(configuredScopeLevel, view);
+  const includeCoordinationState =
+    options?.includeCoordinationState ?? options?.contract?.includeCoordinationState ?? false;
+  const appliedContract = resolveAppliedContextContract(
+    options,
+    policy,
+    view,
+    effectiveScopeLevel,
+    includeCoordinationState,
+  );
+  const invariants = sortContextInvariants(normalizeContextInvariants(options?.invariants));
 
   let activeTurns = await adapter.getActiveTurns(normalizedScope, options?.sessionId);
   if (asOf != null) {
@@ -785,16 +933,20 @@ export async function buildMemoryContext(
             item.scope_id === normalizedScope.scope_id ||
             (normalizedScope.collaboration_id.length > 0 &&
               item.collaboration_id === normalizedScope.collaboration_id) ||
-            getLineageScore(normalizedScope.scope_id, item.scope_id) >= policy.minimumLineageScore,
+              getLineageScore(normalizedScope.scope_id, item.scope_id) >= policy.minimumLineageScore,
         )
       : temporalKnowledge;
+  const filteredKnowledge = filterKnowledgeByContextRequirements(scopedKnowledge, {
+    knowledgeClasses: options?.knowledgeClasses ?? options?.contract?.knowledgeClasses,
+    minimumTrustScore: options?.minimumTrustScore ?? options?.contract?.minimumTrustScore,
+  });
   const relevanceTexts = [
     options?.relevanceQuery ?? '',
     workingMemory?.summary ?? '',
     ...activeObjectives.map((item) => item.title),
   ].filter((value) => value.trim().length > 0);
   const candidates = buildCandidates(
-    scopedKnowledge,
+    filteredKnowledge,
     lexicalRanks,
     semanticRanks,
     policy,
@@ -855,7 +1007,7 @@ export async function buildMemoryContext(
       detail: `excluded:${candidate.item.knowledge_state}:${candidate.item.knowledge_class}`,
     }));
 
-  const scopedKnowledgeById = new Map(scopedKnowledge.map((item) => [item.id, item]));
+  const scopedKnowledgeById = new Map(filteredKnowledge.map((item) => [item.id, item]));
   let relevantPlaybooks: Playbook[] = options?.relevanceQuery
     ? (
         effectiveScopeLevel && effectiveScopeLevel !== 'scope'
@@ -955,9 +1107,11 @@ export async function buildMemoryContext(
 
   let trimmedSummaries = [...recentSummaries];
   let trimmedAssociated = [...associatedKnowledge];
+  let trimmedInvariants = [...invariants];
   const tokenTrimTrace: TokenTrimTrace = {
     initialTokenEstimate: 0,
     finalTokenEstimate: 0,
+    droppedInvariantIds: [],
     droppedTurnIds: [],
     droppedSummaryIds: [],
     droppedPlaybookIds: [],
@@ -969,6 +1123,9 @@ export async function buildMemoryContext(
     return computeContextTokenEstimate(
       activeTurns, workingMemory, relevantKnowledge, trimmedSummaries,
       tokenEstimator, relevantPlaybooks, trimmedAssociated,
+    ) + trimmedInvariants.reduce(
+      (acc, invariant) => acc + tokenEstimator(invariant.title) + tokenEstimator(invariant.instruction),
+      0,
     );
   }
 
@@ -991,6 +1148,20 @@ export async function buildMemoryContext(
     const removed = trimmedSummaries[trimmedSummaries.length - 1];
     if (removed) tokenTrimTrace.droppedSummaryIds.push(removed.id);
     trimmedSummaries = trimmedSummaries.slice(0, -1);
+    tokenEstimate = recomputeTokens();
+  }
+
+  while (
+    tokenEstimate > policy.tokenBudget &&
+    trimmedInvariants.some((invariant) => invariant.severity !== 'critical')
+  ) {
+    const removableIndex = [...trimmedInvariants]
+      .map((invariant, index) => ({ invariant, index }))
+      .reverse()
+      .find(({ invariant }) => invariant.severity !== 'critical')?.index;
+    if (removableIndex == null) break;
+    const [removed] = trimmedInvariants.splice(removableIndex, 1);
+    if (removed) tokenTrimTrace.droppedInvariantIds.push(removed.id);
     tokenEstimate = recomputeTokens();
   }
 
@@ -1049,7 +1220,7 @@ export async function buildMemoryContext(
     await adapter.touchKnowledgeMemories(relevantKnowledge.map((knowledge) => knowledge.id));
   }
 
-  const rawWorkClaims = options?.includeCoordinationState || view
+  const rawWorkClaims = includeCoordinationState || view
     ? await (
       effectiveScopeLevel && effectiveScopeLevel !== 'scope'
         ? adapter.listWorkClaimsCrossScope(normalizedScope, effectiveScopeLevel, {
@@ -1073,7 +1244,7 @@ export async function buildMemoryContext(
   const workClaims = view
     ? resolveVisibleWorkClaims(rawWorkClaims, normalizedScope, view)
     : rawWorkClaims;
-  const rawHandoffs = options?.includeCoordinationState || view
+  const rawHandoffs = includeCoordinationState || view
     ? await (
       effectiveScopeLevel && effectiveScopeLevel !== 'scope'
         ? adapter.listHandoffsCrossScope(normalizedScope, effectiveScopeLevel, {
@@ -1096,7 +1267,7 @@ export async function buildMemoryContext(
     : [];
   const handoffs = view ? resolveVisibleHandoffs(rawHandoffs, normalizedScope, view) : rawHandoffs;
   const coordinationState: CoordinationState | null =
-    options?.includeCoordinationState || view
+    includeCoordinationState || view
       ? {
           ownedClaims: options?.viewer
             ? workClaims.filter(
@@ -1205,6 +1376,8 @@ export async function buildMemoryContext(
     coordinationState,
     relevantPlaybooks,
     associatedKnowledge: trimmedAssociated,
+    invariants: trimmedInvariants,
+    appliedContract,
     unresolvedWork,
     knowledgeSelectionReasons,
     debugTrace,

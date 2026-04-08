@@ -73,6 +73,128 @@ describe('memory manager', () => {
     await manager.close();
   });
 
+  it('resolves named context contracts through the manager API', async () => {
+    const scope = makeScope();
+    const manager = createMemoryManager({
+      adapter,
+      scope,
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      autoCompact: false,
+      contextContract: {
+        maxKnowledgeItems: 10,
+      },
+      contextContracts: {
+        constraints_only: {
+          knowledgeClasses: ['constraint'],
+          minimumTrustScore: 0.8,
+        },
+      },
+      invariants: [
+        {
+          id: 'english-only',
+          title: 'Language',
+          instruction: 'All responses must be in English.',
+          severity: 'important',
+        },
+      ],
+    });
+
+    adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'Never bypass the approval gate',
+      fact_type: 'constraint',
+      knowledge_class: 'constraint',
+      trust_score: 0.95,
+      source: 'manual',
+      confidence: 'high',
+    });
+    adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'The codename is Atlas',
+      fact_type: 'reference',
+      knowledge_class: 'project_fact',
+      trust_score: 0.95,
+      source: 'manual',
+      confidence: 'high',
+    });
+
+    const context = await manager.getContext(undefined, { contract: 'constraints_only' });
+
+    expect(context.appliedContract?.name).toBe('constraints_only');
+    expect(context.relevantKnowledge.map((item) => item.fact)).toEqual([
+      'Never bypass the approval gate',
+    ]);
+    expect(context.invariants?.map((item) => item.id)).toEqual(['english-only']);
+    await manager.close();
+  });
+
+  it('keeps named contract boundaries consistent across context, state, and bootstrap surfaces', async () => {
+    const scope = makeScope();
+    const manager = createMemoryManager({
+      adapter,
+      scope,
+      sessionId: 'session-1',
+      summarizer: async () => ({
+        summary: 'summary',
+        key_entities: [],
+        topic_tags: [],
+      }),
+      autoCompact: false,
+      contextContracts: {
+        constraints_only: {
+          knowledgeClasses: ['constraint'],
+          minimumTrustScore: 0.8,
+        },
+      },
+    });
+
+    await manager.processTurn('user', 'Please remember the deploy rules.');
+    adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'Never bypass the approval gate',
+      fact_type: 'constraint',
+      knowledge_class: 'constraint',
+      trust_score: 0.95,
+      source: 'manual',
+      confidence: 'high',
+    });
+    adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'The codename is Atlas',
+      fact_type: 'reference',
+      knowledge_class: 'project_fact',
+      trust_score: 0.95,
+      source: 'manual',
+      confidence: 'high',
+    });
+
+    const asOf = Math.floor(Date.now() / 1000) + 1;
+    const [context, historicalContext, state, bootstrap] = await Promise.all([
+      manager.getContext(undefined, { contract: 'constraints_only' }),
+      manager.getContextAt(asOf, undefined, { contract: 'constraints_only' }),
+      manager.getStateAt(asOf, { contract: 'constraints_only' }),
+      manager.getSessionBootstrap(undefined, { contract: 'constraints_only' }),
+    ]);
+    const bootstrapFacts = Object.values(bootstrap.profile?.sections ?? {}).flat().map((entry) => entry.fact);
+
+    expect(context.relevantKnowledge.map((item) => item.fact)).toEqual([
+      'Never bypass the approval gate',
+    ]);
+    expect(historicalContext.relevantKnowledge.map((item) => item.fact)).toEqual([
+      'Never bypass the approval gate',
+    ]);
+    expect(state.knowledge.map((item) => item.fact)).toEqual([
+      'Never bypass the approval gate',
+    ]);
+    expect(bootstrapFacts).toEqual(['Never bypass the approval gate']);
+    await manager.close();
+  });
+
   it('can build temporal snapshots with getContextAt', async () => {
     const scope = makeScope();
     const manager = createMemoryManager({

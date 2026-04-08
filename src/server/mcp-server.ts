@@ -985,6 +985,14 @@ function serializeContextResponse(
       trust_score: knowledge.trust_score,
     })),
     unresolvedWork: context.unresolvedWork,
+    invariants: context.invariants?.map((invariant) => ({
+      id: invariant.id,
+      title: invariant.title,
+      instruction: invariant.instruction,
+      severity: invariant.severity,
+      scope_level: invariant.scopeLevel,
+    })),
+    appliedContract: context.appliedContract ?? null,
     coordinationState: context.coordinationState
       ? {
           ownedClaims: context.coordinationState.ownedClaims.map(serializeWorkClaim),

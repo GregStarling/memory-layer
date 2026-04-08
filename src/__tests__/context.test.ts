@@ -385,4 +385,93 @@ describe('buildMemoryContext', () => {
     const ids = context.associatedKnowledge.map((k) => k.id);
     expect(ids.indexOf(extractedTarget.id)).toBeLessThan(ids.indexOf(inferredTarget.id));
   });
+
+  it('applies context contract filters and injects invariants separately from ranked knowledge', async () => {
+    const scope = makeScope();
+    seedTurns(adapter, scope, 2);
+    adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'Never skip the deployment checklist',
+      fact_type: 'constraint',
+      knowledge_class: 'constraint',
+      trust_score: 0.95,
+      source: 'manual',
+      confidence: 'high',
+    });
+    adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'The project codename is Atlas',
+      fact_type: 'reference',
+      knowledge_class: 'project_fact',
+      trust_score: 0.95,
+      source: 'manual',
+      confidence: 'high',
+    });
+    adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'Weakly supported rollback rule',
+      fact_type: 'constraint',
+      knowledge_class: 'constraint',
+      source: 'manual',
+      confidence: 'low',
+      trust_score: 0.3,
+    });
+
+    const context = await buildMemoryContext(asyncAdapter, scope, {
+      contract: {
+        name: 'constraint_focus',
+        knowledgeClasses: ['constraint'],
+        minimumTrustScore: 0.8,
+        maxKnowledgeItems: 5,
+      },
+      invariants: [
+        {
+          id: 'prod-data',
+          title: 'Production data safety',
+          instruction: 'Never delete production data without explicit approval.',
+          severity: 'critical',
+        },
+      ],
+    });
+
+    expect(context.appliedContract?.name).toBe('constraint_focus');
+    expect(context.appliedContract?.knowledgeClasses).toEqual(['constraint']);
+    expect(context.relevantKnowledge.map((item) => item.fact)).toEqual([
+      'Never skip the deployment checklist',
+    ]);
+    expect(context.invariants).toEqual([
+      expect.objectContaining({
+        id: 'prod-data',
+        severity: 'critical',
+        scopeLevel: 'scope',
+      }),
+    ]);
+  });
+
+  it('drops lower-priority invariants before critical ones when over token budget', async () => {
+    const scope = makeScope();
+    const context = await buildMemoryContext(asyncAdapter, scope, {
+      tokenBudget: 70,
+      tokenEstimator: (text) => text.length,
+      invariants: [
+        {
+          id: 'critical',
+          title: 'Critical rule',
+          instruction: 'Never delete production data.',
+          severity: 'critical',
+          scopeLevel: 'workspace',
+        },
+        {
+          id: 'advisory',
+          title: 'Advisory rule',
+          instruction: 'Prefer concise changelog wording.',
+          severity: 'advisory',
+          scopeLevel: 'tenant',
+        },
+      ],
+    });
+
+    expect(context.invariants?.map((item) => item.id)).toEqual(['critical']);
+    expect(context.debugTrace.tokenTrimming.droppedInvariantIds).toEqual(['advisory']);
+  });
 });

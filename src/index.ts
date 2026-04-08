@@ -82,6 +82,14 @@ export { createStreamCollector, processStreamingTurn } from './core/streaming.js
 
 export { widenScope } from './contracts/identity.js';
 export type { MemoryScope, NormalizedMemoryScope, ScopeLevel, ScopeQuery } from './contracts/identity.js';
+export type {
+  ContextInvariantSeverity,
+  ContextInvariant,
+  ContextContract,
+  ContextContractReference,
+  AppliedContextContract,
+} from './contracts/context-contract.js';
+export { CONTEXT_INVARIANT_SEVERITIES } from './contracts/context-contract.js';
 export type { StorageAdapter } from './contracts/storage.js';
 export type { AsyncStorageAdapter } from './contracts/async-storage.js';
 export type { SessionState } from './contracts/session-state.js';
@@ -328,6 +336,7 @@ export type {
   KnowledgeChangeResult,
   MemoryManager,
   MemoryManagerConfig,
+  ContextQueryOptions,
 } from './core/manager.js';
 export type { CreateMemoryOptions, CreateMemoryAsyncOptions } from './core/quick.js';
 export type { MemoryQualityMode, MemoryQualityTier } from './core/quick.js';

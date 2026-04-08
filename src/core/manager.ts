@@ -8,7 +8,7 @@ import type {
   WorkClaim,
   WorkItemPatch,
 } from '../contracts/coordination.js';
-import { matchesScope, normalizeScope, type MemoryScope, type ScopeLevel } from '../contracts/identity.js';
+import { normalizeScope, type MemoryScope, type ScopeLevel } from '../contracts/identity.js';
 import {
   ProviderUnavailableError,
   ResourceNotFoundError,
@@ -22,6 +22,11 @@ import type {
   MaintenancePolicy,
   MonitorPolicy,
 } from '../contracts/policy.js';
+import type {
+  ContextContract,
+  ContextContractReference,
+  ContextInvariant,
+} from '../contracts/context-contract.js';
 import {
   DEFAULT_CONTEXT_POLICY,
   DEFAULT_MAINTENANCE_POLICY,
@@ -62,9 +67,11 @@ import type {
 import {
   buildDerivedShortTermState,
   buildMemoryContext,
+  filterKnowledgeByContextRequirements,
   getContextWorkItems,
   resolveContextScopeLevel,
   resolveVisibleHandoffs,
+  resolveVisibleAssociations,
   resolveVisibleKnowledge,
   resolveVisiblePlaybooks,
   resolveVisibleWorkClaims,
@@ -176,6 +183,9 @@ export interface MemoryManagerConfig {
   contextPolicy?: ContextPolicy;
   maintenancePolicy?: MaintenancePolicy;
   crossScopeLevel?: ScopeLevel;
+  contextContract?: ContextContract;
+  contextContracts?: Record<string, ContextContract>;
+  invariants?: ContextInvariant[];
   tokenEstimator?: TokenEstimator;
   autoCompact?: boolean;
   autoExtract?: boolean;
@@ -193,6 +203,14 @@ export interface MemoryManagerConfig {
   closeAdapter?: boolean;
   aliasMap?: AliasMap;
   ontology?: OntologyConfig;
+}
+
+export interface ContextQueryOptions {
+  view?: ContextViewPolicy;
+  viewer?: ActorRef;
+  includeCoordinationState?: boolean;
+  contract?: ContextContractReference;
+  invariants?: ContextInvariant[];
 }
 
 export interface KnowledgeChangeRecord {
@@ -216,20 +234,12 @@ export interface MemoryManager {
   ): Promise<{ userTurn: Turn; assistantTurn: Turn; compactionResult: CompactionResult | null }>;
   getContext(
     relevanceQuery?: string,
-    options?: {
-      view?: ContextViewPolicy;
-      viewer?: ActorRef;
-      includeCoordinationState?: boolean;
-    },
+    options?: ContextQueryOptions,
   ): Promise<MemoryContext>;
   getContextAt(
     asOf: number,
     relevanceQuery?: string,
-    options?: {
-      view?: ContextViewPolicy;
-      viewer?: ActorRef;
-      includeCoordinationState?: boolean;
-    },
+    options?: ContextQueryOptions,
   ): Promise<MemoryContext>;
   getStateAt(
     asOf: number,
@@ -238,6 +248,8 @@ export interface MemoryManager {
       view?: ContextViewPolicy;
       viewer?: ActorRef;
       includeCoordinationState?: boolean;
+      contract?: ContextContractReference;
+      invariants?: ContextInvariant[];
     },
   ): Promise<TemporalStateSnapshot<MemoryContext>>;
   getTimeline(options?: {
@@ -270,28 +282,16 @@ export interface MemoryManager {
   }): Promise<TimelineResult>;
   getSessionBootstrap(
     relevanceQuery?: string,
-    options?: {
-      view?: ContextViewPolicy;
-      viewer?: ActorRef;
-      includeCoordinationState?: boolean;
-    },
+    options?: ContextQueryOptions,
   ): Promise<SessionBootstrap>;
   getSessionBootstrapAt(
     asOf: number,
     relevanceQuery?: string,
-    options?: {
-      view?: ContextViewPolicy;
-      viewer?: ActorRef;
-      includeCoordinationState?: boolean;
-    },
+    options?: ContextQueryOptions,
   ): Promise<SessionBootstrap>;
   captureSnapshot(
     relevanceQuery?: string,
-    options?: {
-      view?: ContextViewPolicy;
-      viewer?: ActorRef;
-      includeCoordinationState?: boolean;
-    },
+    options?: ContextQueryOptions,
   ): Promise<{
     bootstrap: SessionBootstrap;
     context: MemoryContext;
@@ -490,6 +490,31 @@ function manualKnowledgeClassForFactType(factType: FactType): KnowledgeMemory['k
   }
 }
 
+function mergeContextContract(
+  base: ContextContract | undefined,
+  override: ContextContract | undefined,
+): ContextContract | undefined {
+  if (!base && !override) return undefined;
+  return {
+    ...base,
+    ...override,
+    knowledgeClasses: override?.knowledgeClasses ?? base?.knowledgeClasses,
+  };
+}
+
+function mergeContextInvariants(
+  base: ContextInvariant[] | undefined,
+  override: ContextInvariant[] | undefined,
+): ContextInvariant[] {
+  const merged = [...(base ?? []), ...(override ?? [])];
+  if (merged.length === 0) return [];
+  const deduped = new Map<string, ContextInvariant>();
+  for (const invariant of merged) {
+    deduped.set(invariant.id, invariant);
+  }
+  return [...deduped.values()];
+}
+
 /**
  * Resolve an association endpoint (source or target) and verify it exists
  * and belongs to the caller's normalized scope. Throws a descriptive error
@@ -650,6 +675,79 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       },
     });
   };
+
+  function resolveContextContractReference(
+    reference?: ContextContractReference,
+  ): ContextContract | undefined {
+    if (reference == null) {
+      return config.contextContract;
+    }
+    if (typeof reference === 'string') {
+      const named = config.contextContracts?.[reference];
+      if (!named) {
+        throw new ValidationError(`Unknown context contract: ${reference}`);
+      }
+      return mergeContextContract(config.contextContract, {
+        name: named.name ?? reference,
+        ...named,
+      });
+    }
+    return mergeContextContract(config.contextContract, reference);
+  }
+
+  function resolveContextQueryOptions(options?: ContextQueryOptions): {
+    contract?: ContextContract;
+    invariants: ContextInvariant[];
+    view?: ContextViewPolicy;
+    viewer?: ActorRef;
+    includeCoordinationState?: boolean;
+  } {
+    return {
+      contract: resolveContextContractReference(options?.contract),
+      invariants: mergeContextInvariants(config.invariants, options?.invariants),
+      view: options?.view,
+      viewer: options?.viewer,
+      includeCoordinationState: options?.includeCoordinationState,
+    };
+  }
+
+  function resolveScopeLevelForContextQuery(options?: ContextQueryOptions): ScopeLevel | undefined {
+    const resolvedOptions = resolveContextQueryOptions(options);
+    return resolveContextScopeLevel(
+      resolvedOptions.contract?.crossScopeLevel ?? config.crossScopeLevel,
+      resolvedOptions.view ?? resolvedOptions.contract?.view,
+    );
+  }
+
+  function filterKnowledgeForContextQuery(
+    knowledge: KnowledgeMemory[],
+    options?: ContextQueryOptions,
+  ): KnowledgeMemory[] {
+    const resolvedOptions = resolveContextQueryOptions(options);
+    const view = resolvedOptions.view ?? resolvedOptions.contract?.view;
+    const visibleKnowledge = view
+      ? resolveVisibleKnowledge(knowledge, config.scope, view)
+      : knowledge;
+    return filterKnowledgeByContextRequirements(visibleKnowledge, {
+      knowledgeClasses: resolvedOptions.contract?.knowledgeClasses,
+      minimumTrustScore: resolvedOptions.contract?.minimumTrustScore,
+    });
+  }
+
+  async function collectKnowledgeForProfile(
+    adapter: AsyncStorageAdapter,
+    options?: ContextQueryOptions,
+    asOf?: number,
+  ): Promise<KnowledgeMemory[]> {
+    const scopeLevel = resolveScopeLevelForContextQuery(options);
+    const knowledge =
+      scopeLevel && scopeLevel !== 'scope'
+        ? await adapter.getActiveKnowledgeCrossScope(config.scope, scopeLevel)
+        : await adapter.getActiveKnowledgeMemory(config.scope);
+    const temporalKnowledge =
+      asOf == null ? knowledge : knowledge.filter((item) => item.created_at <= asOf);
+    return filterKnowledgeForContextQuery(temporalKnowledge, options);
+  }
 
   function emitKnowledgeChange(
     action: 'learned' | 'promoted' | 'reverified' | 'demoted' | 'retired',
@@ -959,12 +1057,9 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
   async function getContextInternal(
     relevanceQuery?: string,
     asOf?: number,
-    options?: {
-      view?: ContextViewPolicy;
-      viewer?: ActorRef;
-      includeCoordinationState?: boolean;
-    },
+    options?: ContextQueryOptions,
   ): Promise<MemoryContext> {
+    const resolvedOptions = resolveContextQueryOptions(options);
     const activeTurns = await asyncAdapter.getActiveTurns(config.scope, config.sessionId);
     const relevantTurns = asOf == null
       ? activeTurns
@@ -982,13 +1077,15 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       relevanceQuery,
       queryVector,
       embeddingAdapter: config.embeddingAdapter,
-      crossScopeLevel: config.crossScopeLevel,
+      crossScopeLevel: resolvedOptions.contract?.crossScopeLevel ?? config.crossScopeLevel,
       policy: config.contextPolicy,
+      contract: resolvedOptions.contract,
+      invariants: resolvedOptions.invariants,
       tokenEstimator,
       asOf,
-      view: options?.view,
-      viewer: options?.viewer,
-      includeCoordinationState: options?.includeCoordinationState,
+      view: resolvedOptions.view,
+      viewer: resolvedOptions.viewer,
+      includeCoordinationState: resolvedOptions.includeCoordinationState,
       logger: config.logger,
       onEvent,
     });
@@ -1035,11 +1132,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
   async function collectBestEffortTemporalState(
     asOf: number,
-    options?: {
-      view?: ContextViewPolicy;
-      viewer?: ActorRef;
-      includeCoordinationState?: boolean;
-    },
+    options?: ContextQueryOptions,
   ): Promise<{
     turns: Turn[];
     workingMemory: WorkingMemory[];
@@ -1050,8 +1143,12 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     associations: Association[];
     playbooks: Playbook[];
   }> {
-    const view = options?.view;
-    const effectiveScopeLevel = resolveContextScopeLevel(config.crossScopeLevel, view);
+    const resolvedOptions = resolveContextQueryOptions(options);
+    const view = resolvedOptions.view ?? resolvedOptions.contract?.view;
+    const effectiveScopeLevel = resolveContextScopeLevel(
+      resolvedOptions.contract?.crossScopeLevel ?? config.crossScopeLevel,
+      view,
+    );
     const [
       turns,
       workingMemory,
@@ -1094,7 +1191,11 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
             view,
           )
         : knowledge.filter((item) => item.created_at <= asOf)
-    ).sort((a, b) => a.created_at - b.created_at || a.id - b.id);
+    );
+    const filteredKnowledge = filterKnowledgeByContextRequirements(visibleKnowledge, {
+      knowledgeClasses: resolvedOptions.contract?.knowledgeClasses,
+      minimumTrustScore: resolvedOptions.contract?.minimumTrustScore,
+    }).sort((a, b) => a.created_at - b.created_at || a.id - b.id);
     const visibleWorkItems = (
       view ? resolveVisibleWorkItems(contextWorkItems, config.scope, view) : contextWorkItems
     ).sort((a, b) => a.updated_at - b.updated_at || a.created_at - b.created_at || a.id - b.id);
@@ -1133,14 +1234,111 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       workingMemory: workingMemory
         .filter((item) => item.session_id === config.sessionId)
         .sort((a, b) => a.created_at - b.created_at || a.id - b.id),
-      knowledge: visibleKnowledge,
+      knowledge: filteredKnowledge,
       workItems: visibleWorkItems,
       workClaims: visibleWorkClaims,
       handoffs: visibleHandoffs,
-      associations: associations
-        .filter((association) => association.created_at <= asOf)
-        .sort((a, b) => a.created_at - b.created_at || a.id - b.id),
+      associations: filterAssociationsForContextState(
+        associations
+          .filter((association) => association.created_at <= asOf)
+          .sort((a, b) => a.created_at - b.created_at || a.id - b.id),
+        options,
+        {
+          knowledge: filteredKnowledge,
+          workItems: visibleWorkItems,
+          workingMemory: workingMemory
+            .filter((item) => item.session_id === config.sessionId)
+            .sort((a, b) => a.created_at - b.created_at || a.id - b.id),
+          playbooks: visiblePlaybooks,
+        },
+      ),
       playbooks: visiblePlaybooks,
+    };
+  }
+
+  function filterAssociationsForContextState(
+    associations: Association[],
+    options: ContextQueryOptions | undefined,
+    state: {
+      knowledge: KnowledgeMemory[];
+      workItems: WorkItem[];
+      workingMemory: WorkingMemory[];
+      playbooks: Playbook[];
+    },
+  ): Association[] {
+    const resolvedOptions = resolveContextQueryOptions(options);
+    const visibleAssociations = resolvedOptions.view
+      ? resolveVisibleAssociations(associations, config.scope, resolvedOptions.view)
+      : associations;
+    const visibleKnowledgeIds = new Set(state.knowledge.map((item) => item.id));
+    const visibleWorkItemIds = new Set(state.workItems.map((item) => item.id));
+    const visibleWorkingMemoryIds = new Set(state.workingMemory.map((item) => item.id));
+    const visiblePlaybookIds = new Set(state.playbooks.map((item) => item.id));
+    const isVisibleEndpoint = (kind: AssociationTargetKind, id: number): boolean => {
+      if (kind === 'knowledge') return visibleKnowledgeIds.has(id);
+      if (kind === 'work_item') return visibleWorkItemIds.has(id);
+      if (kind === 'working_memory') return visibleWorkingMemoryIds.has(id);
+      if (kind === 'playbook') return visiblePlaybookIds.has(id);
+      return false;
+    };
+    return visibleAssociations.filter(
+      (association) =>
+        isVisibleEndpoint(association.source_kind, association.source_id) &&
+        isVisibleEndpoint(association.target_kind, association.target_id),
+    );
+  }
+
+  function filterTemporalStateForContext(
+    state: {
+      turns: Turn[];
+      workingMemory: WorkingMemory[];
+      knowledge: KnowledgeMemory[];
+      workItems: WorkItem[];
+      workClaims: WorkClaim[];
+      handoffs: HandoffRecord[];
+      associations: Association[];
+      playbooks: Playbook[];
+    },
+    options?: ContextQueryOptions,
+  ) {
+    const resolvedOptions = resolveContextQueryOptions(options);
+    const view = resolvedOptions.view ?? resolvedOptions.contract?.view;
+    const turns = state.turns
+      .slice()
+      .filter((turn) => turn.session_id === config.sessionId)
+      .sort((a, b) => a.created_at - b.created_at || a.id - b.id);
+    const workingMemory = state.workingMemory
+      .slice()
+      .filter((item) => item.session_id === config.sessionId)
+      .sort((a, b) => a.created_at - b.created_at || a.id - b.id);
+    const knowledge = filterKnowledgeForContextQuery(state.knowledge, options)
+      .sort((a, b) => a.created_at - b.created_at || a.id - b.id);
+    const workItems = (
+      view ? resolveVisibleWorkItems(state.workItems, config.scope, view) : [...state.workItems]
+    ).sort((a, b) => a.updated_at - b.updated_at || a.created_at - b.created_at || a.id - b.id);
+    const playbooks = (
+      view ? resolveVisiblePlaybooks(state.playbooks, config.scope, view) : [...state.playbooks]
+    ).sort((a, b) => a.updated_at - b.updated_at || a.created_at - b.created_at || a.id - b.id);
+    const workClaims = (
+      view ? resolveVisibleWorkClaims(state.workClaims, config.scope, view) : [...state.workClaims]
+    ).sort((a, b) => a.claimed_at - b.claimed_at || a.id - b.id);
+    const handoffs = (
+      view ? resolveVisibleHandoffs(state.handoffs, config.scope, view) : [...state.handoffs]
+    ).sort((a, b) => a.created_at - b.created_at || a.id - b.id);
+    const associations = filterAssociationsForContextState(
+      [...state.associations].sort((a, b) => a.created_at - b.created_at || a.id - b.id),
+      options,
+      { knowledge, workItems, workingMemory, playbooks },
+    );
+    return {
+      turns,
+      workingMemory,
+      knowledge,
+      workItems,
+      workClaims,
+      handoffs,
+      associations,
+      playbooks,
     };
   }
 
@@ -1262,11 +1460,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
   async function buildReplayedContext(
     asOf: number,
     relevanceQuery?: string,
-    options?: {
-      view?: ContextViewPolicy;
-      viewer?: ActorRef;
-      includeCoordinationState?: boolean;
-    },
+    options?: ContextQueryOptions,
     replayCutoff?: {
       throughEventId?: TemporalId | null;
     },
@@ -1293,7 +1487,11 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       };
     }
 
-    const replayScopeLevel = resolveContextScopeLevel(config.crossScopeLevel, options?.view);
+    const resolvedOptions = resolveContextQueryOptions(options);
+    const replayScopeLevel = resolveContextScopeLevel(
+      resolvedOptions.contract?.crossScopeLevel ?? config.crossScopeLevel,
+      resolvedOptions.view ?? resolvedOptions.contract?.view,
+    );
     const events =
       replayScopeLevel != null && replayScopeLevel !== 'scope'
         ? await listAllMemoryEventsCrossScope(asyncAdapter, config.scope, replayScopeLevel, {
@@ -1326,12 +1524,14 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     const context = await buildMemoryContext(replayAdapter, config.scope, {
       sessionId: config.sessionId,
       relevanceQuery: resolvedRelevanceQuery,
-      crossScopeLevel: config.crossScopeLevel,
+      crossScopeLevel: resolvedOptions.contract?.crossScopeLevel ?? config.crossScopeLevel,
       policy: config.contextPolicy,
+      contract: resolvedOptions.contract,
+      invariants: resolvedOptions.invariants,
       tokenEstimator,
-      view: options?.view,
-      viewer: options?.viewer,
-      includeCoordinationState: options?.includeCoordinationState,
+      view: resolvedOptions.view,
+      viewer: resolvedOptions.viewer,
+      includeCoordinationState: resolvedOptions.includeCoordinationState,
       logger: config.logger,
       onEvent,
     });
@@ -1358,15 +1558,9 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       activeObjectives: context.activeObjectives,
       unresolvedWork: context.unresolvedWork,
       coordinationState: context.coordinationState,
+      invariants: context.invariants,
       profile,
     };
-  }
-
-  async function getHistoricalProfileAt(asOf: number): Promise<Profile> {
-    const bestEffort = await collectBestEffortTemporalState(asOf);
-    return buildProfileFromKnowledge(
-      bestEffort.knowledge.filter((item) => matchesScope(item, config.scope)),
-    );
   }
 
   async function executeCompaction(
@@ -1578,7 +1772,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     async getStateAt(asOf, options) {
       const replay = await buildReplayedContext(asOf, options?.relevanceQuery, options);
       const replayed = replay.exact
-        ? replay.state!
+        ? filterTemporalStateForContext(replay.state!, options)
         : await collectBestEffortTemporalState(asOf, options);
       return {
         asOf,
@@ -1667,7 +1861,9 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
 
     async getSessionBootstrap(relevanceQuery, options) {
       const context = await getContextInternal(relevanceQuery, undefined, options);
-      const profile = await getProfile(asyncAdapter, config.scope);
+      const profile = buildProfileFromKnowledge(
+        await collectKnowledgeForProfile(asyncAdapter, options),
+      );
       return buildSessionBootstrapPayload(context, profile);
     },
 
@@ -1676,9 +1872,13 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       const profile =
         replay.exact && replay.state
           ? buildProfileFromKnowledge(
-              replay.state.knowledge.filter((item) => matchesScope(item, config.scope)),
+              await collectKnowledgeForProfile(
+                createTemporalReplayAdapter(replay.state, asOf),
+                options,
+                asOf,
+              ),
             )
-          : await getHistoricalProfileAt(asOf);
+          : buildProfileFromKnowledge(await collectKnowledgeForProfile(asyncAdapter, options, asOf));
       return buildSessionBootstrapPayload(replay.context, profile);
     },
 
@@ -1688,7 +1888,9 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       if (!watermark || watermark.last_event_id === '0') {
         const [context, profile] = await Promise.all([
           getContextInternal(relevanceQuery, undefined, options),
-          getProfile(asyncAdapter, config.scope),
+          collectKnowledgeForProfile(asyncAdapter, options).then((knowledge) =>
+            buildProfileFromKnowledge(knowledge),
+          ),
         ]);
         return {
           bootstrap: buildSessionBootstrapPayload(context, profile),
@@ -1710,9 +1912,15 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       const profile =
         replay.exact && replay.state
           ? buildProfileFromKnowledge(
-              replay.state.knowledge.filter((item) => matchesScope(item, config.scope)),
+              await collectKnowledgeForProfile(
+                createTemporalReplayAdapter(replay.state, watermark.updated_at),
+                options,
+                watermark.updated_at,
+              ),
             )
-          : await getHistoricalProfileAt(watermark.updated_at);
+          : buildProfileFromKnowledge(
+              await collectKnowledgeForProfile(asyncAdapter, options, watermark.updated_at),
+            );
       return {
         bootstrap: buildSessionBootstrapPayload(replay.context, profile),
         context: replay.context,

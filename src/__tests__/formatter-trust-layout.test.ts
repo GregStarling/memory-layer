@@ -99,6 +99,7 @@ function makeContext(): MemoryContext {
       tokenTrimming: {
         initialTokenEstimate: 100,
         finalTokenEstimate: 100,
+        droppedInvariantIds: [],
         droppedTurnIds: [],
         droppedSummaryIds: [],
         droppedPlaybookIds: [],

@@ -7,6 +7,7 @@ import type {
   MaintenancePolicy,
   MonitorPolicy,
 } from '../contracts/policy.js';
+import type { ContextContract, ContextInvariant } from '../contracts/context-contract.js';
 import type { StorageAdapter } from '../contracts/storage.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import { createInMemoryAdapter, createInMemoryAdapterWithEmbeddings } from '../adapters/memory/index.js';
@@ -81,6 +82,9 @@ export interface CreateMemoryOptions {
   autoCompact?: boolean;
   autoExtract?: boolean;
   crossScopeLevel?: MemoryManagerConfig['crossScopeLevel'];
+  contextContract?: ContextContract;
+  contextContracts?: Record<string, ContextContract>;
+  invariants?: ContextInvariant[];
   failurePolicy?: MemoryManagerConfig['failurePolicy'];
   tokenEstimator?: TokenEstimator;
   autoDetectWorkspace?: boolean;
@@ -403,6 +407,9 @@ function createMemoryInternal(
     autoCompact: options.autoCompact ?? preset.autoCompact,
     autoExtract: options.autoExtract ?? (extractor ? preset.autoExtract : false),
     crossScopeLevel: options.crossScopeLevel ?? preset.crossScopeLevel,
+    contextContract: options.contextContract,
+    contextContracts: options.contextContracts,
+    invariants: options.invariants,
     monitorPolicy: {
       ...preset.monitorPolicy,
       ...qualityConfig.monitorPolicy,
