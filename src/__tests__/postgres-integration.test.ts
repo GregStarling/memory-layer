@@ -25,7 +25,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { createPostgresAdapter } from '../adapters/postgres/index.js';
+import { createPostgresAdapter, createPostgresEmbeddingAdapter } from '../adapters/postgres/index.js';
 import type { MemoryScope } from '../contracts/identity.js';
 
 const POSTGRES_TEST_URL = process.env.POSTGRES_TEST_URL;
@@ -447,5 +447,262 @@ describeIntegration('Postgres integration — schema + adapter parity', () => {
 
     expect(dataTypes.get('source_summary')).toBe('boolean');
     expect(dataTypes.get('source_turns')).toBe('boolean');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 0 remediation regression tests (Postgres group)
+  // ---------------------------------------------------------------------------
+
+  function actor(id: string) {
+    return {
+      actor_kind: 'agent' as const,
+      actor_id: id,
+      system_id: null,
+      display_name: null,
+      metadata: null,
+    };
+  }
+
+  // Plan 0.2 — concurrent claim race: N parallel claimWorkItem calls on one
+  // item must yield exactly 1 success and N-1 ConflictError. Pre-fix, the
+  // unguarded ON CONFLICT DO UPDATE let a second committer silently steal an
+  // active claim, so multiple calls would succeed.
+  it('0.2 concurrent claimWorkItem on one item → exactly one success', async () => {
+    const { pool, schemaName } = await prepareSchema();
+    const adapter = createPostgresAdapter(pool);
+    const { ConflictError } = await import('../contracts/errors.js');
+
+    const item = await adapter.insertWorkItem({
+      ...scope(schemaName),
+      session_id: 'session-1',
+      title: 'contended work item',
+    });
+
+    const N = 8;
+    const claimedAt = Math.floor(Date.now() / 1000);
+    const attempts = Array.from({ length: N }, (_, i) =>
+      adapter.claimWorkItem({
+        ...scope(schemaName),
+        work_item_id: item.id,
+        actor: actor(`agent-${i}`),
+        lease_seconds: 300,
+        visibility_class: 'private',
+        claimed_at: claimedAt,
+      }),
+    );
+
+    const results = await Promise.allSettled(attempts);
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r) => r.status === 'rejected');
+
+    expect(fulfilled.length).toBe(1);
+    expect(rejected.length).toBe(N - 1);
+    for (const r of rejected) {
+      expect((r as PromiseRejectedResult).reason).toBeInstanceOf(ConflictError);
+    }
+
+    // Exactly one active claim row survives.
+    const active = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM work_claims_current WHERE work_item_id = $1 AND status = 'active'`,
+      [item.id],
+    );
+    expect(active.rows[0].n).toBe(1);
+  });
+
+  // Plan 0.2 (race fix) — concurrent claim on an item whose prior claim is
+  // active-but-expired. Pre-fix each racer's stale pre-SELECT triggered an
+  // unguarded expireClaimRecord that stomped the claim a concurrent racer had
+  // legitimately won, so ALL N racers could succeed with N bogus
+  // work_claim.expired events. The guarded UPDATE makes rowCount the authority:
+  // exactly one expire + one winner.
+  it('0.2 concurrent claimWorkItem on expired-claim item → one success, one expire event', async () => {
+    const { pool, schemaName } = await prepareSchema();
+    const adapter = createPostgresAdapter(pool);
+    const { ConflictError } = await import('../contracts/errors.js');
+
+    const item = await adapter.insertWorkItem({
+      ...scope(schemaName),
+      session_id: 'session-1',
+      title: 'expired-claim work item',
+    });
+
+    // Seed an active-but-expired claim (claimed in the past, already lapsed).
+    const past = Math.floor(Date.now() / 1000) - 1000;
+    const priorClaim = await adapter.claimWorkItem({
+      ...scope(schemaName),
+      work_item_id: item.id,
+      actor: actor('prior-owner'),
+      lease_seconds: 300,
+      visibility_class: 'private',
+      claimed_at: past,
+    });
+    // Sanity: the seeded claim is active but its expiry is in the past.
+    expect(priorClaim.status).toBe('active');
+    expect(priorClaim.expires_at).toBeLessThanOrEqual(Math.floor(Date.now() / 1000));
+
+    const N = 8;
+    const claimedAt = Math.floor(Date.now() / 1000);
+    const attempts = Array.from({ length: N }, (_, i) =>
+      adapter.claimWorkItem({
+        ...scope(schemaName),
+        work_item_id: item.id,
+        actor: actor(`agent-${i}`),
+        lease_seconds: 300,
+        visibility_class: 'private',
+        claimed_at: claimedAt,
+      }),
+    );
+
+    const results = await Promise.allSettled(attempts);
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r) => r.status === 'rejected');
+
+    expect(fulfilled.length).toBe(1);
+    expect(rejected.length).toBe(N - 1);
+    for (const r of rejected) {
+      expect((r as PromiseRejectedResult).reason).toBeInstanceOf(ConflictError);
+    }
+
+    // Exactly one active claim row survives.
+    const active = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM work_claims_current WHERE work_item_id = $1 AND status = 'active'`,
+      [item.id],
+    );
+    expect(active.rows[0].n).toBe(1);
+
+    // Exactly one work_claim.expired event was appended (not N bogus ones).
+    const expiredEvents = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM memory_event_log
+       WHERE entity_kind = 'work_claim' AND event_type = 'work_claim.expired'
+         AND entity_id = $1`,
+      [String(priorClaim.id)],
+    );
+    expect(expiredEvents.rows[0].n).toBe(1);
+  });
+
+  // Plan 0.4 — search must default activeOnly to true so superseded/retired
+  // records are excluded unless activeOnly:false is passed. Pre-fix, undefined
+  // was treated as false and superseded facts leaked into default search.
+  it('0.4 searchKnowledge defaults to activeOnly (superseded excluded)', async () => {
+    const { pool, schemaName } = await prepareSchema();
+    const adapter = createPostgresAdapter(pool);
+
+    const oldFact = await adapter.insertKnowledgeMemory({
+      ...scope(schemaName),
+      fact: 'the deploy target is the alpha cluster',
+      fact_type: 'reference',
+      source: 'user_stated',
+      confidence: 'high',
+    });
+    const newFact = await adapter.insertKnowledgeMemory({
+      ...scope(schemaName),
+      fact: 'the deploy target is the beta cluster',
+      fact_type: 'reference',
+      source: 'user_stated',
+      confidence: 'high',
+    });
+    await adapter.supersedeKnowledgeMemory(oldFact.id, newFact.id);
+
+    // Default (no options): superseded fact must be absent.
+    const defaultHits = await adapter.searchKnowledge(scope(schemaName), 'alpha cluster');
+    expect(defaultHits.some((h) => h.item.id === oldFact.id)).toBe(false);
+
+    // activeOnly:false: superseded fact must be present.
+    const allHits = await adapter.searchKnowledge(scope(schemaName), 'alpha cluster', {
+      activeOnly: false,
+    });
+    expect(allHits.some((h) => h.item.id === oldFact.id)).toBe(true);
+  });
+
+  it('0.4 searchTurns defaults to activeOnly (archived excluded)', async () => {
+    const { pool, schemaName } = await prepareSchema();
+    const adapter = createPostgresAdapter(pool);
+
+    const turn = await adapter.insertTurn({
+      ...scope(schemaName),
+      session_id: 'session-1',
+      actor: 'user',
+      role: 'user',
+      content: 'provision the gamma database',
+    });
+    await adapter.archiveTurn(turn.id, Math.floor(Date.now() / 1000), null);
+
+    const defaultHits = await adapter.searchTurns(scope(schemaName), 'gamma database');
+    expect(defaultHits.some((h) => h.item.id === turn.id)).toBe(false);
+
+    const allHits = await adapter.searchTurns(scope(schemaName), 'gamma database', {
+      activeOnly: false,
+    });
+    expect(allHits.some((h) => h.item.id === turn.id)).toBe(true);
+  });
+
+  // Plan 0.5 — scoped deleteEmbedding must actually delete. Pre-fix the scope
+  // clause compared tenant_id against the knowledge id ($1) and matched
+  // nothing, so the delete was a silent no-op.
+  it('0.5 scoped deleteEmbedding removes the embedding', async () => {
+    const { pool, schemaName } = await prepareSchema();
+    const adapter = createPostgresAdapter(pool);
+    // Embedding methods live on the embedding adapter, not the core adapter.
+    const embeddings = createPostgresEmbeddingAdapter(pool);
+
+    const km = await adapter.insertKnowledgeMemory({
+      ...scope(schemaName),
+      fact: 'embedding delete target',
+      fact_type: 'reference',
+      source: 'user_stated',
+      confidence: 'high',
+    });
+    const vector = new Float32Array([0.1, 0.2, 0.3, 0.4]);
+    await embeddings.storeEmbedding(km.id, vector);
+
+    // Present before delete.
+    const before = await embeddings.findSimilar(scope(schemaName), vector, { limit: 10 });
+    expect(before.some((r) => r.knowledgeMemoryId === km.id)).toBe(true);
+
+    // Scoped delete must remove it.
+    await embeddings.deleteEmbedding(km.id, scope(schemaName));
+
+    const after = await embeddings.findSimilar(scope(schemaName), vector, { limit: 10 });
+    expect(after.some((r) => r.knowledgeMemoryId === km.id)).toBe(false);
+
+    const rowCheck = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM knowledge_embeddings WHERE knowledge_memory_id = $1',
+      [km.id],
+    );
+    expect(rowCheck.rows[0].n).toBe(0);
+  });
+
+  // Plan 0.7 — optimistic locking: two parallel updateWorkItem calls with the
+  // same expectedVersion must yield exactly one success. Pre-fix the version
+  // check was a check-then-write against a stale SELECT, so both could win.
+  it('0.7 concurrent updateWorkItem with same expectedVersion → one success', async () => {
+    const { pool, schemaName } = await prepareSchema();
+    const adapter = createPostgresAdapter(pool);
+    const { ConflictError } = await import('../contracts/errors.js');
+
+    const item = await adapter.insertWorkItem({
+      ...scope(schemaName),
+      session_id: 'session-1',
+      title: 'versioned item',
+    });
+    expect(item.version).toBeDefined();
+    const expectedVersion = item.version;
+
+    const attempts = [
+      adapter.updateWorkItem(item.id, { title: 'update A' }, { expectedVersion }),
+      adapter.updateWorkItem(item.id, { title: 'update B' }, { expectedVersion }),
+    ];
+
+    const results = await Promise.allSettled(attempts);
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r) => r.status === 'rejected');
+
+    expect(fulfilled.length).toBe(1);
+    expect(rejected.length).toBe(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(ConflictError);
+
+    // Version advanced by exactly one.
+    const check = await pool.query('SELECT version FROM work_items WHERE id = $1', [item.id]);
+    expect(Number(check.rows[0].version)).toBe(Number(expectedVersion) + 1);
   });
 });

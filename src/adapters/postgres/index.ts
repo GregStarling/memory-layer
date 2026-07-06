@@ -79,13 +79,13 @@ export interface PostgresAdapterOptions {
 }
 
 interface PgPool {
-  query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+  query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[]; rowCount?: number | null }>;
   connect(): Promise<PgClient & { release(): void }>;
   end(): Promise<void>;
 }
 
 interface PgClient {
-  query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+  query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[]; rowCount?: number | null }>;
 }
 
 function scopeParams(scope: MemoryScope): unknown[] {
@@ -93,9 +93,10 @@ function scopeParams(scope: MemoryScope): unknown[] {
   return [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id];
 }
 
-function scopeWhere(prefix = ''): string {
+function scopeWhere(prefix = '', startIndex = 1): string {
   const p = prefix ? `${prefix}.` : '';
-  return `${p}tenant_id = $1 AND ${p}system_id = $2 AND ${p}workspace_id = $3 AND ${p}collaboration_id = $4 AND ${p}scope_id = $5`;
+  const i = startIndex;
+  return `${p}tenant_id = $${i} AND ${p}system_id = $${i + 1} AND ${p}workspace_id = $${i + 2} AND ${p}collaboration_id = $${i + 3} AND ${p}scope_id = $${i + 4}`;
 }
 
 function wideScopeWhere(scope: MemoryScope, level: ScopeLevel, prefix = ''): string {
@@ -180,6 +181,26 @@ function parseVectorValue(value: unknown): EmbeddingVector | null {
     );
   }
   return null;
+}
+
+// Phase 0.4: resolve search-option defaults locally so Postgres matches the
+// SQLite/memory semantics (notably activeOnly defaults to true; treating
+// undefined as false silently returned superseded/retired records).
+// Kept in exact sync with resolveSearchOptions in src/adapters/sqlite/index.ts.
+// TODO(Phase 3.1): extract to a shared adapter kernel module instead of duplicating.
+function resolveSearchOptions(options?: SearchOptions): Required<SearchOptions> {
+  return {
+    limit: options?.limit ?? 10,
+    activeOnly: options?.activeOnly ?? true,
+    includeProvisional: options?.includeProvisional ?? false,
+    includeDisputed: options?.includeDisputed ?? false,
+    minimumTrustScore: options?.minimumTrustScore ?? 0,
+    knowledgeStates: options?.knowledgeStates ?? [],
+    knowledgeClasses: options?.knowledgeClasses ?? [],
+    tags: options?.tags ?? [],
+    preferLocalTrusted: options?.preferLocalTrusted ?? false,
+    preferLineageMemory: options?.preferLineageMemory ?? false,
+  };
 }
 
 function resolvePaginationOptions(options?: PaginationOptions): Required<PaginationOptions> {
@@ -1079,15 +1100,27 @@ export function createPostgresAdapter(
     return mapSessionStateProjection(rows[0]);
   }
 
-  async function expireClaimRecord(row: Record<string, unknown>, expiredAt = now()): Promise<WorkClaim> {
-    const { rows } = await pool.query(
+  async function expireClaimRecord(
+    row: Record<string, unknown>,
+    expiredAt = now(),
+  ): Promise<WorkClaim | null> {
+    // Phase 0.2 (race fix): the UPDATE is self-guarding. Under concurrency a
+    // stale caller may still hold a pre-SELECT snapshot showing an
+    // active-but-expired claim after another racer has already expired or
+    // re-claimed the row. The status/expiry guard makes rowCount the authority:
+    // 0 affected rows means someone else already handled it — treat as
+    // already-expired and do NOT emit a (bogus) work_claim.expired event.
+    const { rows, rowCount } = await pool.query(
       `UPDATE work_claims_current
        SET status = 'expired', released_at = $2, release_reason = 'expired', version = COALESCE(version, 1) + 1
-       WHERE id = $1
+       WHERE id = $1 AND status = 'active' AND expires_at <= $2
        RETURNING *`,
       [Number(row.id), expiredAt],
     );
-    const expired = mapWorkClaim(rows[0] ?? row);
+    if (rowCount === 0 || !rows[0]) {
+      return null;
+    }
+    const expired = mapWorkClaim(rows[0]);
     await insertMemoryEventInternal({
       ...normalizeScope(expired),
       session_id: expired.session_id,
@@ -1235,10 +1268,11 @@ export function createPostgresAdapter(
 
     async searchTurns(scope, queryText, searchOptions) {
       // scopeParams occupies $1..$5. queryText binds at $6 and limit at $7.
+      const resolved = resolveSearchOptions(searchOptions);
       const params = scopeParams(scope);
-      const limit = searchOptions?.limit ?? 10;
+      const limit = resolved.limit;
       params.push(queryText, limit);
-      const activeClause = searchOptions?.activeOnly ? ` AND status = 'active'` : '';
+      const activeClause = resolved.activeOnly ? ` AND status = 'active'` : '';
       const { rows } = await pool.query(
         `SELECT *, ts_rank(search_vector, plainto_tsquery('english', $6)) AS rank
          FROM turns
@@ -1693,9 +1727,10 @@ export function createPostgresAdapter(
 
     async searchKnowledge(scope, queryText, searchOptions) {
       // scopeParams occupies $1..$5. queryText binds at $6 and limit at $7.
+      const resolved = resolveSearchOptions(searchOptions);
       const params = scopeParams(scope);
-      const limit = searchOptions?.limit ?? 10;
-      const activeClause = searchOptions?.activeOnly ? ' AND superseded_by_id IS NULL AND retired_at IS NULL' : '';
+      const limit = resolved.limit;
+      const activeClause = resolved.activeOnly ? ' AND superseded_by_id IS NULL AND retired_at IS NULL' : '';
       params.push(queryText, limit);
       const { rows } = await pool.query(
         `SELECT *, ts_rank(search_vector, plainto_tsquery('english', $6)) AS rank
@@ -1711,14 +1746,15 @@ export function createPostgresAdapter(
           item: mapKnowledgeMemory(row),
           rank: Number(row.rank),
         }))
-        .filter((result) => matchesKnowledgeSearchOptions(result.item, searchOptions))
+        .filter((result) => matchesKnowledgeSearchOptions(result.item, resolved))
         .slice(0, limit);
     },
 
     async searchKnowledgeCrossScope(scope, level, queryText, searchOptions) {
+      const resolved = resolveSearchOptions(searchOptions);
       const params = wideScopeParams(scope, level);
-      const limit = searchOptions?.limit ?? 10;
-      const activeClause = searchOptions?.activeOnly ? ' AND superseded_by_id IS NULL AND retired_at IS NULL' : '';
+      const limit = resolved.limit;
+      const activeClause = resolved.activeOnly ? ' AND superseded_by_id IS NULL AND retired_at IS NULL' : '';
       const paramOffset = params.length;
       params.push(queryText, limit);
       const { rows } = await pool.query(
@@ -1735,7 +1771,7 @@ export function createPostgresAdapter(
           item: mapKnowledgeMemory(row),
           rank: Number(row.rank),
         }))
-        .filter((result) => matchesKnowledgeSearchOptions(result.item, searchOptions))
+        .filter((result) => matchesKnowledgeSearchOptions(result.item, resolved))
         .slice(0, limit);
     },
 
@@ -2071,21 +2107,39 @@ export function createPostgresAdapter(
       const { rows: beforeRows } = await pool.query('SELECT * FROM work_items WHERE id = $1', [id]);
       if (!beforeRows[0]) return null;
       const before = mapWorkItem(beforeRows[0]);
-      if (options?.expectedVersion != null && before.version !== options.expectedVersion) {
-        throw new ConflictError(`Work item ${id} version mismatch`);
-      }
       const updatedAt = now();
       const nextTitle = patch.title ?? before.title;
       const nextDetail = patch.detail !== undefined ? patch.detail : before.detail;
       const nextStatus = patch.status ?? before.status;
       const nextVisibility = patch.visibility_class ?? before.visibility_class;
-      const { rows: afterRows } = await pool.query(
+      // Phase 0.7: the version guard lives in the UPDATE's WHERE clause so
+      // concurrent updaters race atomically; rowCount is the authority.
+      // The pre-SELECT is retained only to compute patch fields and enrich the
+      // error message — it is not the concurrency guard.
+      const expectedVersion = options?.expectedVersion;
+      const { rows: afterRows, rowCount } = await pool.query(
         `UPDATE work_items
          SET title = $2, detail = $3, status = $4, visibility_class = $5, version = COALESCE(version, 1) + 1, updated_at = $6
-         WHERE id = $1
+         WHERE id = $1${expectedVersion != null ? ' AND COALESCE(version, 1) = $7' : ''}
          RETURNING *`,
-        [id, nextTitle, nextDetail, nextStatus, nextVisibility, updatedAt],
+        expectedVersion != null
+          ? [id, nextTitle, nextDetail, nextStatus, nextVisibility, updatedAt, expectedVersion]
+          : [id, nextTitle, nextDetail, nextStatus, nextVisibility, updatedAt],
       );
+      if (rowCount === 0 || !afterRows[0]) {
+        // No row was updated. If the caller supplied expectedVersion this is a
+        // genuine optimistic-lock conflict; otherwise the row was deleted
+        // concurrently after the pre-SELECT and the contract expects null.
+        if (expectedVersion != null) {
+          // Don't report the stale pre-SELECT version as authoritative: the row
+          // may have been re-versioned or deleted concurrently. Word the
+          // message so it does not claim a specific current version.
+          throw new ConflictError(
+            `Work item ${id} version mismatch (expected version ${expectedVersion}; the item was modified concurrently)`,
+          );
+        }
+        return null;
+      }
       const after = mapWorkItem(afterRows[0]);
       await insertMemoryEventInternal({
         ...normalizeScope(after),
@@ -2155,7 +2209,13 @@ export function createPostgresAdapter(
         const actorParts = serializeActorMetadata(input.actor);
         const claimToken = `claim-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
         const expiresAt = claimedAt + (input.lease_seconds ?? 300);
-        const { rows } = await pool.query(
+        // Phase 0.2: the upsert is self-guarding. Under READ COMMITTED the
+        // ON CONFLICT DO UPDATE re-reads the latest committed row under a row
+        // lock, so only a claim whose current row is non-active OR already
+        // expired can be overwritten. rowCount is the authority: 0 affected
+        // rows means a live foreign claim won the race → ConflictError. The
+        // pre-SELECT above is used only to enrich the error message.
+        const { rows, rowCount } = await pool.query(
           `INSERT INTO work_claims_current
             (tenant_id, system_id, workspace_id, collaboration_id, scope_id, work_item_id, session_id,
              actor_kind, actor_id, actor_system_id, actor_display_name, actor_metadata,
@@ -2182,6 +2242,8 @@ export function createPostgresAdapter(
              source_event_id = NULL,
              visibility_class = EXCLUDED.visibility_class,
              version = COALESCE(work_claims_current.version, 1) + 1
+           WHERE work_claims_current.status <> 'active'
+              OR work_claims_current.expires_at <= EXCLUDED.claimed_at
            RETURNING *`,
           [
             normalized.tenant_id,
@@ -2202,6 +2264,9 @@ export function createPostgresAdapter(
             input.visibility_class,
           ],
         );
+        if (rowCount === 0 || !rows[0]) {
+          throw new ConflictError(`Work item ${input.work_item_id} is already claimed`);
+        }
         const claim = mapWorkClaim(rows[0]);
         const event = await insertMemoryEventInternal({
           ...normalizeScope(claim),
@@ -3349,13 +3414,14 @@ export function createPostgresEmbeddingAdapter(
 
     async deleteEmbedding(knowledgeMemoryId, scope): Promise<void> {
       if (scope) {
+        // Params are [id, ...scope]: $1 is the id, scope binds at $2..$6.
         await pool.query(
           `DELETE FROM knowledge_embeddings ke
            USING knowledge_memory km
            WHERE ke.knowledge_memory_id = $1
              AND km.id = ke.knowledge_memory_id
              AND km.id = $1
-             AND ${scopeWhere('km')}`,
+             AND ${scopeWhere('km', 2)}`,
           [knowledgeMemoryId, ...scopeParams(scope)],
         );
         return;

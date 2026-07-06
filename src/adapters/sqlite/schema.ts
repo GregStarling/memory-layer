@@ -1,12 +1,78 @@
 import type Database from 'better-sqlite3';
 
-export const CURRENT_SCHEMA_VERSION = 19;
+export const CURRENT_SCHEMA_VERSION = 20;
+
+/**
+ * Returns true when a failed `ALTER TABLE ... ADD COLUMN` probe is benign for
+ * our migration strategy: either the column already exists (upgraded database)
+ * or the target table does not exist yet on a fresh install (the probe targets
+ * a table created later in this function and only matters for upgrade paths).
+ * Any other failure — disk full, database locked, corruption — is a real error
+ * and must be rethrown rather than silently swallowed.
+ */
+function isBenignAlterProbeError(error: unknown): boolean {
+  const message = String((error as { message?: unknown })?.message ?? '').toLowerCase();
+  return message.includes('duplicate column') || message.includes('no such table');
+}
+
+/**
+ * Returns true when a failed `CREATE INDEX` probe is benign (the index already
+ * exists). Other failures are real and rethrown.
+ */
+function isBenignIndexProbeError(error: unknown): boolean {
+  const message = String((error as { message?: unknown })?.message ?? '').toLowerCase();
+  return message.includes('already exists');
+}
 
 export function createSQLiteSchema(database: Database.Database): void {
   database.pragma('journal_mode = WAL');
   database.pragma('foreign_keys = ON');
 
+  // schema_meta must exist before we can read the on-disk schema version.
+  // Created outside the migration transaction so the version read below is
+  // always possible, even on a brand-new database.
   database.exec(`
+    CREATE TABLE IF NOT EXISTS schema_meta (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      schema_version INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+  `);
+
+  // Note: schema_meta will have no rows on a fresh database — yielding
+  // undefined, which falls back to version 0.
+  const existingVersion = (
+    database.prepare('SELECT schema_version FROM schema_meta WHERE id = 1').get() as
+      | { schema_version: number }
+      | undefined
+  )?.schema_version ?? 0;
+
+  // Downgrade guard: refuse to open a database created by a newer version of
+  // the library rather than silently re-stamping it down to our version.
+  if (existingVersion > CURRENT_SCHEMA_VERSION) {
+    throw new Error(
+      `SQLite database was created by a newer version of ai-memory-layer ` +
+        `(schema version ${existingVersion}); this build supports up to ${CURRENT_SCHEMA_VERSION}. ` +
+        `Upgrade the library to open this database.`,
+    );
+  }
+
+  // All schema construction and version-gated migrations run inside a single
+  // transaction so that the destructive v17→v18 rebuild is atomic: a mid-flight
+  // failure rolls back, leaving either the old state or the new state — never
+  // stranded `_v17` data. The schema_version stamp is applied LAST, inside the
+  // same transaction, so a crash before completion leaves the version unchanged
+  // and the migration re-runs on next open.
+  const runMigration = database.transaction(() => {
+    // ── Recovery: complete an interrupted v17→v18 copy ──────────────────────
+    // If a prior run crashed after RENAME-to-_v17 but before the copy+drop
+    // completed, `context_contracts_v17` still exists. Finish the copy so we
+    // never leave stranded data. This runs first, before the version gate,
+    // because the schema_version was not yet stamped when the interruption
+    // happened (so `existingVersion` may still read as pre-18).
+    rebuildContractsFromV17IfPresent(database);
+
+    database.exec(`
     CREATE TABLE IF NOT EXISTS turns (
       id                INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id        TEXT    NOT NULL,
@@ -293,182 +359,184 @@ export function createSQLiteSchema(database: Database.Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_work_items_scope ON work_items(tenant_id, system_id, workspace_id, collaboration_id, scope_id, status);
-
-    CREATE TABLE IF NOT EXISTS schema_meta (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      schema_version INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
   `);
 
-  const knowledgeMemoryAlterStatements = [
-    "ALTER TABLE knowledge_memory ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
-    "ALTER TABLE knowledge_memory ADD COLUMN knowledge_state TEXT NOT NULL DEFAULT 'trusted'",
-    "ALTER TABLE knowledge_memory ADD COLUMN knowledge_class TEXT NOT NULL DEFAULT 'project_fact'",
-    'ALTER TABLE knowledge_memory ADD COLUMN fact_subject TEXT',
-    'ALTER TABLE knowledge_memory ADD COLUMN fact_attribute TEXT',
-    'ALTER TABLE knowledge_memory ADD COLUMN fact_value TEXT',
-    'ALTER TABLE knowledge_memory ADD COLUMN normalized_fact TEXT',
-    'ALTER TABLE knowledge_memory ADD COLUMN slot_key TEXT',
-    'ALTER TABLE knowledge_memory ADD COLUMN is_negated INTEGER NOT NULL DEFAULT 0',
-    'ALTER TABLE knowledge_memory ADD COLUMN confidence_score REAL NOT NULL DEFAULT 0.5',
-    "ALTER TABLE knowledge_memory ADD COLUMN grounding_strength TEXT NOT NULL DEFAULT 'moderate'",
-    'ALTER TABLE knowledge_memory ADD COLUMN evidence_count INTEGER NOT NULL DEFAULT 0',
-    'ALTER TABLE knowledge_memory ADD COLUMN trust_score REAL NOT NULL DEFAULT 0.7',
-    "ALTER TABLE knowledge_memory ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'unverified'",
-    'ALTER TABLE knowledge_memory ADD COLUMN verification_notes TEXT',
-    'ALTER TABLE knowledge_memory ADD COLUMN last_verified_at INTEGER',
-    'ALTER TABLE knowledge_memory ADD COLUMN next_reverification_at INTEGER',
-    'ALTER TABLE knowledge_memory ADD COLUMN last_confirmed_at INTEGER',
-    'ALTER TABLE knowledge_memory ADD COLUMN confirmation_count INTEGER NOT NULL DEFAULT 0',
-    'ALTER TABLE knowledge_memory ADD COLUMN source_system_id TEXT',
-    'ALTER TABLE knowledge_memory ADD COLUMN source_scope_id TEXT',
-    'ALTER TABLE knowledge_memory ADD COLUMN source_collaboration_id TEXT',
-    "ALTER TABLE knowledge_memory ADD COLUMN source_turn_ids TEXT NOT NULL DEFAULT '[]'",
-    'ALTER TABLE knowledge_memory ADD COLUMN successful_use_count INTEGER NOT NULL DEFAULT 0',
-    'ALTER TABLE knowledge_memory ADD COLUMN failed_use_count INTEGER NOT NULL DEFAULT 0',
-    'ALTER TABLE knowledge_memory ADD COLUMN disputed_at INTEGER',
-    'ALTER TABLE knowledge_memory ADD COLUMN dispute_reason TEXT',
-    'ALTER TABLE knowledge_memory ADD COLUMN contradiction_score REAL NOT NULL DEFAULT 0',
-    'ALTER TABLE knowledge_memory ADD COLUMN superseded_at INTEGER',
-    'ALTER TABLE knowledge_memory ADD COLUMN retired_at INTEGER',
-  ];
-
-  for (const statement of knowledgeMemoryAlterStatements) {
-    try {
-      database.exec(statement);
-    } catch {
-      // Column already exists on upgraded databases.
-    }
-  }
-
-  try {
-    database.exec(
-      'CREATE INDEX IF NOT EXISTS idx_km_reverify ON knowledge_memory(knowledge_state, next_reverification_at, knowledge_class, trust_score DESC)',
-    );
-  } catch {
-    // Index already exists on upgraded databases.
-  }
-
-  try {
-    database.exec('ALTER TABLE turns ADD COLUMN priority REAL NOT NULL DEFAULT 1.0');
-  } catch {
-    // Column already exists on upgraded databases.
-  }
-
-  const collaborationAlterStatements = [
-    "ALTER TABLE turns ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
-    "ALTER TABLE working_memory ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
-    "ALTER TABLE knowledge_memory_audit ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
-    "ALTER TABLE knowledge_candidate ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
-    "ALTER TABLE knowledge_evidence ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
-    "ALTER TABLE context_monitor ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
-    "ALTER TABLE compaction_log ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
-    "ALTER TABLE work_items ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
-  ];
-
-  for (const statement of collaborationAlterStatements) {
-    try {
-      database.exec(statement);
-    } catch {
-      // Column already exists on upgraded databases.
-    }
-  }
-
-  const coordinationAlterStatements = [
-    "ALTER TABLE knowledge_memory ADD COLUMN visibility_class TEXT NOT NULL DEFAULT 'private'",
-    "ALTER TABLE work_items ADD COLUMN visibility_class TEXT NOT NULL DEFAULT 'private'",
-    'ALTER TABLE work_items ADD COLUMN version INTEGER NOT NULL DEFAULT 1',
-    "ALTER TABLE playbooks ADD COLUMN visibility_class TEXT NOT NULL DEFAULT 'private'",
-    "ALTER TABLE associations ADD COLUMN visibility_class TEXT NOT NULL DEFAULT 'private'",
-    'ALTER TABLE memory_event_log ADD COLUMN actor_kind TEXT',
-    'ALTER TABLE memory_event_log ADD COLUMN actor_system_id TEXT',
-    'ALTER TABLE memory_event_log ADD COLUMN actor_display_name TEXT',
-    'ALTER TABLE memory_event_log ADD COLUMN actor_metadata TEXT',
-  ];
-
-  for (const statement of coordinationAlterStatements) {
-    try {
-      database.exec(statement);
-    } catch {
-      // Column already exists on upgraded databases.
-    }
-  }
-
-  // Only run the collaboration_id backfill on databases created before v16,
-  // which may contain rows with the legacy sentinel 'default' instead of ''.
-  // Note: schema_meta is guaranteed to exist here (CREATE TABLE IF NOT EXISTS
-  // runs above), but will have no rows on a fresh database — yielding
-  // undefined, which falls back to version 0, correctly triggering the backfill.
-  const COLLABORATION_BACKFILL_VERSION = 16;
-  const existingVersion = (
-    database.prepare('SELECT schema_version FROM schema_meta WHERE id = 1').get() as
-      | { schema_version: number }
-      | undefined
-  )?.schema_version ?? 0;
-
-  if (existingVersion < COLLABORATION_BACKFILL_VERSION) {
-    const collaborationBackfills = [
-      "UPDATE turns SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-      "UPDATE working_memory SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-      "UPDATE knowledge_memory SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-      "UPDATE knowledge_memory SET source_collaboration_id = '' WHERE source_collaboration_id = 'default'",
-      "UPDATE knowledge_memory_audit SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-      "UPDATE knowledge_candidate SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-      "UPDATE knowledge_evidence SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-      "UPDATE context_monitor SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-      "UPDATE compaction_log SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-      "UPDATE work_items SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-      "UPDATE playbooks SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-      "UPDATE playbook_revisions SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-      "UPDATE associations SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-      "UPDATE memory_event_log SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-      "UPDATE session_state_current SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-      "UPDATE work_claims_current SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
-      "UPDATE handoff_records SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+    const knowledgeMemoryAlterStatements = [
+      "ALTER TABLE knowledge_memory ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE knowledge_memory ADD COLUMN knowledge_state TEXT NOT NULL DEFAULT 'trusted'",
+      "ALTER TABLE knowledge_memory ADD COLUMN knowledge_class TEXT NOT NULL DEFAULT 'project_fact'",
+      'ALTER TABLE knowledge_memory ADD COLUMN fact_subject TEXT',
+      'ALTER TABLE knowledge_memory ADD COLUMN fact_attribute TEXT',
+      'ALTER TABLE knowledge_memory ADD COLUMN fact_value TEXT',
+      'ALTER TABLE knowledge_memory ADD COLUMN normalized_fact TEXT',
+      'ALTER TABLE knowledge_memory ADD COLUMN slot_key TEXT',
+      'ALTER TABLE knowledge_memory ADD COLUMN is_negated INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE knowledge_memory ADD COLUMN confidence_score REAL NOT NULL DEFAULT 0.5',
+      "ALTER TABLE knowledge_memory ADD COLUMN grounding_strength TEXT NOT NULL DEFAULT 'moderate'",
+      'ALTER TABLE knowledge_memory ADD COLUMN evidence_count INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE knowledge_memory ADD COLUMN trust_score REAL NOT NULL DEFAULT 0.7',
+      "ALTER TABLE knowledge_memory ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'unverified'",
+      'ALTER TABLE knowledge_memory ADD COLUMN verification_notes TEXT',
+      'ALTER TABLE knowledge_memory ADD COLUMN last_verified_at INTEGER',
+      'ALTER TABLE knowledge_memory ADD COLUMN next_reverification_at INTEGER',
+      'ALTER TABLE knowledge_memory ADD COLUMN last_confirmed_at INTEGER',
+      'ALTER TABLE knowledge_memory ADD COLUMN confirmation_count INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE knowledge_memory ADD COLUMN source_system_id TEXT',
+      'ALTER TABLE knowledge_memory ADD COLUMN source_scope_id TEXT',
+      'ALTER TABLE knowledge_memory ADD COLUMN source_collaboration_id TEXT',
+      "ALTER TABLE knowledge_memory ADD COLUMN source_turn_ids TEXT NOT NULL DEFAULT '[]'",
+      'ALTER TABLE knowledge_memory ADD COLUMN successful_use_count INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE knowledge_memory ADD COLUMN failed_use_count INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE knowledge_memory ADD COLUMN disputed_at INTEGER',
+      'ALTER TABLE knowledge_memory ADD COLUMN dispute_reason TEXT',
+      'ALTER TABLE knowledge_memory ADD COLUMN contradiction_score REAL NOT NULL DEFAULT 0',
+      'ALTER TABLE knowledge_memory ADD COLUMN superseded_at INTEGER',
+      'ALTER TABLE knowledge_memory ADD COLUMN retired_at INTEGER',
     ];
 
-    for (const statement of collaborationBackfills) {
+    for (const statement of knowledgeMemoryAlterStatements) {
       try {
         database.exec(statement);
-      } catch {
-        // Best-effort backfill for upgraded databases.
+      } catch (error) {
+        // Column already exists on upgraded databases; rethrow real failures.
+        if (!isBenignAlterProbeError(error)) throw error;
       }
     }
-  }
 
-  try {
-    database.exec('ALTER TABLE working_memory ADD COLUMN episode_recap TEXT');
-  } catch {
-    // Column already exists on upgraded databases.
-  }
-
-  // v15: Phase 5 field extensions
-  const phase5AlterStatements = [
-    'ALTER TABLE knowledge_memory ADD COLUMN valid_from INTEGER',
-    'ALTER TABLE knowledge_memory ADD COLUMN valid_until INTEGER',
-    'ALTER TABLE knowledge_memory ADD COLUMN rationale TEXT',
-    "ALTER TABLE knowledge_memory ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
-    'ALTER TABLE playbooks ADD COLUMN rationale TEXT',
-    "ALTER TABLE associations ADD COLUMN provenance TEXT NOT NULL DEFAULT 'inferred'",
-  ];
-
-  for (const statement of phase5AlterStatements) {
     try {
-      database.exec(statement);
-    } catch {
-      // Column already exists on upgraded databases.
+      database.exec(
+        'CREATE INDEX IF NOT EXISTS idx_km_reverify ON knowledge_memory(knowledge_state, next_reverification_at, knowledge_class, trust_score DESC)',
+      );
+    } catch (error) {
+      if (!isBenignIndexProbeError(error)) throw error;
     }
-  }
 
-  // v15: Backfill existing associations confidence from 0.5 → 0.8
-  try {
-    database.exec("UPDATE associations SET confidence = 0.8 WHERE confidence = 0.5");
-  } catch {
-    // Best-effort backfill.
-  }
+    try {
+      database.exec('ALTER TABLE turns ADD COLUMN priority REAL NOT NULL DEFAULT 1.0');
+    } catch (error) {
+      // Column already exists on upgraded databases; rethrow real failures.
+      if (!isBenignAlterProbeError(error)) throw error;
+    }
 
-  database.exec(`
+    const collaborationAlterStatements = [
+      "ALTER TABLE turns ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE working_memory ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE knowledge_memory_audit ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE knowledge_candidate ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE knowledge_evidence ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE context_monitor ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE compaction_log ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE work_items ADD COLUMN collaboration_id TEXT NOT NULL DEFAULT ''",
+    ];
+
+    for (const statement of collaborationAlterStatements) {
+      try {
+        database.exec(statement);
+      } catch (error) {
+        // Column already exists on upgraded databases; rethrow real failures.
+        if (!isBenignAlterProbeError(error)) throw error;
+      }
+    }
+
+    const coordinationAlterStatements = [
+      "ALTER TABLE knowledge_memory ADD COLUMN visibility_class TEXT NOT NULL DEFAULT 'private'",
+      "ALTER TABLE work_items ADD COLUMN visibility_class TEXT NOT NULL DEFAULT 'private'",
+      'ALTER TABLE work_items ADD COLUMN version INTEGER NOT NULL DEFAULT 1',
+      "ALTER TABLE playbooks ADD COLUMN visibility_class TEXT NOT NULL DEFAULT 'private'",
+      "ALTER TABLE associations ADD COLUMN visibility_class TEXT NOT NULL DEFAULT 'private'",
+      'ALTER TABLE memory_event_log ADD COLUMN actor_kind TEXT',
+      'ALTER TABLE memory_event_log ADD COLUMN actor_system_id TEXT',
+      'ALTER TABLE memory_event_log ADD COLUMN actor_display_name TEXT',
+      'ALTER TABLE memory_event_log ADD COLUMN actor_metadata TEXT',
+    ];
+
+    for (const statement of coordinationAlterStatements) {
+      try {
+        database.exec(statement);
+      } catch (error) {
+        // Column already exists (upgraded db) or target table not yet created
+        // (fresh db — these tables are built later and the probe only matters
+        // for upgrade paths). Rethrow real failures.
+        if (!isBenignAlterProbeError(error)) throw error;
+      }
+    }
+
+    // Only run the collaboration_id backfill on databases created before v16,
+    // which may contain rows with the legacy sentinel 'default' instead of ''.
+    const COLLABORATION_BACKFILL_VERSION = 16;
+
+    if (existingVersion < COLLABORATION_BACKFILL_VERSION) {
+      const collaborationBackfills = [
+        "UPDATE turns SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+        "UPDATE working_memory SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+        "UPDATE knowledge_memory SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+        "UPDATE knowledge_memory SET source_collaboration_id = '' WHERE source_collaboration_id = 'default'",
+        "UPDATE knowledge_memory_audit SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+        "UPDATE knowledge_candidate SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+        "UPDATE knowledge_evidence SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+        "UPDATE context_monitor SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+        "UPDATE compaction_log SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+        "UPDATE work_items SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+        "UPDATE playbooks SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+        "UPDATE playbook_revisions SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+        "UPDATE associations SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+        "UPDATE memory_event_log SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+        "UPDATE session_state_current SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+        "UPDATE work_claims_current SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+        "UPDATE handoff_records SET collaboration_id = '' WHERE collaboration_id IS NULL OR collaboration_id = 'default'",
+      ];
+
+      for (const statement of collaborationBackfills) {
+        try {
+          database.exec(statement);
+        } catch (error) {
+          // Best-effort backfill: the target table may not exist yet on a
+          // fresh database. Rethrow anything other than a missing table.
+          if (!String((error as { message?: unknown })?.message ?? '').toLowerCase().includes('no such table')) {
+            throw error;
+          }
+        }
+      }
+    }
+
+    try {
+      database.exec('ALTER TABLE working_memory ADD COLUMN episode_recap TEXT');
+    } catch (error) {
+      // Column already exists on upgraded databases; rethrow real failures.
+      if (!isBenignAlterProbeError(error)) throw error;
+    }
+
+    // v15: Phase 5 field extensions
+    const phase5AlterStatements = [
+      'ALTER TABLE knowledge_memory ADD COLUMN valid_from INTEGER',
+      'ALTER TABLE knowledge_memory ADD COLUMN valid_until INTEGER',
+      'ALTER TABLE knowledge_memory ADD COLUMN rationale TEXT',
+      "ALTER TABLE knowledge_memory ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
+      'ALTER TABLE playbooks ADD COLUMN rationale TEXT',
+      "ALTER TABLE associations ADD COLUMN provenance TEXT NOT NULL DEFAULT 'inferred'",
+    ];
+
+    for (const statement of phase5AlterStatements) {
+      try {
+        database.exec(statement);
+      } catch (error) {
+        // Column already exists (upgraded db) or target table not yet created
+        // (fresh db). Rethrow real failures.
+        if (!isBenignAlterProbeError(error)) throw error;
+      }
+    }
+
+    // v15: Backfill existing associations confidence from 0.5 → 0.8
+    try {
+      database.exec("UPDATE associations SET confidence = 0.8 WHERE confidence = 0.5");
+    } catch (error) {
+      // Best-effort backfill; associations may not exist yet on a fresh db.
+      if (!String((error as { message?: unknown })?.message ?? '').toLowerCase().includes('no such table')) {
+        throw error;
+      }
+    }
+
+    database.exec(`
     CREATE TABLE IF NOT EXISTS playbooks (
       id                       INTEGER PRIMARY KEY AUTOINCREMENT,
       tenant_id                TEXT    NOT NULL,
@@ -611,7 +679,9 @@ export function createSQLiteSchema(database: Database.Database): void {
       metadata           TEXT
     );
 
-    -- Current-state projection only; historical claim transitions remain in memory_event_log.
+    -- Current-state projection only; historical claim transitions are moved to
+    -- work_claims_history when a work item is reclaimed (see 0.1). This table
+    -- holds at most one row per work_item_id (enforced by UNIQUE below).
     CREATE TABLE IF NOT EXISTS work_claims_current (
       id                 INTEGER PRIMARY KEY AUTOINCREMENT,
       tenant_id          TEXT    NOT NULL,
@@ -641,6 +711,42 @@ export function createSQLiteSchema(database: Database.Database): void {
       ON work_claims_current(actor_kind, actor_id, status, expires_at);
     CREATE INDEX IF NOT EXISTS idx_work_claims_scope_visibility
       ON work_claims_current(tenant_id, system_id, workspace_id, collaboration_id, scope_id, visibility_class);
+
+    -- v20: history of displaced (expired/released) claims. Preserves each
+    -- claim's original id so getWorkClaimById and claim listings continue to
+    -- surface historical claims. No UNIQUE(work_item_id): many historical
+    -- claims may exist per work item.
+    CREATE TABLE IF NOT EXISTS work_claims_history (
+      id                 INTEGER PRIMARY KEY,
+      tenant_id          TEXT    NOT NULL,
+      system_id          TEXT    NOT NULL,
+      workspace_id       TEXT    NOT NULL DEFAULT 'default',
+      collaboration_id   TEXT    NOT NULL DEFAULT '',
+      scope_id           TEXT    NOT NULL,
+      work_item_id       INTEGER NOT NULL,
+      session_id         TEXT,
+      actor_kind         TEXT    NOT NULL,
+      actor_id           TEXT    NOT NULL,
+      actor_system_id    TEXT,
+      actor_display_name TEXT,
+      actor_metadata     TEXT,
+      claim_token        TEXT    NOT NULL,
+      status             TEXT    NOT NULL,
+      claimed_at         INTEGER NOT NULL,
+      expires_at         INTEGER NOT NULL,
+      released_at        INTEGER,
+      release_reason     TEXT,
+      source_event_id    INTEGER,
+      visibility_class   TEXT    NOT NULL DEFAULT 'private',
+      version            INTEGER NOT NULL DEFAULT 1
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_work_claims_history_work_item
+      ON work_claims_history(work_item_id, claimed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_work_claims_history_scope
+      ON work_claims_history(tenant_id, system_id, workspace_id, collaboration_id, scope_id, claimed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_work_claims_history_actor_status
+      ON work_claims_history(actor_kind, actor_id, status);
 
     CREATE TABLE IF NOT EXISTS handoff_records (
       id                 INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -722,76 +828,8 @@ export function createSQLiteSchema(database: Database.Database): void {
       ON scope_config(tenant_id, system_id, workspace_id, collaboration_id, scope_id, config_key);
   `);
 
-  database
-    .prepare(
-      `INSERT INTO schema_meta (id, schema_version, updated_at)
-       VALUES (1, ?, strftime('%s','now'))
-       ON CONFLICT(id) DO UPDATE SET
-         schema_version = excluded.schema_version,
-         updated_at = excluded.updated_at`,
-    )
-    .run(CURRENT_SCHEMA_VERSION);
-
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS memory_event_log (
-      event_id           INTEGER PRIMARY KEY AUTOINCREMENT,
-      tenant_id          TEXT    NOT NULL,
-      system_id          TEXT    NOT NULL,
-      workspace_id       TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id   TEXT    NOT NULL DEFAULT '',
-      scope_id           TEXT    NOT NULL,
-      session_id         TEXT,
-      actor_id           TEXT,
-      actor_kind         TEXT,
-      actor_system_id    TEXT,
-      actor_display_name TEXT,
-      actor_metadata     TEXT,
-      entity_kind        TEXT    NOT NULL,
-      entity_id          TEXT    NOT NULL,
-      event_type         TEXT    NOT NULL,
-      payload            TEXT    NOT NULL DEFAULT '{}',
-      causation_id       TEXT,
-      correlation_id     TEXT,
-      created_at         INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_memory_event_scope_created
-      ON memory_event_log(tenant_id, system_id, workspace_id, collaboration_id, scope_id, created_at, event_id);
-    CREATE INDEX IF NOT EXISTS idx_memory_event_entity_created
-      ON memory_event_log(entity_kind, entity_id, created_at, event_id);
-    CREATE INDEX IF NOT EXISTS idx_memory_event_session_created
-      ON memory_event_log(session_id, created_at, event_id);
-    CREATE INDEX IF NOT EXISTS idx_memory_event_correlation
-      ON memory_event_log(correlation_id);
-
-    CREATE TABLE IF NOT EXISTS session_state_current (
-      tenant_id          TEXT    NOT NULL,
-      system_id          TEXT    NOT NULL,
-      workspace_id       TEXT    NOT NULL DEFAULT 'default',
-      collaboration_id   TEXT    NOT NULL DEFAULT '',
-      scope_id           TEXT    NOT NULL,
-      session_id         TEXT    NOT NULL,
-      current_objective  TEXT,
-      blockers           TEXT    NOT NULL DEFAULT '[]',
-      assumptions        TEXT    NOT NULL DEFAULT '[]',
-      pending_decisions  TEXT    NOT NULL DEFAULT '[]',
-      active_tools       TEXT    NOT NULL DEFAULT '[]',
-      recent_outputs     TEXT    NOT NULL DEFAULT '[]',
-      updated_at         INTEGER NOT NULL,
-      source_event_id    INTEGER,
-      PRIMARY KEY (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS projection_watermarks (
-      projection_name    TEXT PRIMARY KEY,
-      last_event_id      INTEGER NOT NULL DEFAULT 0,
-      updated_at         INTEGER NOT NULL,
-      cutover_at         INTEGER,
-      metadata           TEXT
-    );
-  `);
-
-  // ──────────────────────────── context governance (v18) ────────────────────────────
-  database.exec(`
+    // ──────────────────────────── context governance (v18) ────────────────────────────
+    database.exec(`
     CREATE TABLE IF NOT EXISTS context_contracts (
       id                INTEGER PRIMARY KEY AUTOINCREMENT,
       tenant_id         TEXT    NOT NULL,
@@ -859,16 +897,127 @@ export function createSQLiteSchema(database: Database.Database): void {
       ON context_escalation_policies(tenant_id, system_id, workspace_id, collaboration_id, scope_id);
   `);
 
-  if (existingVersion >= 17 && existingVersion < 18) {
+    if (existingVersion >= 17 && existingVersion < 18) {
+      // Normal upgrade path: the live governance tables still hold v17-shaped
+      // data. Rename them aside so the copy-with-transform below can rebuild
+      // them. If a prior run already renamed (crash recovery), the rename is a
+      // no-op because the _v17 tables already exist.
+      renameContractsToV17(database);
+      rebuildContractsFromV17IfPresent(database);
+    }
+
+    // ── Stamp the schema version LAST ───────────────────────────────────────
+    // Only after every version-gated migration above has completed successfully.
+    // Because this runs inside the migration transaction, a crash before this
+    // point rolls back the whole migration and leaves the version unstamped, so
+    // the migration re-runs cleanly on the next open.
+    database
+      .prepare(
+        `INSERT INTO schema_meta (id, schema_version, updated_at)
+         VALUES (1, ?, strftime('%s','now'))
+         ON CONFLICT(id) DO UPDATE SET
+           schema_version = excluded.schema_version,
+           updated_at = excluded.updated_at`,
+      )
+      .run(CURRENT_SCHEMA_VERSION);
+  });
+
+  runMigration();
+}
+
+
+/** Returns true when a table with the given name exists. */
+function tableExists(database: Database.Database, name: string): boolean {
+  return Boolean(
+    (
+      database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get(name) as { name?: string } | undefined
+    )?.name,
+  );
+}
+
+/** Returns true when the named table exists and holds at least one row. */
+function tableHasRows(database: Database.Database, name: string): boolean {
+  if (!tableExists(database, name)) return false;
+  const row = database
+    .prepare(`SELECT EXISTS(SELECT 1 FROM ${name}) AS present`)
+    .get() as { present: number } | undefined;
+  return Boolean(row?.present);
+}
+
+/**
+ * Rename the live v17 governance tables aside to `_v17` so the rebuild can copy
+ * from them with the v17→v18 data transform. Safe to call when the `_v17`
+ * tables already exist (crash recovery): the rename of an already-renamed table
+ * is skipped. Only renames the live tables when their `_v17` counterparts do not
+ * yet exist.
+ */
+function renameContractsToV17(database: Database.Database): void {
+  if (tableExists(database, 'context_contracts') && !tableExists(database, 'context_contracts_v17')) {
     database.exec(`
       DROP INDEX IF EXISTS idx_ctx_contract_scope_default;
       DROP INDEX IF EXISTS idx_ctx_contract_scope_name;
-      DROP INDEX IF EXISTS idx_ctx_invariant_scope_id;
       ALTER TABLE context_contracts RENAME TO context_contracts_v17;
+    `);
+  }
+  if (tableExists(database, 'context_invariants') && !tableExists(database, 'context_invariants_v17')) {
+    database.exec(`
+      DROP INDEX IF EXISTS idx_ctx_invariant_scope_id;
       ALTER TABLE context_invariants RENAME TO context_invariants_v17;
     `);
+  }
+}
 
-    database.exec(`
+/**
+ * Complete (or perform) the v17→v18 rebuild for whichever `_v17` governance
+ * tables are present. This is the single code path for both the normal upgrade
+ * (after {@link renameContractsToV17}) and crash recovery (where a prior run
+ * left `_v17` tables stranded).
+ *
+ * DATA-SAFETY GUARD (plan 0.3c): the copy runs ONLY when the corresponding live
+ * table is empty. This is the invariant that distinguishes the two safe states
+ * from the dangerous one:
+ *
+ *  - Normal upgrade / new-code crash recovery: the RENAME moved the live rows
+ *    into `_v17`, so the live table is absent or freshly (empty-)created. The
+ *    copy completes the interrupted migration.
+ *  - OLD-code stranded state: the old migration stamped the schema version
+ *    BEFORE the rebuild, so a user could reopen with new code, write rows into
+ *    the live table, and leave `_v17` stranded alongside a NON-empty live table.
+ *    Blindly dropping+recopying would destroy those user-written rows. Instead
+ *    we leave the live table untouched and rename the stale `_v17` aside to
+ *    `*_v17_orphaned` so it stops re-triggering recovery, warning the operator
+ *    that it holds pre-migration governance rows that were not auto-restored.
+ *
+ * Idempotent and a no-op when no `_v17` tables exist. Runs within the caller's
+ * transaction so the whole operation is atomic.
+ */
+function rebuildContractsFromV17IfPresent(database: Database.Database): void {
+  if (tableExists(database, 'context_contracts_v17')) {
+    if (tableHasRows(database, 'context_contracts')) {
+      // Live table already holds rows a user wrote after an interrupted OLD-code
+      // migration. Do NOT overwrite them. Rename the stale copy aside so it stops
+      // triggering recovery on every open, and tell the operator it was preserved
+      // but not auto-restored.
+      database.exec(`
+        DROP TABLE IF EXISTS context_contracts_v17_orphaned;
+        ALTER TABLE context_contracts_v17 RENAME TO context_contracts_v17_orphaned;
+      `);
+      console.warn(
+        '[ai-memory-layer] Found stranded pre-migration governance data in ' +
+          '"context_contracts_v17" alongside a non-empty live "context_contracts" ' +
+          'table. To avoid destroying rows written after an interrupted migration, ' +
+          'the live table was left untouched and the stale copy was renamed to ' +
+          '"context_contracts_v17_orphaned". It was NOT auto-restored; inspect it ' +
+          'manually if you need those rows and drop it once reconciled.',
+      );
+    } else {
+      database.exec(`
+      DROP INDEX IF EXISTS idx_ctx_contract_scope_default;
+      DROP INDEX IF EXISTS idx_ctx_contract_scope_name;
+      DROP TABLE IF EXISTS context_contracts;
+
       CREATE TABLE context_contracts (
         id                INTEGER PRIMARY KEY AUTOINCREMENT,
         tenant_id         TEXT    NOT NULL,
@@ -899,37 +1048,42 @@ export function createSQLiteSchema(database: Database.Database): void {
         WHERE is_default = 0;
 
       INSERT INTO context_contracts (
-        tenant_id,
-        system_id,
-        workspace_id,
-        collaboration_id,
-        scope_id,
-        name,
-        is_default,
-        is_deleted,
-        contract_json,
-        created_at,
-        updated_at
+        tenant_id, system_id, workspace_id, collaboration_id, scope_id,
+        name, is_default, is_deleted, contract_json, created_at, updated_at
       )
       SELECT
-        tenant_id,
-        system_id,
-        workspace_id,
-        collaboration_id,
-        scope_id,
-        CASE
-          WHEN is_default = 1 AND name = '__default__' THEN NULL
-          ELSE name
-        END,
-        CASE
-          WHEN is_default = 1 AND name = '__default__' THEN 1
-          ELSE 0
-        END,
+        tenant_id, system_id, workspace_id, collaboration_id, scope_id,
+        CASE WHEN is_default = 1 AND name = '__default__' THEN NULL ELSE name END,
+        CASE WHEN is_default = 1 AND name = '__default__' THEN 1 ELSE 0 END,
         0,
-        contract_json,
-        created_at,
-        updated_at
+        contract_json, created_at, updated_at
       FROM context_contracts_v17;
+
+      DROP TABLE context_contracts_v17;
+    `);
+    }
+  }
+
+  if (tableExists(database, 'context_invariants_v17')) {
+    if (tableHasRows(database, 'context_invariants')) {
+      // See the contracts branch above: preserve the user-written live rows and
+      // rename the stranded pre-migration copy aside instead of overwriting.
+      database.exec(`
+        DROP TABLE IF EXISTS context_invariants_v17_orphaned;
+        ALTER TABLE context_invariants_v17 RENAME TO context_invariants_v17_orphaned;
+      `);
+      console.warn(
+        '[ai-memory-layer] Found stranded pre-migration governance data in ' +
+          '"context_invariants_v17" alongside a non-empty live "context_invariants" ' +
+          'table. To avoid destroying rows written after an interrupted migration, ' +
+          'the live table was left untouched and the stale copy was renamed to ' +
+          '"context_invariants_v17_orphaned". It was NOT auto-restored; inspect it ' +
+          'manually if you need those rows and drop it once reconciled.',
+      );
+    } else {
+      database.exec(`
+      DROP INDEX IF EXISTS idx_ctx_invariant_scope_id;
+      DROP TABLE IF EXISTS context_invariants;
 
       CREATE TABLE context_invariants (
         id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -955,38 +1109,18 @@ export function createSQLiteSchema(database: Database.Database): void {
         ON context_invariants(tenant_id, system_id, workspace_id, collaboration_id, scope_id, invariant_id);
 
       INSERT INTO context_invariants (
-        tenant_id,
-        system_id,
-        workspace_id,
-        collaboration_id,
-        scope_id,
-        invariant_id,
-        title,
-        instruction,
-        severity,
-        scope_level,
-        is_deleted,
-        created_at,
-        updated_at
+        tenant_id, system_id, workspace_id, collaboration_id, scope_id,
+        invariant_id, title, instruction, severity, scope_level, is_deleted,
+        created_at, updated_at
       )
       SELECT
-        tenant_id,
-        system_id,
-        workspace_id,
-        collaboration_id,
-        scope_id,
-        invariant_id,
-        title,
-        instruction,
-        severity,
-        scope_level,
-        0,
-        created_at,
-        updated_at
+        tenant_id, system_id, workspace_id, collaboration_id, scope_id,
+        invariant_id, title, instruction, severity, scope_level, 0,
+        created_at, updated_at
       FROM context_invariants_v17;
 
-      DROP TABLE context_contracts_v17;
       DROP TABLE context_invariants_v17;
     `);
+    }
   }
 }

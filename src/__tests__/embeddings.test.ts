@@ -160,6 +160,55 @@ describe('sqlite embeddings', () => {
     expect(results[0]?.knowledgeMemoryId).toBe(knowledge.id);
   });
 
+  it('excludes retired knowledge from semantic search (plan 0.6)', () => {
+    const scope = makeScope();
+    const kept = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'kept fact',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+    const retired = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'retired fact',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+    adapter.embeddings.storeEmbedding(kept.id, new Float32Array([1, 0]));
+    adapter.embeddings.storeEmbedding(retired.id, new Float32Array([1, 0]));
+
+    // Before retirement both match.
+    expect(adapter.embeddings.findSimilar(scope, new Float32Array([1, 0]))).toHaveLength(2);
+
+    adapter.retireKnowledgeMemory(retired.id);
+
+    const results = adapter.embeddings.findSimilar(scope, new Float32Array([1, 0]));
+    expect(results.map((r) => r.knowledgeMemoryId)).toEqual([kept.id]);
+  });
+
+  it('excludes retired knowledge from cross-scope semantic search (plan 0.6)', () => {
+    const scopeA = makeScope({ scope_id: 'thread-1' });
+    const scopeB = makeScope({ scope_id: 'thread-2' });
+    const retired = adapter.insertKnowledgeMemory({
+      ...scopeA,
+      fact: 'retired cross-scope fact',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+    adapter.embeddings.storeEmbedding(retired.id, new Float32Array([1, 0]));
+    adapter.retireKnowledgeMemory(retired.id);
+
+    const results = adapter.embeddings.findSimilarCrossScope(
+      scopeB,
+      'workspace',
+      new Float32Array([1, 0]),
+    );
+    expect(results).toHaveLength(0);
+  });
+
   it('warns when stored embedding dimensions do not match the query vector', () => {
     const logger = {
       debug: vi.fn(),

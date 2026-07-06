@@ -108,7 +108,7 @@ export function createSQLiteEmbeddingAdapter(
           `SELECT ke.knowledge_memory_id, ke.vector
            FROM knowledge_embeddings ke
            JOIN knowledge_memory km ON km.id = ke.knowledge_memory_id
-           WHERE ${SCOPE_WHERE} AND km.superseded_by_id IS NULL`,
+           WHERE ${SCOPE_WHERE} AND km.superseded_by_id IS NULL AND km.retired_at IS NULL`,
         )
         .all(...scopeValues(scope)) as Array<{ knowledge_memory_id: number; vector: Buffer }>;
 
@@ -152,7 +152,7 @@ export function createSQLiteEmbeddingAdapter(
           `SELECT ke.knowledge_memory_id, ke.vector
            FROM knowledge_embeddings ke
            JOIN knowledge_memory km ON km.id = ke.knowledge_memory_id
-           WHERE ${scopeWhereForLevel(scope, level)} AND km.superseded_by_id IS NULL`,
+           WHERE ${scopeWhereForLevel(scope, level)} AND km.superseded_by_id IS NULL AND km.retired_at IS NULL`,
         )
         .all(...scopeParamsForLevel(scope, level)) as Array<{
         knowledge_memory_id: number;

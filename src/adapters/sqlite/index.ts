@@ -662,6 +662,29 @@ function createAdapterFromDatabase(
     };
   }
 
+  // Move a displaced (dead) claim row out of work_claims_current and into
+  // work_claims_history, preserving its original id and all columns. This frees
+  // the single UNIQUE(work_item_id) slot in work_claims_current for a fresh
+  // claim while keeping the historical claim retrievable by id and via claim
+  // listings (0.1). Must be called inside the claim transaction.
+  function archiveWorkClaimToHistory(claimId: number): void {
+    db.prepare(
+      `INSERT INTO work_claims_history
+        (id, tenant_id, system_id, workspace_id, collaboration_id, scope_id, work_item_id,
+         session_id, actor_kind, actor_id, actor_system_id, actor_display_name, actor_metadata,
+         claim_token, status, claimed_at, expires_at, released_at, release_reason,
+         source_event_id, visibility_class, version)
+       SELECT
+         id, tenant_id, system_id, workspace_id, collaboration_id, scope_id, work_item_id,
+         session_id, actor_kind, actor_id, actor_system_id, actor_display_name, actor_metadata,
+         claim_token, status, claimed_at, expires_at, released_at, release_reason,
+         source_event_id, visibility_class, version
+       FROM work_claims_current
+       WHERE id = ?`,
+    ).run(claimId);
+    db.prepare('DELETE FROM work_claims_current WHERE id = ?').run(claimId);
+  }
+
   function mapHandoff(row: Record<string, unknown>): HandoffRecord {
     return {
       id: Number(row.id),
@@ -2020,9 +2043,6 @@ function createAdapterFromDatabase(
         .get(id) as WorkItem | undefined;
       if (!before) return null;
       const beforeItem = rowToWorkItem(before);
-      if (options?.expectedVersion != null && beforeItem.version !== options.expectedVersion) {
-        throw new ConflictError(`Work item ${id} version mismatch`);
-      }
       const updatedAt = nowSeconds();
       const next = {
         title: patch.title ?? beforeItem.title,
@@ -2030,11 +2050,37 @@ function createAdapterFromDatabase(
         status: patch.status ?? beforeItem.status,
         visibility_class: patch.visibility_class ?? beforeItem.visibility_class,
       };
-      db.prepare(
-        `UPDATE work_items
-         SET title = ?, detail = ?, status = ?, visibility_class = ?, version = version + 1, updated_at = ?
-         WHERE id = ?`,
-      ).run(next.title, next.detail ?? null, next.status, next.visibility_class, updatedAt, id);
+      // Optimistic locking: guard the version inside the UPDATE itself so a
+      // concurrent writer that bumped the version between our SELECT and this
+      // write cannot both succeed. Do not rely on the prior SELECT for the
+      // conflict decision — zero rows affected is the authority.
+      const result =
+        options?.expectedVersion != null
+          ? db
+              .prepare(
+                `UPDATE work_items
+                 SET title = ?, detail = ?, status = ?, visibility_class = ?, version = version + 1, updated_at = ?
+                 WHERE id = ? AND version = ?`,
+              )
+              .run(
+                next.title,
+                next.detail ?? null,
+                next.status,
+                next.visibility_class,
+                updatedAt,
+                id,
+                options.expectedVersion,
+              )
+          : db
+              .prepare(
+                `UPDATE work_items
+                 SET title = ?, detail = ?, status = ?, visibility_class = ?, version = version + 1, updated_at = ?
+                 WHERE id = ?`,
+              )
+              .run(next.title, next.detail ?? null, next.status, next.visibility_class, updatedAt, id);
+      if (options?.expectedVersion != null && result.changes === 0) {
+        throw new ConflictError(`Work item ${id} version mismatch`);
+      }
       const after = db
         .prepare('SELECT * FROM work_items WHERE id = ?')
         .get(id) as WorkItem | undefined;
@@ -2107,28 +2153,36 @@ function createAdapterFromDatabase(
             }
             return this.renewWorkClaim(existing.id, input.actor, input.lease_seconds ?? 300)!;
           }
-          db.prepare(
-            `UPDATE work_claims_current
-             SET status = 'expired', released_at = ?, release_reason = 'expired', version = version + 1
-             WHERE id = ?`,
-          ).run(now, existing.id);
-          const expired = mapWorkClaim(
-            db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(existing.id) as Record<string, unknown>,
-          );
-          insertMemoryEventInternal({
-            ...normalizeScope(expired),
-            session_id: expired.session_id,
-            actor_id: expired.actor.actor_id,
-            actor_kind: expired.actor.actor_kind,
-            actor_system_id: expired.actor.system_id,
-            actor_display_name: expired.actor.display_name,
-            actor_metadata: expired.actor.metadata,
-            entity_kind: 'work_claim',
-            entity_id: String(expired.id),
-            event_type: 'work_claim.expired',
-            payload: { after: cloneValue(expired) },
-            created_at: now,
-          });
+          // The existing current claim is dead (released) or has lapsed
+          // (active-but-expired). If it lapsed, transition it to 'expired' and
+          // emit the expiry event, matching the prior behavior. Then displace
+          // it into work_claims_history so the fresh claim below can occupy the
+          // single UNIQUE(work_item_id) slot in work_claims_current.
+          if (existing.status === 'active') {
+            db.prepare(
+              `UPDATE work_claims_current
+               SET status = 'expired', released_at = ?, release_reason = 'expired', version = version + 1
+               WHERE id = ?`,
+            ).run(now, existing.id);
+            const expired = mapWorkClaim(
+              db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(existing.id) as Record<string, unknown>,
+            );
+            insertMemoryEventInternal({
+              ...normalizeScope(expired),
+              session_id: expired.session_id,
+              actor_id: expired.actor.actor_id,
+              actor_kind: expired.actor.actor_kind,
+              actor_system_id: expired.actor.system_id,
+              actor_display_name: expired.actor.display_name,
+              actor_metadata: expired.actor.metadata,
+              entity_kind: 'work_claim',
+              entity_id: String(expired.id),
+              event_type: 'work_claim.expired',
+              payload: { after: cloneValue(expired) },
+              created_at: now,
+            });
+          }
+          archiveWorkClaimToHistory(existing.id);
         }
         const normalized = normalizeScope(input);
         const actorParts = serializeActorMetadata(input.actor);
@@ -2293,8 +2347,14 @@ function createAdapterFromDatabase(
       const row = db
         .prepare('SELECT * FROM work_claims_current WHERE id = ?')
         .get(claimId) as Record<string, unknown> | undefined;
-      if (!row) return null;
-      return mapWorkClaim(row);
+      if (row) return mapWorkClaim(row);
+      // Displaced claims live in history (0.1); a caller holding an old claim id
+      // must still be able to resolve it.
+      const historyRow = db
+        .prepare('SELECT * FROM work_claims_history WHERE id = ?')
+        .get(claimId) as Record<string, unknown> | undefined;
+      if (!historyRow) return null;
+      return mapWorkClaim(historyRow);
     },
 
     getActiveWorkClaim(workItemId): WorkClaim | null {
@@ -2367,9 +2427,28 @@ function createAdapterFromDatabase(
           created_at: now,
         });
       }
-      const rows = db
-        .prepare(`SELECT * FROM work_claims_current WHERE ${SCOPE_WHERE} ORDER BY claimed_at DESC`)
-        .all(...scopeValues(scope)) as Array<Record<string, unknown>>;
+      // Displaced historical claims (0.1) are always expired/released, so they
+      // only matter when the caller asks for them. Skip the history branch and its
+      // scan entirely for the common default listing; otherwise UNION it in so
+      // includeExpired/includeReleased listings still surface historical claims.
+      const wantsHistory = Boolean(options?.includeExpired || options?.includeReleased);
+      const rows = (
+        wantsHistory
+          ? db
+              .prepare(
+                `SELECT * FROM work_claims_current WHERE ${SCOPE_WHERE}
+                 UNION ALL
+                 SELECT * FROM work_claims_history WHERE ${SCOPE_WHERE}
+                 ORDER BY claimed_at DESC`,
+              )
+              .all(...scopeValues(scope), ...scopeValues(scope))
+          : db
+              .prepare(
+                `SELECT * FROM work_claims_current WHERE ${SCOPE_WHERE}
+                 ORDER BY claimed_at DESC`,
+              )
+              .all(...scopeValues(scope))
+      ) as Array<Record<string, unknown>>;
       return rows
         .map(mapWorkClaim)
         .filter((claim) => {
@@ -2420,9 +2499,30 @@ function createAdapterFromDatabase(
           created_at: now,
         });
       }
-      const rows = db
-        .prepare(`SELECT * FROM work_claims_current WHERE ${scopeWhereForLevel(scope, level)} ORDER BY claimed_at DESC`)
-        .all(...scopeParamsForLevel(scope, level)) as Array<Record<string, unknown>>;
+      // Displaced historical claims (0.1) are always expired/released, so skip the
+      // history branch and its scan for the common default cross-scope listing;
+      // only UNION it in when includeExpired/includeReleased is requested.
+      const wantsHistory = Boolean(options?.includeExpired || options?.includeReleased);
+      const rows = (
+        wantsHistory
+          ? db
+              .prepare(
+                `SELECT * FROM work_claims_current WHERE ${scopeWhereForLevel(scope, level)}
+                 UNION ALL
+                 SELECT * FROM work_claims_history WHERE ${scopeWhereForLevel(scope, level)}
+                 ORDER BY claimed_at DESC`,
+              )
+              .all(
+                ...scopeParamsForLevel(scope, level),
+                ...scopeParamsForLevel(scope, level),
+              )
+          : db
+              .prepare(
+                `SELECT * FROM work_claims_current WHERE ${scopeWhereForLevel(scope, level)}
+                 ORDER BY claimed_at DESC`,
+              )
+              .all(...scopeParamsForLevel(scope, level))
+      ) as Array<Record<string, unknown>>;
       return rows
         .map(mapWorkClaim)
         .filter((claim) => {
