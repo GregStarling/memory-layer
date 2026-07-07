@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from 'crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import { type CreateMemoryOptions } from '../core/quick.js';
 import type { MemoryManager } from '../core/manager.js';
@@ -74,10 +74,31 @@ export interface HttpServerConfig {
   preset?: CreateMemoryOptions['preset'];
   /** API key for bearer token auth. If set, all requests require Authorization header. */
   apiKey?: string;
+  /**
+   * Tenant-bound API key registry. Each entry maps a bearer key to the tenant
+   * it may act on (or `'*'` for all tenants), the widest cross-scope level it
+   * may request, and whether it may reach admin endpoints. When set, callers
+   * whose resolved scope names a different tenant — or who request a wider
+   * cross-scope level than the key allows — are rejected with 403.
+   *
+   * Prefer this over the single `apiKey` for any multi-tenant deployment.
+   * Corresponding env var: `MEMORY_API_KEYS` (see parseApiKeyRegistryEnv).
+   */
+  apiKeys?: ApiKeyRegistryEntry[];
   /** Separate admin API key for compaction and maintenance endpoints. */
   adminApiKey?: string;
   /** Enable CORS headers. Defaults to true. */
   cors?: boolean;
+  /**
+   * Cross-origin policy for `Access-Control-Allow-Origin` (1.2). When unset (the
+   * default), NO CORS origin header is emitted at all — the browser blocks
+   * cross-origin reads (same-origin only). Set to a specific origin (or a
+   * comma-separated allowlist) to echo `Access-Control-Allow-Origin` only for a
+   * matching `Origin`. The literal `'*'` enables the wildcard (insecure with
+   * tenant data — a startup warning is logged). Corresponding env var:
+   * `MEMORY_CORS_ORIGIN`.
+   */
+  corsOrigin?: string;
   /** Host to bind to. Defaults to 127.0.0.1. */
   host?: string;
   /** Maximum accepted request body size in bytes. Defaults to 1 MiB. */
@@ -114,6 +135,39 @@ export interface HttpServerConfig {
   defaultDiffMaxEvents?: number;
   /** Hard maximum event cap for diff/reporting endpoints. Defaults to 20000. */
   maxDiffMaxEvents?: number;
+  /**
+   * Sustained request rate per credential (per API key, or per remote address
+   * when keyless). Undefined disables rate limiting entirely (the default, for
+   * backward compatibility). Hosted deployments should set this. `/healthz` and
+   * `/readyz` are always exempt.
+   */
+  requestsPerMinute?: number;
+  /**
+   * Token-bucket burst capacity. Defaults to `requestsPerMinute` when rate
+   * limiting is enabled. Ignored when `requestsPerMinute` is undefined.
+   */
+  burst?: number;
+}
+
+/**
+ * One entry in the tenant-bound API key registry.
+ *
+ * `tenantId: '*'` grants access to every tenant (the wildcard/back-compat mode).
+ * A concrete `tenantId` binds the key: requests resolving to any other tenant
+ * are rejected with 403.
+ */
+export interface ApiKeyRegistryEntry {
+  /** The bearer secret (compared timing-safely). */
+  key: string;
+  /** Tenant this key may act on, or `'*'` for all tenants. */
+  tenantId: string | '*';
+  /**
+   * Widest cross-scope level this key may request. Requests asking for a wider
+   * level are rejected with 403. Defaults to `'tenant'` (no ceiling).
+   */
+  maxCrossScopeLevel?: ScopeLevel;
+  /** Whether this key may reach admin-gated endpoints. Defaults to false. */
+  admin?: boolean;
 }
 
 class HttpRequestError extends Error {
@@ -144,6 +198,77 @@ function safeSecretEquals(provided: string | string[] | undefined, expected: str
   const providedBuffer = createHash('sha256').update(provided).digest();
   const expectedBuffer = createHash('sha256').update(expected).digest();
   return timingSafeEqual(providedBuffer, expectedBuffer);
+}
+
+/**
+ * The authenticated caller for a single request.
+ *
+ * `tenantId: '*'` is the wildcard principal (legacy single-key mode, or a
+ * registry entry bound to all tenants). A concrete `tenantId` binds the
+ * principal to exactly one tenant.
+ */
+interface RequestPrincipal {
+  tenantId: string | '*';
+  maxCrossScopeLevel: ScopeLevel;
+  admin: boolean;
+}
+
+const SCOPE_LEVEL_RANK: Record<ScopeLevel, number> = {
+  scope: 1,
+  workspace: 2,
+  system: 3,
+  tenant: 4,
+};
+
+function scopeLevelRank(level: ScopeLevel | undefined): number {
+  return level ? SCOPE_LEVEL_RANK[level] : SCOPE_LEVEL_RANK.scope;
+}
+
+/**
+ * Parses the `MEMORY_API_KEYS` env var into registry entries.
+ *
+ * Encoding: comma-separated entries, each `key:tenant[:maxCrossScopeLevel][:admin]`.
+ *   - `key`     the bearer secret (may not contain `:` or `,`)
+ *   - `tenant`  a tenant id, or `*` for all tenants
+ *   - `maxCrossScopeLevel` (optional) one of scope|workspace|system|tenant
+ *   - `admin`   (optional) the literal `admin` to grant admin access
+ *
+ * Examples:
+ *   "k1:tenantA:workspace"        → k1 bound to tenantA, may widen up to workspace
+ *   "k2:*,k3:tenantB:tenant:admin" → k2 wildcard; k3 bound to tenantB, admin
+ */
+export function parseApiKeyRegistryEnv(raw: string | undefined): ApiKeyRegistryEntry[] {
+  if (!raw || !raw.trim()) return [];
+  const entries: ApiKeyRegistryEntry[] = [];
+  for (const chunk of raw.split(',')) {
+    const trimmed = chunk.trim();
+    if (!trimmed) continue;
+    const parts = trimmed.split(':');
+    const key = parts[0]?.trim();
+    const tenantId = parts[1]?.trim();
+    if (!key || !tenantId) {
+      throw new Error(
+        `Invalid MEMORY_API_KEYS entry "${trimmed}": expected "key:tenant[:level][:admin]"`,
+      );
+    }
+    let maxCrossScopeLevel: ScopeLevel | undefined;
+    let admin = false;
+    for (const extra of parts.slice(2)) {
+      const token = extra.trim();
+      if (!token) continue;
+      if (token === 'admin') {
+        admin = true;
+      } else if (token === 'scope' || token === 'workspace' || token === 'system' || token === 'tenant') {
+        maxCrossScopeLevel = token;
+      } else {
+        throw new Error(
+          `Invalid MEMORY_API_KEYS token "${token}" in entry "${trimmed}": expected a scope level or "admin"`,
+        );
+      }
+    }
+    entries.push({ key, tenantId, maxCrossScopeLevel, admin });
+  }
+  return entries;
 }
 
 function writeJson(res: ServerResponse, status: number, data: unknown): void {
@@ -295,7 +420,84 @@ function parseEventTypes(value: string | undefined): Set<MemoryEventType> | unde
   );
 }
 
+/**
+ * Per-request authenticated principal, keyed by the incoming message. Set by
+ * the dispatcher immediately after authentication; read by resolveRequestScope
+ * so every one of its ~80 call sites inherits tenant-binding enforcement
+ * without a signature change.
+ */
+const requestPrincipals = new WeakMap<IncomingMessage, RequestPrincipal>();
+
+/**
+ * Rejects a request whose resolved scope names a tenant the authenticated key
+ * is not bound to. Wildcard principals ('*') pass unconditionally.
+ */
+function enforcePrincipalTenant(
+  req: IncomingMessage,
+  resolved: string | MemoryScope,
+): void {
+  const principal = requestPrincipals.get(req);
+  if (!principal || principal.tenantId === '*') return;
+  const tenantId =
+    typeof resolved === 'string' ? 'default' : requireString(resolved.tenant_id, 'scope.tenant_id');
+  if (tenantId !== principal.tenantId) {
+    throw new HttpRequestError(
+      403,
+      `API key is bound to tenant '${principal.tenantId}' and may not act on tenant '${tenantId}'`,
+    );
+  }
+}
+
+/**
+ * Rejects a request asking for a wider cross-scope level than the authenticated
+ * key permits. Inspects the `scope_level` query param and any body-supplied
+ * `crossScopeLevel` (top-level or inside a `contract`). Wildcard principals with
+ * the default 'tenant' ceiling pass everything.
+ */
+function enforcePrincipalCeiling(
+  req: IncomingMessage,
+  query: Record<string, string>,
+  body?: Record<string, unknown>,
+): void {
+  const principal = requestPrincipals.get(req);
+  if (!principal) return;
+  const ceiling = scopeLevelRank(principal.maxCrossScopeLevel);
+  const requested: Array<unknown> = [query.scope_level];
+  if (body) {
+    requested.push(body.crossScopeLevel);
+    if (isRecord(body.contract)) requested.push(body.contract.crossScopeLevel);
+  }
+  for (const value of requested) {
+    if (value == null || value === '') continue;
+    const level =
+      value === 'scope' || value === 'workspace' || value === 'system' || value === 'tenant'
+        ? (value as ScopeLevel)
+        : undefined;
+    if (level && scopeLevelRank(level) > ceiling) {
+      throw new HttpRequestError(
+        403,
+        `API key may not request cross-scope level '${level}' (ceiling: '${principal.maxCrossScopeLevel}')`,
+      );
+    }
+  }
+}
+
 function resolveRequestScope(
+  fallbackScope: string | MemoryScope | undefined,
+  req: IncomingMessage,
+  query: Record<string, string>,
+  body?: Record<string, unknown>,
+): string | MemoryScope {
+  const resolved = resolveRequestScopeRaw(fallbackScope, req, query, body);
+  // Bind the client-supplied five-tuple to the authenticated principal: a
+  // tenant-bound key may not name a different tenant (1.1). Wildcard/legacy
+  // keys and keyless mode pass through unchanged.
+  enforcePrincipalTenant(req, resolved);
+  enforcePrincipalCeiling(req, query, body);
+  return resolved;
+}
+
+function resolveRequestScopeRaw(
   fallbackScope: string | MemoryScope | undefined,
   req: IncomingMessage,
   query: Record<string, string>,
@@ -384,6 +586,216 @@ function matchesEventScope(event: MemoryEvent, scope: MemoryScope, level: ScopeL
 }
 
 /**
+ * Extracts the raw bearer secret from an Authorization header value, or
+ * undefined when absent/malformed. The value itself is compared timing-safely
+ * by callers; this only strips the "Bearer " prefix.
+ */
+function extractBearer(auth: string | string[] | undefined): string | undefined {
+  if (typeof auth !== 'string') return undefined;
+  const match = /^Bearer\s+(.+)$/i.exec(auth);
+  return match ? match[1] : undefined;
+}
+
+/**
+ * Resolves the authenticated principal for a request against the key registry.
+ *
+ * Returns:
+ *  - a RequestPrincipal when a registered key matches,
+ *  - `null` when auth is configured but the request presents no valid key,
+ *  - `undefined` when no auth is configured (keyless mode).
+ *
+ * Every registered key is compared timing-safely (SHA-256 + timingSafeEqual);
+ * we iterate all entries rather than hashing-then-looking-up so a raw-key map
+ * lookup can never short-circuit the comparison.
+ */
+function authenticatePrincipal(
+  req: IncomingMessage,
+  registry: ApiKeyRegistryEntry[],
+  legacyApiKey: string | undefined,
+): RequestPrincipal | null | undefined {
+  if (registry.length > 0) {
+    const presented = extractBearer(req.headers.authorization);
+    let matched: ApiKeyRegistryEntry | undefined;
+    // Iterate every entry timing-safely; do not early-exit on first match so
+    // the comparison cost does not leak which/whether a key matched.
+    for (const entry of registry) {
+      if (safeSecretEquals(presented, entry.key)) {
+        matched = entry;
+      }
+    }
+    if (!matched) return null;
+    return {
+      tenantId: matched.tenantId,
+      maxCrossScopeLevel: matched.maxCrossScopeLevel ?? 'tenant',
+      admin: matched.admin ?? false,
+    };
+  }
+  if (legacyApiKey) {
+    const auth = req.headers.authorization;
+    if (!safeSecretEquals(auth, `Bearer ${legacyApiKey}`)) return null;
+    // Legacy single-key mode: wildcard tenant, no ceiling, no implicit admin.
+    return { tenantId: '*', maxCrossScopeLevel: 'tenant', admin: false };
+  }
+  return undefined;
+}
+
+function isLoopbackHost(host: string): boolean {
+  return (
+    host === '127.0.0.1' ||
+    host === '::1' ||
+    host === 'localhost' ||
+    host.startsWith('127.')
+  );
+}
+
+/**
+ * Resolved cross-origin policy (1.2).
+ *   - `mode: 'none'`     no `Access-Control-Allow-Origin` header ever (default;
+ *                        browsers block cross-origin reads / same-origin only).
+ *   - `mode: 'wildcard'` echo `*` (explicit `MEMORY_CORS_ORIGIN=*` only).
+ *   - `mode: 'allowlist'` echo the request's `Origin` only when it matches one
+ *                        of the configured origins.
+ */
+type CorsPolicy =
+  | { mode: 'none' }
+  | { mode: 'wildcard' }
+  | { mode: 'allowlist'; origins: Set<string> };
+
+/**
+ * Parses the `corsOrigin` config / `MEMORY_CORS_ORIGIN` env into a policy.
+ * Undefined/empty → same-origin-only (no CORS headers). The literal `'*'` →
+ * wildcard. Anything else → a comma-separated allowlist of exact origins.
+ */
+function resolveCorsPolicy(raw: string | undefined): CorsPolicy {
+  if (raw == null) return { mode: 'none' };
+  const trimmed = raw.trim();
+  if (trimmed === '') return { mode: 'none' };
+  if (trimmed === '*') return { mode: 'wildcard' };
+  const origins = new Set(
+    trimmed
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+  );
+  if (origins.size === 0) return { mode: 'none' };
+  return { mode: 'allowlist', origins };
+}
+
+/**
+ * Applies the resolved CORS policy to a response for the given request Origin.
+ * Sets `Access-Control-Allow-*` only when the policy permits this origin.
+ * Returns nothing; the header is simply absent when cross-origin reads are
+ * disallowed (the browser then blocks the read).
+ */
+function applyCors(
+  res: ServerResponse,
+  policy: CorsPolicy,
+  origin: string | string[] | undefined,
+): void {
+  if (policy.mode === 'none') return;
+  let allowOrigin: string | undefined;
+  if (policy.mode === 'wildcard') {
+    allowOrigin = '*';
+  } else {
+    const requestOrigin = typeof origin === 'string' ? origin : undefined;
+    if (requestOrigin && policy.origins.has(requestOrigin)) {
+      allowOrigin = requestOrigin;
+      // A specific echoed origin must be paired with Vary: Origin so caches
+      // don't serve one origin's allowance to another.
+      res.setHeader('Vary', 'Origin');
+    }
+  }
+  if (!allowOrigin) return;
+  res.setHeader('Access-Control-Allow-Origin', allowOrigin);
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type, Authorization, x-admin-key, x-memory-tenant, x-memory-system, x-memory-workspace, x-memory-collaboration, x-memory-scope, Last-Event-ID',
+  );
+}
+
+/**
+ * In-process per-credential token-bucket rate limiter (1.4). Buckets are keyed
+ * by API key (or remote address when keyless) so distinct keys never share a
+ * budget. Disabled entirely when requestsPerMinute is undefined.
+ */
+export class TokenBucketLimiter {
+  private readonly buckets = new Map<string, { tokens: number; updatedAt: number }>();
+  private readonly refillPerMs: number;
+  /**
+   * Cap on distinct tracked buckets. Keyless mode keys by remote address, so a
+   * rotating set of source IPs would otherwise grow this map without bound
+   * (memory DoS). We prune fully-refilled (idle) buckets first, then fall back
+   * to evicting the oldest, whenever the map would exceed this cap.
+   */
+  private readonly maxBuckets: number;
+
+  constructor(
+    private readonly requestsPerMinute: number,
+    private readonly burst: number,
+    maxBuckets = 10_000,
+  ) {
+    this.refillPerMs = requestsPerMinute / 60_000;
+    this.maxBuckets = Math.max(1, maxBuckets);
+  }
+
+  /** Distinct tracked buckets (test/introspection hook). */
+  get size(): number {
+    return this.buckets.size;
+  }
+
+  /**
+   * Consumes one token for `key`. Returns `{ ok: true }` when allowed, or
+   * `{ ok: false, retryAfterSeconds }` when the bucket is empty.
+   */
+  take(key: string, now: number = Date.now()): { ok: true } | { ok: false; retryAfterSeconds: number } {
+    let bucket = this.buckets.get(key);
+    if (!bucket) {
+      if (this.buckets.size >= this.maxBuckets) {
+        this.evict(now);
+      }
+      bucket = { tokens: this.burst, updatedAt: now };
+      this.buckets.set(key, bucket);
+    } else {
+      const elapsed = now - bucket.updatedAt;
+      if (elapsed > 0) {
+        bucket.tokens = Math.min(this.burst, bucket.tokens + elapsed * this.refillPerMs);
+        bucket.updatedAt = now;
+      }
+    }
+    if (bucket.tokens >= 1) {
+      bucket.tokens -= 1;
+      return { ok: true };
+    }
+    const deficit = 1 - bucket.tokens;
+    const retryAfterSeconds = Math.max(1, Math.ceil(deficit / this.refillPerMs / 1000));
+    return { ok: false, retryAfterSeconds };
+  }
+
+  /**
+   * Lazy, allocation-light eviction. First pass removes idle buckets (fully
+   * refilled to `burst` after accounting for elapsed time — an idle bucket is
+   * indistinguishable from a fresh one, so dropping it changes nothing). If none
+   * are idle, evict the oldest (first-inserted) entry so the map still shrinks.
+   */
+  private evict(now: number): void {
+    for (const [key, bucket] of this.buckets) {
+      const refilled = Math.min(
+        this.burst,
+        bucket.tokens + Math.max(0, now - bucket.updatedAt) * this.refillPerMs,
+      );
+      if (refilled >= this.burst) {
+        this.buckets.delete(key);
+      }
+    }
+    if (this.buckets.size >= this.maxBuckets) {
+      const oldest = this.buckets.keys().next().value;
+      if (oldest !== undefined) this.buckets.delete(oldest);
+    }
+  }
+}
+
+/**
  * Creates and starts an HTTP server exposing memory operations as a REST API.
  *
  * Endpoints:
@@ -408,9 +820,51 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
   const port = config.port ?? 3100;
   const host = config.host ?? '127.0.0.1';
   const apiKey = config.apiKey ?? process.env.MEMORY_API_KEY;
+  const apiKeyRegistry = config.apiKeys ?? parseApiKeyRegistryEnv(process.env.MEMORY_API_KEYS);
   const adminApiKey = config.adminApiKey ?? process.env.MEMORY_ADMIN_API_KEY;
   const enableCors = config.cors ?? true;
+  // CORS policy (1.2): secure-by-default is same-origin only (no ACAO header).
+  // Wildcard requires an explicit MEMORY_CORS_ORIGIN=* opt-in. When CORS is
+  // disabled entirely via `cors: false`, force the 'none' policy.
+  const corsPolicy = enableCors
+    ? resolveCorsPolicy(config.corsOrigin ?? process.env.MEMORY_CORS_ORIGIN)
+    : ({ mode: 'none' } as CorsPolicy);
   const bodyLimitBytes = config.bodyLimitBytes ?? 1_048_576;
+
+  // Rate limiter (1.4): off unless requestsPerMinute is configured.
+  const requestsPerMinute = config.requestsPerMinute;
+  const rateLimiter =
+    requestsPerMinute != null && requestsPerMinute > 0
+      ? new TokenBucketLimiter(requestsPerMinute, config.burst ?? requestsPerMinute)
+      : undefined;
+
+  // Startup posture warnings (1.1 back-compat + 1.2 server-side check).
+  const hasWildcardRegistryKey = apiKeyRegistry.some((entry) => entry.tenantId === '*');
+  if (apiKeyRegistry.length === 0 && apiKey) {
+    console.warn(
+      '[memory-layer] Using legacy single MEMORY_API_KEY (wildcard, all tenants). ' +
+        'Set MEMORY_API_KEYS to bind keys to tenants and enforce cross-tenant isolation.',
+    );
+  }
+  if (!isLoopbackHost(host) && apiKeyRegistry.length === 0 && !apiKey) {
+    // 1.2 server-side part: warn (do not hard-fail; Docker entrypoint hard-fails).
+    console.warn(
+      `[memory-layer] SECURITY: server is binding to non-loopback host '${host}' with NO ` +
+        'authentication configured. Set MEMORY_API_KEYS (or MEMORY_API_KEY) before exposing this server.',
+    );
+  } else if (!isLoopbackHost(host) && hasWildcardRegistryKey) {
+    console.warn(
+      `[memory-layer] SECURITY: a wildcard ('*') API key is serving non-loopback host '${host}'. ` +
+        'Bind keys to specific tenants for cross-tenant isolation.',
+    );
+  }
+  if (corsPolicy.mode === 'wildcard') {
+    console.warn(
+      "[memory-layer] SECURITY: CORS is set to wildcard ('*'). Any web origin can read " +
+        'responses from this server; this is insecure with tenant data. Set MEMORY_CORS_ORIGIN ' +
+        'to a specific origin (or comma-separated allowlist) instead.',
+    );
+  }
   const { defaultDiffMaxEvents, maxDiffMaxEvents } = resolveDiffEventCaps(
     config.defaultDiffMaxEvents,
     config.maxDiffMaxEvents,
@@ -594,12 +1048,15 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
     }],
     ['POST /v1/aliases', async ({ req, res, query, readJsonBody }) => {
       const body = await readJsonBody();
+      // Resolve scope (and enforce tenant binding) before body-shape validation
+      // so a cross-tenant caller is rejected with 403, not a 400 that leaks the
+      // route accepts the request at all.
+      const scopeInput = resolveRequestScope(config.scope, req, query, body);
       if (!isRecord(body.aliasMap)) {
         writeError(res, 400, 'Missing or invalid field: aliasMap');
         return;
       }
       const aliasMap = normalizeAliasMap(body.aliasMap, 'aliasMap');
-      const scopeInput = resolveRequestScope(config.scope, req, query, body);
       await serverContext.saveAliases(
         scopeInput,
         aliasMap,
@@ -623,12 +1080,13 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
     }],
     ['POST /v1/ontology', async ({ req, res, query, readJsonBody }) => {
       const body = await readJsonBody();
+      // Resolve scope (and enforce tenant binding) before body-shape validation.
+      const scopeInput = resolveRequestScope(config.scope, req, query, body);
       if (!isRecord(body.ontology)) {
         writeError(res, 400, 'Missing or invalid field: ontology');
         return;
       }
       const ontology = normalizeOntologyConfig(body.ontology, 'ontology');
-      const scopeInput = resolveRequestScope(config.scope, req, query, body);
       await serverContext.saveOntology(
         scopeInput,
         ontology,
@@ -696,15 +1154,11 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
   ]);
 
   const server = createServer(async (req, res) => {
-    // CORS
-    if (enableCors) {
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.setHeader(
-        'Access-Control-Allow-Headers',
-        'Content-Type, Authorization, x-admin-key, x-memory-tenant, x-memory-system, x-memory-workspace, x-memory-collaboration, x-memory-scope, Last-Event-ID',
-      );
-    }
+    // CORS (1.2): apply the resolved policy. Default is same-origin only — no
+    // Access-Control-Allow-Origin header at all, so browsers block cross-origin
+    // reads. Only an explicit MEMORY_CORS_ORIGIN opens it up. Preflight OPTIONS
+    // reflects the same policy (applyCors runs before the OPTIONS short-circuit).
+    applyCors(res, corsPolicy, req.headers.origin);
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
@@ -712,18 +1166,50 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       return;
     }
 
-    // Auth
-    if (apiKey) {
-      const auth = req.headers.authorization;
-      if (!safeSecretEquals(auth, `Bearer ${apiKey}`)) {
-        writeError(res, 401, 'Unauthorized');
+    const requestUrl = req.url ?? '/';
+    const requestPath = normalizePath(requestUrl.split('?')[0]);
+    const isHealthProbe =
+      (requestPath === '/healthz' || requestPath === '/readyz') && req.method === 'GET';
+
+    // Liveness/readiness probes must never require auth (1.2): they leak nothing
+    // and orchestrators (Docker/k8s) probe them without credentials. Handle them
+    // before authentication so a keyless probe returns 200 even when keys are
+    // configured. They are also exempt from the rate limiter below.
+    if (isHealthProbe) {
+      writeJson(res, 200, { ok: true, scopes: serverContext.getCacheSizes().managers });
+      return;
+    }
+
+    // Auth (1.1): resolve the principal against the tenant-bound registry, or
+    // fall back to the legacy single key. A configured-but-unmatched request is
+    // 401; keyless mode yields an undefined principal (no enforcement).
+    const principal = authenticatePrincipal(req, apiKeyRegistry, apiKey);
+    if (principal === null) {
+      writeError(res, 401, 'Unauthorized');
+      return;
+    }
+    if (principal) {
+      requestPrincipals.set(req, principal);
+    }
+
+    // Rate limiting (1.4): per-key token bucket, keyed by the presented key or
+    // the remote address when keyless. Health probes are always exempt.
+    if (rateLimiter && !isHealthProbe) {
+      const bucketKey =
+        extractBearer(req.headers.authorization) ??
+        req.socket.remoteAddress ??
+        'unknown';
+      const decision = rateLimiter.take(bucketKey);
+      if (!decision.ok) {
+        res.setHeader('Retry-After', String(decision.retryAfterSeconds));
+        writeError(res, 429, 'Too Many Requests');
         return;
       }
     }
 
     try {
-      const url = req.url ?? '/';
-      const path = normalizePath(url.split('?')[0]);
+      const url = requestUrl;
+      const path = requestPath;
       const query = parseQuery(url);
       const routeHandler = registeredRoutes.get(`${req.method ?? 'GET'} ${path}`);
       let cachedBody: Record<string, unknown> | undefined;
@@ -996,12 +1482,13 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/changes/stream
       if (path === '/v1/changes/stream' && req.method === 'GET') {
+        // Resolve (and tenant-check) the scope BEFORE committing a 200 stream.
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         res.writeHead(200, {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
           Connection: 'keep-alive',
         });
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
         let closed = false;
         const abortController = new AbortController();
         req.on('close', () => {
@@ -1027,7 +1514,32 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
             }
           } catch (error) {
             if (!closed) {
-              res.write(`data: ${JSON.stringify({ type: 'error', error: String(error) })}\n\n`);
+              // SSE-phase errors happen after writeHead(200), so they bypass the
+              // request-level 1.3 sanitizer. Sanitize here the same way: emit a
+              // generic error event with a request id, and log the real error
+              // server-side under that id. Domain errors carry a safe message.
+              if (isMemoryDomainError(error)) {
+                res.write(
+                  `event: error\ndata: ${JSON.stringify({
+                    type: 'error',
+                    error: error.message,
+                    code: error.code,
+                  })}\n\n`,
+                );
+              } else {
+                const requestId = randomBytes(6).toString('hex');
+                console.error(
+                  `[memory-layer] stream error (request ${requestId}):`,
+                  error,
+                );
+                res.write(
+                  `event: error\ndata: ${JSON.stringify({
+                    type: 'error',
+                    error: 'internal error',
+                    requestId,
+                  })}\n\n`,
+                );
+              }
               res.end();
             }
           }
@@ -1458,10 +1970,8 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         return;
       }
 
-      if ((path === '/healthz' || path === '/readyz') && req.method === 'GET') {
-        writeJson(res, 200, { ok: true, scopes: serverContext.getCacheSizes().managers });
-        return;
-      }
+      // NOTE: /healthz and /readyz are handled earlier, before authentication
+      // (they must never require a key). See the isHealthProbe short-circuit.
 
       // POST /v1/maintenance
       if (path === '/v1/maintenance' && req.method === 'POST') {
@@ -1554,13 +2064,16 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
 
       // GET /v1/events (SSE)
       if (path === '/v1/events' && req.method === 'GET') {
+        // Resolve (and tenant-check) the scope BEFORE committing a 200 stream,
+        // so a cross-tenant request is rejected with 403 rather than leaking an
+        // open stream bound to a tenant the key may not access.
+        const scope = resolveRequestScope(config.scope, req, query);
         res.writeHead(200, {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
           Connection: 'keep-alive',
         });
         res.write('data: {"type":"connected"}\n\n');
-        const scope = resolveRequestScope(config.scope, req, query);
         sseClients.add({
           response: res,
           scope: materializeScope(scope),
@@ -1983,7 +2496,8 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         return;
       }
 
-      writeError(res, 404, `Not found: ${req.method} ${path}`);
+      // Do not echo the attacker-controlled method/path back into the body.
+      writeError(res, 404, 'Not found');
     } catch (error) {
       if (error instanceof HttpRequestError) {
         writeError(res, error.status, error.message);
@@ -1993,8 +2507,12 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         writeError(res, error.status, error.message, error.code);
         return;
       }
-      const message = error instanceof Error ? error.message : String(error);
-      writeError(res, 500, message);
+      // 1.3: never leak internal error text or stacks to clients. Return a
+      // generic body with a short random request id and log the real error
+      // (with the same id) server-side for correlation.
+      const requestId = randomBytes(6).toString('hex');
+      console.error(`[memory-layer] internal error (request ${requestId}):`, error);
+      writeJson(res, 500, { error: 'internal error', requestId });
     }
   });
 

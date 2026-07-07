@@ -61,6 +61,8 @@ Correctness bugs that break advertised features today. No API changes.
 
 ## Phase 1 — Security & tenancy (release as 4.2.0)
 
+> **STATUS: IMPLEMENTED 2026-07-06** (uncommitted at time of writing → committed). Items 1.1–1.5 done with tests; two rounds (initial + adversarial-security-review fixes). Review caught real gaps the workers missed: CORS still wildcard, Docker guard fail-open (transport/empty-host), and health probes requiring auth — all fixed. Back-compat preserved (legacy key = wildcard + warning; rate limiting and CORS both off/none by default). New: `MEMORY_API_KEYS` registry (key→tenant binding), `MEMORY_CORS_ORIGIN`, `MEMORY_ALLOW_UNAUTHENTICATED` opt-out, `docker-entrypoint.sh` startup guard, `docs/SECURITY.md`. Full suite 899 passed; lint/build/coverage/eval gates green locally.
+
 The storage layer isolates correctly; the API layer must stop being cooperative.
 
 ### 1.1 Bind credentials to tenants

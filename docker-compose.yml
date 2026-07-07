@@ -26,12 +26,32 @@ services:
       MEMORY_TRANSPORT: http
       MEMORY_HOST: 0.0.0.0
       MEMORY_PORT: 3100
+      # Required by default: the container binds 0.0.0.0, so it must authenticate.
+      # Provide MEMORY_API_KEY in the environment (or a .env file); compose fails
+      # fast with this message if it is unset or empty. To run unauthenticated
+      # behind your own trusted boundary, remove this line and set
+      # MEMORY_ALLOW_UNAUTHENTICATED=1 instead.
+      MEMORY_API_KEY: ${MEMORY_API_KEY:?MEMORY_API_KEY is required (container binds 0.0.0.0). Set it in your environment or a .env file, or set MEMORY_ALLOW_UNAUTHENTICATED=1 to opt out.}
       MEMORY_DATABASE_URL: postgres://memory:memory@postgres:5432/memory_layer
       MEMORY_SCOPE: hosted
       MEMORY_QUALITY_MODE: high_fidelity_memory
       MEMORY_CROSS_SCOPE_LEVEL: workspace
     ports:
       - '3100:3100'
+    # Keyless loopback probe against /healthz (auth-exempt server-side). Longer
+    # start_period than the Dockerfile default: the app waits on Postgres and may
+    # run schema migrations on first boot, so allow 40s before failed probes
+    # count against the container.
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:'+(process.env.MEMORY_PORT||3100)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
 
 volumes:
   pgdata:
