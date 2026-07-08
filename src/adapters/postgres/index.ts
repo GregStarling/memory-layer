@@ -1062,9 +1062,21 @@ export function createPostgresAdapter(
   ): Promise<TimelineResult> {
     await ensureTemporalCutover();
     const resolved = resolveEventQuery(query);
-    const params: unknown[] = [...scopeParams(scope), resolved.startAt, resolved.endAt];
-    const clauses = [`${scopeWhere()}`, `created_at >= $6`, `created_at <= $7`];
-    let nextParam = 8;
+    // created_at bounds are optional: an unbounded query resolves startAt/endAt to
+    // ±Infinity (fine for the JS/SQLite adapters, but Postgres rejects binding a
+    // non-finite value to the INTEGER created_at column — 22P02). Only emit a bound
+    // clause when the bound is finite.
+    const params: unknown[] = [...scopeParams(scope)];
+    const clauses = [`${scopeWhere()}`];
+    if (Number.isFinite(resolved.startAt)) {
+      params.push(resolved.startAt);
+      clauses.push(`created_at >= $${params.length}`);
+    }
+    if (Number.isFinite(resolved.endAt)) {
+      params.push(resolved.endAt);
+      clauses.push(`created_at <= $${params.length}`);
+    }
+    let nextParam = params.length + 1;
     if (resolved.cursor != null && compareTemporalIds(resolved.cursor, '0') > 0) {
       clauses.push(`event_id > $${nextParam}::bigint`);
       params.push(resolved.cursor);
@@ -1113,8 +1125,17 @@ export function createPostgresAdapter(
   ): Promise<TimelineResult> {
     await ensureTemporalCutover();
     const resolved = resolveEventQuery(query);
-    const params: unknown[] = [...wideScopeParams(scope, level), resolved.startAt, resolved.endAt];
-    const clauses = [`${wideScopeWhere(scope, level)}`, `created_at >= $${params.length - 1}`, `created_at <= $${params.length}`];
+    // See listScopedMemoryEvents: omit non-finite created_at bounds (Postgres 22P02).
+    const params: unknown[] = [...wideScopeParams(scope, level)];
+    const clauses = [`${wideScopeWhere(scope, level)}`];
+    if (Number.isFinite(resolved.startAt)) {
+      params.push(resolved.startAt);
+      clauses.push(`created_at >= $${params.length}`);
+    }
+    if (Number.isFinite(resolved.endAt)) {
+      params.push(resolved.endAt);
+      clauses.push(`created_at <= $${params.length}`);
+    }
     let nextParam = params.length + 1;
     if (resolved.cursor != null && compareTemporalIds(resolved.cursor, '0') > 0) {
       clauses.push(`event_id > $${nextParam}::bigint`);
