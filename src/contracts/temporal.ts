@@ -15,6 +15,69 @@ import type {
 } from './types.js';
 import type { SessionState } from './session-state.js';
 
+/**
+ * # Temporal replay contract
+ *
+ * The event log (`memory_event_log`) is an append-only, monotonically-numbered
+ * record of state mutations. `foldTemporalState` / `getStateAt(T)` reconstruct
+ * historical state by folding events in a single canonical order.
+ *
+ * ## Ordering guarantee
+ *
+ * Events are ordered by `event_id` ASC **alone**. `event_id` is an append-only
+ * AUTOINCREMENT (SQLite) / BIGSERIAL (Postgres) / monotonic counter (in-memory)
+ * assigned at insert time inside the same transaction as the mutation, so it is
+ * the true causal order of writes.
+ *
+ * `created_at` is display/metadata only. It MAY be caller-supplied or backdated
+ * (imports, seeds, backfills) and is therefore NEVER an `ORDER BY` key for
+ * pagination or replay. Pagination cursors are `event_id > ?`.
+ *
+ * ## Replayable entity kinds
+ *
+ * These entity kinds emit a full `payload.after` snapshot on every mutation and
+ * are reconstructed exactly by fold into `ReplayedTemporalState` /
+ * `TemporalStateSnapshot`:
+ *   - `turn`, `working_memory`, `knowledge_memory`, `work_item`,
+ *     `association`, `playbook`, `session_state`, `work_claim`, `handoff`
+ *
+ * `work_claim` and `handoff` additionally have their *effective* status
+ * computed against the replay `asOf` (a claim whose `expires_at <= asOf` reads
+ * as `expired` even if the log has no explicit expiry event for that instant —
+ * see `normalizeReplayedTemporalState`).
+ *
+ * ## Audited-but-not-replayable entity kinds
+ *
+ * These emit events for audit/observability but are NOT folded into a distinct
+ * replayed collection (they are configuration overlays, derived side-artifacts,
+ * or child records whose effect is already captured on a replayable parent):
+ *   - `playbook_revision` — a revision emits `playbook.revised` (audit) AND,
+ *     since it mutates the parent playbook, a `playbook.updated` after-snapshot
+ *     (D1). Fold reconstructs the parent `playbook` (incl. its bumped
+ *     `revision_count`/`updated_at`) from that snapshot; there is no separate
+ *     replayed `playbookRevisions` collection.
+ *   - `knowledge_candidate` — lifecycle audit; the promoted `knowledge_memory`
+ *     is the replayable artifact.
+ *   - `source_document` — ingestion audit; extracted `knowledge_memory` rows
+ *     are the replayable artifacts.
+ *   - `context_contract`, `context_invariant`, `context_escalation_policy` —
+ *     governance overlay; authoritative state is the governance projection
+ *     (`getGovernanceState`), which is a last-writer-wins config store, not an
+ *     event fold.
+ *
+ * ## Entities entirely outside the event log
+ *
+ * `knowledge_evidence`, `knowledge_memory_audit`, `compaction_log`,
+ * `context_monitor`, `scope_config`, and `temporal_projection_watermark` are
+ * not part of temporal replay at all.
+ *
+ * ## Forward/backward compatibility
+ *
+ * `foldTemporalState` ignores entity kinds and event types it does not
+ * recognise, so old logs replay under new code and logs containing
+ * newly-added event types replay under code that predates them. Never remove or
+ * repurpose an existing `MemoryEventType` string.
+ */
 export type TemporalId = string;
 export type TemporalIdInput = string | number | bigint;
 
@@ -51,13 +114,18 @@ export type MemoryEventEntityKind =
   | 'turn'
   | 'working_memory'
   | 'knowledge_memory'
+  | 'knowledge_candidate'
   | 'work_item'
   | 'association'
   | 'playbook'
   | 'playbook_revision'
   | 'session_state'
   | 'work_claim'
-  | 'handoff';
+  | 'handoff'
+  | 'source_document'
+  | 'context_contract'
+  | 'context_invariant'
+  | 'context_escalation_policy';
 
 export type MemoryEventType =
   | 'turn.created'
@@ -100,7 +168,22 @@ export type MemoryEventType =
   | 'handoff.canceled'
   | 'handoff.expired'
   | 'session_state.updated'
-  | 'session_state.seeded';
+  | 'session_state.seeded'
+  // Knowledge-candidate lifecycle (Phase 2.2).
+  | 'knowledge_candidate.created'
+  | 'knowledge_candidate.promoted'
+  | 'knowledge_candidate.expired'
+  // Source-document lifecycle (Phase 2.2).
+  | 'source_document.created'
+  | 'source_document.updated'
+  // Governance upserts (Phase 2.2). Contracts, invariants, and escalation
+  // policies are configuration overlays; these events are an audit trail, not
+  // a temporal-replay source (see "Temporal replay contract" below).
+  | 'context_contract.set'
+  | 'context_contract.deleted'
+  | 'context_invariant.set'
+  | 'context_invariant.deleted'
+  | 'context_escalation_policy.set';
 
 export interface MemoryEventRecord extends NormalizedMemoryScope {
   event_id: TemporalId;

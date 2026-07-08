@@ -17,6 +17,10 @@ export interface MaintenanceReport {
   reverifiedKnowledgeIds: number[];
   demotedKnowledgeIds: number[];
   expiredCandidateIds: number[];
+  /** Work claims whose lease expired and were reaped this run (Phase 2.5). */
+  expiredWorkClaimIds: number[];
+  /** Handoffs whose lease expired and were reaped this run (Phase 2.5, D5). */
+  expiredHandoffIds: number[];
 }
 
 export async function runMaintenance(
@@ -33,6 +37,13 @@ export async function runMaintenance(
   const reverifiedKnowledgeIds: number[] = [];
   const demotedKnowledgeIds: number[] = [];
   const expiredCandidateIds: number[] = [];
+
+  // Phase 2.5 reaper: transition stale (expired-lease) work claims and handoffs
+  // to expired durably, emitting exactly one work_claim.expired / handoff.expired
+  // event per row. Reads compute effective status without writing; this is where
+  // expiry is persisted.
+  const expiredWorkClaimIds = await adapter.expireStaleClaims(scope, now);
+  const expiredHandoffIds = await adapter.expireStaleHandoffs(scope, now);
 
   const staleWorkingMemory = await adapter.getWorkingMemoryByTimeRange(scope, {
     end_at: now - resolved.workingMemoryTtlSeconds,
@@ -227,5 +238,7 @@ export async function runMaintenance(
     reverifiedKnowledgeIds,
     demotedKnowledgeIds,
     expiredCandidateIds,
+    expiredWorkClaimIds,
+    expiredHandoffIds,
   };
 }

@@ -200,6 +200,20 @@ export interface StorageAdapter {
     level: ScopeLevel,
     options?: WorkClaimQuery,
   ): WorkClaim[];
+  /**
+   * Transition every active claim in `scope` whose lease has expired
+   * (`expires_at <= now`) to `expired`, writing the expiry and emitting exactly
+   * one `work_claim.expired` event per claim (Phase 2.5 "reaper").
+   *
+   * This is the ONLY read/list-independent expiry write path besides
+   * claim/renew/release. Read paths (`getActiveWorkClaim`, `listWorkClaims`,
+   * `listWorkClaimsCrossScope`) compute *effective* status without writing;
+   * this method is called from the maintenance pipeline to make expiry durable.
+   *
+   * Transactional: all expiries + their events commit atomically or not at all.
+   * Returns the ids of the claims that were expired by this call.
+   */
+  expireStaleClaims(scope: MemoryScope, now: number): number[];
   createHandoff(input: NewHandoffInput): HandoffRecord;
   getHandoffById(handoffId: number): HandoffRecord | null;
   acceptHandoff(handoffId: number, actor: ActorRef, reason?: string): HandoffRecord | null;
@@ -211,6 +225,21 @@ export interface StorageAdapter {
     level: ScopeLevel,
     options?: HandoffQuery,
   ): HandoffRecord[];
+  /**
+   * Transition every pending handoff in `scope` whose lease has expired
+   * (`expires_at != null && expires_at <= now`) to `expired`, writing the expiry
+   * and emitting exactly one `handoff.expired` event per handoff (Phase 2.5
+   * "reaper", handoff analogue of {@link expireStaleClaims}).
+   *
+   * Read paths (`getHandoffById`, `listHandoffs`, `listHandoffsCrossScope`)
+   * compute *effective* status without writing; this is the ONLY read/list-
+   * independent expiry write path for handoffs. Called from the maintenance
+   * pipeline to make handoff expiry durable.
+   *
+   * Transactional: all expiries + their events commit atomically or not at all.
+   * Returns the ids of the handoffs that were expired by this call.
+   */
+  expireStaleHandoffs(scope: MemoryScope, now: number): number[];
 
   upsertContextMonitor(input: ContextMonitorUpsert): ContextMonitor;
   getContextMonitor(scope: MemoryScope): ContextMonitor | null;

@@ -87,9 +87,29 @@ import {
   validateNewWorkingMemory,
   validateTimeRange,
 } from '../../core/validation.js';
+import type {
+  ContextContract,
+  ContextInvariant,
+  ContextEscalationPolicy,
+  PersistedGovernanceState,
+} from '../../contracts/context-contract.js';
 import { createInMemoryEmbeddingAdapter } from './embeddings.js';
 
 const SCHEMA_VERSION = 1;
+
+/**
+ * In-memory governance overlay (Phase 2.2/3.8 reference). Mirrors the SQLite
+ * v18 soft-delete shape so `getGovernanceState` returns the same
+ * `PersistedGovernanceState` structure. Keyed by normalized scope string.
+ */
+interface GovernanceEntry {
+  defaultContract: PersistedGovernanceState['defaultContract'];
+  namedContracts: Map<string, ContextContract>;
+  deletedContractNames: Set<string>;
+  invariants: Map<string, ContextInvariant>;
+  deletedInvariantIds: Set<string>;
+  escalationPolicy: ContextEscalationPolicy | null;
+}
 
 interface MemoryState {
   turns: Turn[];
@@ -249,8 +269,40 @@ function isClaimExpired(claim: WorkClaim, now = nowSeconds()): boolean {
   return claim.status === 'active' && claim.expires_at <= now;
 }
 
+/**
+ * Compute the EFFECTIVE view of a claim at `now` WITHOUT mutating stored state
+ * (Phase 2.5). A read that observes an active-but-expired claim returns a copy
+ * whose status is `expired`; the underlying store is left untouched — durable
+ * expiry happens only in claim/renew/release and `expireStaleClaims`.
+ */
+function effectiveClaim(claim: WorkClaim, now: number): WorkClaim {
+  if (!isClaimExpired(claim, now)) return claim;
+  return {
+    ...claim,
+    status: 'expired',
+    released_at: claim.released_at ?? now,
+    release_reason: claim.release_reason ?? 'expired',
+  };
+}
+
 function isHandoffExpired(handoff: HandoffRecord, now = nowSeconds()): boolean {
   return handoff.status === 'pending' && handoff.expires_at != null && handoff.expires_at <= now;
+}
+
+/**
+ * Compute the EFFECTIVE view of a handoff at `now` WITHOUT mutating stored state
+ * (Phase 2.5, D5 — handoff analogue of {@link effectiveClaim}). A read that
+ * observes a pending-but-expired handoff returns a copy whose status is
+ * `expired`; the underlying store is left untouched — durable expiry happens
+ * only in accept/reject/cancel and `expireStaleHandoffs`.
+ */
+function effectiveHandoff(handoff: HandoffRecord, now: number): HandoffRecord {
+  if (!isHandoffExpired(handoff, now)) return handoff;
+  return {
+    ...handoff,
+    status: 'expired',
+    decision_reason: handoff.decision_reason ?? 'expired',
+  };
 }
 
 function matchesEventQuery(item: MemoryEventRecord, query?: MemoryEventQuery): boolean {
@@ -270,9 +322,11 @@ function paginateEvents(
   query?: MemoryEventQuery,
 ): TimelineResult {
   const resolved = normalizeEventQuery(query);
-  const ordered = [...items].sort(
-    (a, b) => a.created_at - b.created_at || compareTemporalIds(a.event_id, b.event_id),
-  );
+  // Ordering contract (Phase 2.3): event_id ASC alone. event_id is the
+  // append-only monotonic id; created_at is display metadata only and may be
+  // backdated, so it is never an ORDER BY key for pagination. Cursors are
+  // event_id > ? (enforced in matchesEventQuery).
+  const ordered = [...items].sort((a, b) => compareTemporalIds(a.event_id, b.event_id));
   const page = ordered.slice(0, resolved.limit + 1);
   const hasMore = page.length > resolved.limit;
   const events = hasMore ? page.slice(0, resolved.limit) : page;
@@ -282,8 +336,50 @@ function paginateEvents(
   };
 }
 
+function cloneGovernance(source: Map<string, GovernanceEntry>): Map<string, GovernanceEntry> {
+  const copy = new Map<string, GovernanceEntry>();
+  for (const [key, entry] of source) {
+    copy.set(key, {
+      defaultContract: structuredClone(entry.defaultContract),
+      namedContracts: new Map(
+        [...entry.namedContracts.entries()].map(([n, c]) => [n, structuredClone(c)]),
+      ),
+      deletedContractNames: new Set(entry.deletedContractNames),
+      invariants: new Map(
+        [...entry.invariants.entries()].map(([n, inv]) => [n, structuredClone(inv)]),
+      ),
+      deletedInvariantIds: new Set(entry.deletedInvariantIds),
+      escalationPolicy: structuredClone(entry.escalationPolicy),
+    });
+  }
+  return copy;
+}
+
+function governanceScopeKey(scope: MemoryScope): string {
+  const n = normalizeScope(scope);
+  return [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id].join('::');
+}
+
 export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdapter {
   const scopedConfig = new Map<string, { value: string; createdAt: number; updatedAt: number }>();
+  const governance = new Map<string, GovernanceEntry>();
+
+  function getGovernanceEntry(scope: MemoryScope): GovernanceEntry {
+    const key = governanceScopeKey(scope);
+    let entry = governance.get(key);
+    if (!entry) {
+      entry = {
+        defaultContract: null,
+        namedContracts: new Map(),
+        deletedContractNames: new Set(),
+        invariants: new Map(),
+        deletedInvariantIds: new Set(),
+        escalationPolicy: null,
+      };
+      governance.set(key, entry);
+    }
+    return entry;
+  }
   const state: MemoryState = {
     turns: [],
     workingMemory: [],
@@ -332,6 +428,9 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     sourceDocument: 1,
   };
 
+  // Reentrancy guard for runInTransaction (declared below the returned object).
+  let txnDepth = 0;
+
   return {
     insertTurn(input: NewTurn): Turn {
       const scope = validateNewTurn(input);
@@ -366,7 +465,10 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     },
 
     insertTurns(inputs) {
-      return inputs.map((input) => this.insertTurn(input));
+      // Atomicity (Phase 2.1): a mid-batch throw (e.g. an invalid input) must
+      // leave NO rows or events from earlier items in the batch, matching the
+      // relational adapters' transactional batch inserts.
+      return runInTransaction(() => inputs.map((input) => this.insertTurn(input)));
     },
 
     getTurnById(id) {
@@ -626,7 +728,9 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     },
 
     insertKnowledgeMemories(inputs) {
-      return inputs.map((input) => this.insertKnowledgeMemory(input));
+      // Atomicity (Phase 2.1): a mid-batch throw must leave NO rows or events
+      // from earlier items, matching the relational adapters.
+      return runInTransaction(() => inputs.map((input) => this.insertKnowledgeMemory(input)));
     },
 
     insertKnowledgeCandidate(input) {
@@ -651,6 +755,16 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         promoted_knowledge_id: input.promoted_knowledge_id ?? null,
       };
       state.knowledgeCandidates.push(record);
+      this.insertMemoryEvent({
+        ...scope,
+        entity_kind: 'knowledge_candidate',
+        entity_id: String(record.id),
+        event_type: 'knowledge_candidate.created',
+        payload: {
+          after: cloneValue(record),
+        },
+        created_at: record.created_at,
+      });
       return record;
     },
 
@@ -708,30 +822,67 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     },
 
     promoteKnowledgeCandidate(candidateId, input) {
-      const candidate = state.knowledgeCandidates.find((item) => item.id === candidateId);
-      const knowledge = this.insertKnowledgeMemory(input);
-      if (candidate) {
-        candidate.promoted_knowledge_id = knowledge.id;
-        candidate.state = 'provisional';
-      }
-      return knowledge;
+      // Atomic (Phase 2.2): candidate flip + knowledge insert + both events are
+      // all-or-nothing. A throw from insertKnowledgeMemory (e.g. validation)
+      // rolls back the candidate flip and any emitted events.
+      return runInTransaction(() => {
+        const candidate = state.knowledgeCandidates.find((item) => item.id === candidateId);
+        const knowledge = this.insertKnowledgeMemory(input);
+        if (candidate) {
+          const before = cloneValue(candidate);
+          candidate.promoted_knowledge_id = knowledge.id;
+          candidate.state = 'provisional';
+          this.insertMemoryEvent({
+            ...normalizeScope(candidate),
+            entity_kind: 'knowledge_candidate',
+            entity_id: String(candidate.id),
+            event_type: 'knowledge_candidate.promoted',
+            payload: {
+              before,
+              after: cloneValue(candidate),
+              refs: {
+                knowledge_memory_id: knowledge.id,
+              },
+            },
+            created_at: nowSeconds(),
+          });
+        }
+        return knowledge;
+      });
     },
 
     deleteExpiredKnowledgeCandidates(scope, olderThan) {
       const n = normalizeScope(scope);
-      const expired = state.knowledgeCandidates.filter(
-        (c) =>
-          c.tenant_id === n.tenant_id &&
-          c.system_id === n.system_id &&
-          c.workspace_id === n.workspace_id &&
-          c.collaboration_id === n.collaboration_id &&
-          c.scope_id === n.scope_id &&
-          c.promoted_knowledge_id === null &&
-          c.created_at < olderThan,
-      );
-      const ids = expired.map((c) => c.id);
-      state.knowledgeCandidates = state.knowledgeCandidates.filter((c) => !ids.includes(c.id));
-      return ids;
+      return runInTransaction(() => {
+        const expired = state.knowledgeCandidates.filter(
+          (c) =>
+            c.tenant_id === n.tenant_id &&
+            c.system_id === n.system_id &&
+            c.workspace_id === n.workspace_id &&
+            c.collaboration_id === n.collaboration_id &&
+            c.scope_id === n.scope_id &&
+            c.promoted_knowledge_id === null &&
+            c.created_at < olderThan,
+        );
+        const expiredIds = expired.map((c) => c.id);
+        const expiredSet = new Set(expiredIds);
+        state.knowledgeCandidates = state.knowledgeCandidates.filter(
+          (c) => !expiredSet.has(c.id),
+        );
+        for (const candidate of expired) {
+          this.insertMemoryEvent({
+            ...normalizeScope(candidate),
+            entity_kind: 'knowledge_candidate',
+            entity_id: String(candidate.id),
+            event_type: 'knowledge_candidate.expired',
+            payload: {
+              before: cloneValue(candidate),
+            },
+            created_at: nowSeconds(),
+          });
+        }
+        return expiredIds;
+      });
     },
 
     getKnowledgeMemoryById(id) {
@@ -1320,80 +1471,71 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     },
 
     getWorkClaimById(claimId) {
+      // Read path (D6): apply the SAME effective-status computation as the list
+      // paths so an active-but-expired claim reads as `expired` here too, with
+      // ZERO writes. Durable expiry happens only in claim/renew/release and
+      // expireStaleClaims.
+      const now = nowSeconds();
       const claim = state.workClaims.find((entry) => entry.id === claimId);
       if (!claim) return null;
-      return cloneValue(claim);
+      return cloneValue(effectiveClaim(claim, now));
     },
 
     getActiveWorkClaim(workItemId) {
+      // Read path: compute effective status without writing (Phase 2.5).
+      const now = nowSeconds();
       const claim = state.workClaims.find(
         (entry) => entry.work_item_id === workItemId && entry.status === 'active',
       );
-      if (claim && isClaimExpired(claim)) {
-        claim.status = 'expired';
-        claim.released_at = nowSeconds();
-        claim.release_reason = 'expired';
-        claim.version += 1;
-        this.insertMemoryEvent({
-          ...normalizeScope(claim),
-          session_id: claim.session_id,
-          actor_id: claim.actor.actor_id,
-          actor_kind: claim.actor.actor_kind,
-          actor_system_id: claim.actor.system_id,
-          actor_display_name: claim.actor.display_name,
-          actor_metadata: claim.actor.metadata,
-          entity_kind: 'work_claim',
-          entity_id: String(claim.id),
-          event_type: 'work_claim.expired',
-          payload: { after: cloneValue(claim) },
-          created_at: claim.released_at,
-        });
-        return null;
-      }
-      return claim ? cloneValue(claim) : null;
+      if (!claim) return null;
+      if (isClaimExpired(claim, now)) return null;
+      return cloneValue(claim);
     },
 
     listWorkClaims(scope, options?: WorkClaimQuery) {
-      const currentNow = nowSeconds();
-      for (const claim of state.workClaims) {
-        if (matchesScope(claim, scope) && isClaimExpired(claim, currentNow)) {
-          claim.status = 'expired';
-          claim.released_at = currentNow;
-          claim.release_reason = 'expired';
-          claim.version += 1;
-          this.insertMemoryEvent({
-            ...normalizeScope(claim),
-            session_id: claim.session_id,
-            actor_id: claim.actor.actor_id,
-            actor_kind: claim.actor.actor_kind,
-            actor_system_id: claim.actor.system_id,
-            actor_display_name: claim.actor.display_name,
-            actor_metadata: claim.actor.metadata,
-            entity_kind: 'work_claim',
-            entity_id: String(claim.id),
-            event_type: 'work_claim.expired',
-            payload: { after: cloneValue(claim) },
-            created_at: currentNow,
-          });
-        }
-      }
-      return state.workClaims.filter((claim) => {
-        if (!matchesScope(claim, scope)) return false;
-        if (!options?.includeExpired && claim.status === 'expired') return false;
-        if (!options?.includeReleased && claim.status === 'released') return false;
-        if (options?.sessionId && claim.session_id !== options.sessionId) return false;
-        if (options?.visibilityClass && claim.visibility_class !== options.visibilityClass) return false;
-        if (options?.actor && !matchesActor(options.actor, claim.actor)) return false;
-        return true;
-      }).map(cloneValue);
+      // Read path: compute effective status without writing (Phase 2.5).
+      const now = nowSeconds();
+      return state.workClaims
+        .filter((claim) => matchesScope(claim, scope))
+        .map((claim) => effectiveClaim(claim, now))
+        .filter((claim) => {
+          if (!options?.includeExpired && claim.status === 'expired') return false;
+          if (!options?.includeReleased && claim.status === 'released') return false;
+          if (options?.sessionId && claim.session_id !== options.sessionId) return false;
+          if (options?.visibilityClass && claim.visibility_class !== options.visibilityClass) return false;
+          if (options?.actor && !matchesActor(options.actor, claim.actor)) return false;
+          return true;
+        })
+        .map(cloneValue);
     },
 
     listWorkClaimsCrossScope(scope, level: ScopeLevel, options?: WorkClaimQuery) {
-      const currentNow = nowSeconds();
-      for (const claim of state.workClaims) {
-        if (matchesScopeLevel(claim, scope, level) && isClaimExpired(claim, currentNow)) {
+      // Read path: compute effective status without writing (Phase 2.5).
+      const now = nowSeconds();
+      return state.workClaims
+        .filter((claim) => matchesScopeLevel(claim, scope, level))
+        .map((claim) => effectiveClaim(claim, now))
+        .filter((claim) => {
+          if (!options?.includeExpired && claim.status === 'expired') return false;
+          if (!options?.includeReleased && claim.status === 'released') return false;
+          if (options?.sessionId && claim.session_id !== options.sessionId) return false;
+          if (options?.visibilityClass && claim.visibility_class !== options.visibilityClass) return false;
+          if (options?.actor && !matchesActor(options.actor, claim.actor)) return false;
+          return true;
+        })
+        .map(cloneValue);
+    },
+
+    expireStaleClaims(scope, now) {
+      // Durable expiry write path (Phase 2.5 reaper): transactional, emits
+      // exactly one work_claim.expired event per newly-expired claim.
+      return runInTransaction(() => {
+        const expiredIds: number[] = [];
+        for (const claim of state.workClaims) {
+          if (!matchesScope(claim, scope)) continue;
+          if (!isClaimExpired(claim, now)) continue;
           claim.status = 'expired';
-          claim.released_at = currentNow;
+          claim.released_at = now;
           claim.release_reason = 'expired';
           claim.version += 1;
           this.insertMemoryEvent({
@@ -1408,19 +1550,12 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
             entity_id: String(claim.id),
             event_type: 'work_claim.expired',
             payload: { after: cloneValue(claim) },
-            created_at: currentNow,
+            created_at: now,
           });
+          expiredIds.push(claim.id);
         }
-      }
-      return state.workClaims.filter((claim) => {
-        if (!matchesScopeLevel(claim, scope, level)) return false;
-        if (!options?.includeExpired && claim.status === 'expired') return false;
-        if (!options?.includeReleased && claim.status === 'released') return false;
-        if (options?.sessionId && claim.session_id !== options.sessionId) return false;
-        if (options?.visibilityClass && claim.visibility_class !== options.visibilityClass) return false;
-        if (options?.actor && !matchesActor(options.actor, claim.actor)) return false;
-        return true;
-      }).map(cloneValue);
+        return expiredIds;
+      });
     },
 
     createHandoff(input: NewHandoffInput) {
@@ -1466,9 +1601,14 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     },
 
     getHandoffById(handoffId) {
+      // Read path (D6): apply the SAME effective-status computation as the list
+      // paths so a pending-but-expired handoff reads as `expired` here too, with
+      // ZERO writes. Durable expiry happens only in accept/reject/cancel and
+      // expireStaleHandoffs.
+      const now = nowSeconds();
       const handoff = state.handoffs.find((entry) => entry.id === handoffId);
       if (!handoff) return null;
-      return cloneValue(handoff);
+      return cloneValue(effectiveHandoff(handoff, now));
     },
 
     acceptHandoff(handoffId, actor, reason) {
@@ -1642,48 +1782,57 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     },
 
     listHandoffs(scope, options?: HandoffQuery) {
-      const currentNow = nowSeconds();
-      for (const handoff of state.handoffs) {
-        if (matchesScope(handoff, scope) && isHandoffExpired(handoff, currentNow)) {
-          handoff.status = 'expired';
-          handoff.decision_reason = 'expired';
-          handoff.version += 1;
-          this.insertMemoryEvent({
-            ...normalizeScope(handoff),
-            session_id: handoff.session_id,
-            actor_id: handoff.to_actor.actor_id,
-            actor_kind: handoff.to_actor.actor_kind,
-            actor_system_id: handoff.to_actor.system_id,
-            actor_display_name: handoff.to_actor.display_name,
-            actor_metadata: handoff.to_actor.metadata,
-            entity_kind: 'handoff',
-            entity_id: String(handoff.id),
-            event_type: 'handoff.expired',
-            payload: { after: cloneValue(handoff) },
-            created_at: currentNow,
-          });
-        }
-      }
-      return state.handoffs.filter((handoff) => {
-        if (!matchesScope(handoff, scope)) return false;
-        if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
-        if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
-        if (!options?.actor) return true;
-        if (options.direction === 'inbound') return matchesActor(options.actor, handoff.to_actor);
-        if (options.direction === 'outbound') return matchesActor(options.actor, handoff.from_actor);
-        return (
-          matchesActor(options.actor, handoff.to_actor) ||
-          matchesActor(options.actor, handoff.from_actor)
-        );
-      }).map(cloneValue);
+      // Read path (D5): compute effective status without writing. Durable expiry
+      // happens only in accept/reject/cancel and expireStaleHandoffs (the
+      // maintenance reaper), so repeated list calls emit ZERO events.
+      const now = nowSeconds();
+      return state.handoffs
+        .filter((handoff) => matchesScope(handoff, scope))
+        .map((handoff) => effectiveHandoff(handoff, now))
+        .filter((handoff) => {
+          if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
+          if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
+          if (!options?.actor) return true;
+          if (options.direction === 'inbound') return matchesActor(options.actor, handoff.to_actor);
+          if (options.direction === 'outbound') return matchesActor(options.actor, handoff.from_actor);
+          return (
+            matchesActor(options.actor, handoff.to_actor) ||
+            matchesActor(options.actor, handoff.from_actor)
+          );
+        })
+        .map(cloneValue);
     },
 
     listHandoffsCrossScope(scope, level: ScopeLevel, options?: HandoffQuery) {
-      const currentNow = nowSeconds();
-      for (const handoff of state.handoffs) {
-        if (matchesScopeLevel(handoff, scope, level) && isHandoffExpired(handoff, currentNow)) {
+      // Read path (D5): compute effective status without writing (see listHandoffs).
+      const now = nowSeconds();
+      return state.handoffs
+        .filter((handoff) => matchesScopeLevel(handoff, scope, level))
+        .map((handoff) => effectiveHandoff(handoff, now))
+        .filter((handoff) => {
+          if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
+          if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
+          if (!options?.actor) return true;
+          if (options.direction === 'inbound') return matchesActor(options.actor, handoff.to_actor);
+          if (options.direction === 'outbound') return matchesActor(options.actor, handoff.from_actor);
+          return (
+            matchesActor(options.actor, handoff.to_actor) ||
+            matchesActor(options.actor, handoff.from_actor)
+          );
+        })
+        .map(cloneValue);
+    },
+
+    expireStaleHandoffs(scope, now) {
+      // Durable expiry write path (Phase 2.5 reaper, D5): transactional, emits
+      // exactly one handoff.expired event per newly-expired pending handoff.
+      return runInTransaction(() => {
+        const expiredIds: number[] = [];
+        for (const handoff of state.handoffs) {
+          if (!matchesScope(handoff, scope)) continue;
+          if (!isHandoffExpired(handoff, now)) continue;
           handoff.status = 'expired';
-          handoff.decision_reason = 'expired';
+          handoff.decision_reason = handoff.decision_reason ?? 'expired';
           handoff.version += 1;
           this.insertMemoryEvent({
             ...normalizeScope(handoff),
@@ -1697,22 +1846,12 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
             entity_id: String(handoff.id),
             event_type: 'handoff.expired',
             payload: { after: cloneValue(handoff) },
-            created_at: currentNow,
+            created_at: now,
           });
+          expiredIds.push(handoff.id);
         }
-      }
-      return state.handoffs.filter((handoff) => {
-        if (!matchesScopeLevel(handoff, scope, level)) return false;
-        if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
-        if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
-        if (!options?.actor) return true;
-        if (options.direction === 'inbound') return matchesActor(options.actor, handoff.to_actor);
-        if (options.direction === 'outbound') return matchesActor(options.actor, handoff.from_actor);
-        return (
-          matchesActor(options.actor, handoff.to_actor) ||
-          matchesActor(options.actor, handoff.from_actor)
-        );
-      }).map(cloneValue);
+        return expiredIds;
+      });
     },
 
     upsertContextMonitor(input: ContextMonitorUpsert): ContextMonitor {
@@ -1943,23 +2082,46 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         source_session_id: input.source_session_id ?? null,
         created_at: input.created_at ?? now,
       };
-      state.playbookRevisions.push(record);
-      playbook.revision_count += 1;
-      this.insertMemoryEvent({
-        ...normalizeScope(record),
-        session_id: record.source_session_id,
-        entity_kind: 'playbook_revision',
-        entity_id: String(record.id),
-        event_type: 'playbook.revised',
-        payload: {
-          after: cloneValue(record),
-          refs: {
-            playbook_id: record.playbook_id,
+      // D1: a revision mutates the parent playbook (revision_count, updated_at).
+      // Emit BOTH the revision audit event (playbook.revised) AND a playbook
+      // after-snapshot (playbook.updated) so temporal replay reconstructs the
+      // bumped revision_count/updated_at — foldTemporalState only folds the
+      // `playbook` entity kind, not `playbook_revision`. All-or-nothing.
+      return runInTransaction(() => {
+        state.playbookRevisions.push(record);
+        playbook.revision_count += 1;
+        playbook.updated_at = record.created_at;
+        this.insertMemoryEvent({
+          ...normalizeScope(record),
+          session_id: record.source_session_id,
+          entity_kind: 'playbook_revision',
+          entity_id: String(record.id),
+          event_type: 'playbook.revised',
+          payload: {
+            after: cloneValue(record),
+            refs: {
+              playbook_id: record.playbook_id,
+            },
           },
-        },
-        created_at: record.created_at,
+          created_at: record.created_at,
+        });
+        this.insertMemoryEvent({
+          ...normalizeScope(playbook),
+          session_id: playbook.source_session_id,
+          entity_kind: 'playbook',
+          entity_id: String(playbook.id),
+          event_type: 'playbook.updated',
+          payload: {
+            after: cloneValue(playbook),
+            refs: {
+              revision_id: record.id,
+              revision_count: playbook.revision_count,
+            },
+          },
+          created_at: playbook.updated_at,
+        });
+        return record;
       });
-      return record;
     },
     getPlaybookRevisions(playbookId: number): PlaybookRevision[] {
       return state.playbookRevisions
@@ -2203,6 +2365,16 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         processed_at: null,
       };
       state.sourceDocuments.push(doc);
+      this.insertMemoryEvent({
+        ...n,
+        entity_kind: 'source_document',
+        entity_id: String(doc.id),
+        event_type: 'source_document.created',
+        payload: {
+          after: cloneValue(doc),
+        },
+        created_at: doc.created_at,
+      });
       return cloneValue(doc);
     },
 
@@ -2249,9 +2421,22 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     updateSourceDocument(id: number, patch: { status?: SourceDocumentStatus; fact_count?: number; processed_at?: number | null }): SourceDocument | null {
       const doc = state.sourceDocuments.find((d) => d.id === id);
       if (!doc) return null;
+      const before = cloneValue(doc);
       if (patch.status !== undefined) doc.status = patch.status;
       if (patch.fact_count !== undefined) doc.fact_count = patch.fact_count;
       if (patch.processed_at !== undefined) doc.processed_at = patch.processed_at;
+      this.insertMemoryEvent({
+        ...normalizeScope(doc),
+        entity_kind: 'source_document',
+        entity_id: String(doc.id),
+        event_type: 'source_document.updated',
+        payload: {
+          before,
+          after: cloneValue(doc),
+          patch: cloneValue(patch as Record<string, unknown>),
+        },
+        created_at: nowSeconds(),
+      });
       return cloneValue(doc);
     },
 
@@ -2270,12 +2455,192 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       });
     },
 
+    getGovernanceState(scope): PersistedGovernanceState | null {
+      const key = governanceScopeKey(scope);
+      const entry = governance.get(key);
+      if (!entry) return null;
+      const hasAny =
+        entry.defaultContract != null ||
+        entry.namedContracts.size > 0 ||
+        entry.deletedContractNames.size > 0 ||
+        entry.invariants.size > 0 ||
+        entry.deletedInvariantIds.size > 0 ||
+        entry.escalationPolicy != null;
+      if (!hasAny) return null;
+      return {
+        defaultContract: structuredClone(entry.defaultContract),
+        namedContracts: Object.fromEntries(
+          [...entry.namedContracts.entries()].map(([n, c]) => [n, structuredClone(c)]),
+        ),
+        deletedContractNames: [...entry.deletedContractNames],
+        invariants: [...entry.invariants.values()].map((inv) => structuredClone(inv)),
+        deletedInvariantIds: [...entry.deletedInvariantIds],
+        escalationPolicy: structuredClone(entry.escalationPolicy),
+      };
+    },
+
+    upsertDefaultContextContract(scope, contract) {
+      runInTransaction(() => {
+        const entry = getGovernanceEntry(scope);
+        entry.defaultContract =
+          contract == null ? { state: 'cleared' } : { state: 'set', contract: cloneValue(contract) };
+        this.insertMemoryEvent({
+          ...normalizeScope(scope),
+          entity_kind: 'context_contract',
+          entity_id: '__default__',
+          event_type: contract == null ? 'context_contract.deleted' : 'context_contract.set',
+          payload: {
+            after: cloneValue(entry.defaultContract),
+            refs: { name: null, isDefault: true },
+          },
+          created_at: nowSeconds(),
+        });
+      });
+    },
+
+    upsertNamedContextContract(scope, name, contract) {
+      runInTransaction(() => {
+        const entry = getGovernanceEntry(scope);
+        entry.namedContracts.set(name, cloneValue(contract));
+        entry.deletedContractNames.delete(name);
+        this.insertMemoryEvent({
+          ...normalizeScope(scope),
+          entity_kind: 'context_contract',
+          entity_id: name,
+          event_type: 'context_contract.set',
+          payload: {
+            after: cloneValue(contract),
+            refs: { name, isDefault: false },
+          },
+          created_at: nowSeconds(),
+        });
+      });
+    },
+
+    deleteNamedContextContract(scope, name): boolean {
+      return runInTransaction(() => {
+        const entry = getGovernanceEntry(scope);
+        const existed = entry.namedContracts.delete(name);
+        entry.deletedContractNames.add(name);
+        this.insertMemoryEvent({
+          ...normalizeScope(scope),
+          entity_kind: 'context_contract',
+          entity_id: name,
+          event_type: 'context_contract.deleted',
+          payload: {
+            refs: { name, isDefault: false, existed },
+          },
+          created_at: nowSeconds(),
+        });
+        return existed;
+      });
+    },
+
+    upsertContextInvariant(scope, invariant) {
+      runInTransaction(() => {
+        const entry = getGovernanceEntry(scope);
+        entry.invariants.set(invariant.id, cloneValue(invariant));
+        entry.deletedInvariantIds.delete(invariant.id);
+        this.insertMemoryEvent({
+          ...normalizeScope(scope),
+          entity_kind: 'context_invariant',
+          entity_id: invariant.id,
+          event_type: 'context_invariant.set',
+          payload: {
+            after: cloneValue(invariant),
+          },
+          created_at: nowSeconds(),
+        });
+      });
+    },
+
+    deleteContextInvariant(scope, invariantId): boolean {
+      return runInTransaction(() => {
+        const entry = getGovernanceEntry(scope);
+        const existed = entry.invariants.delete(invariantId);
+        entry.deletedInvariantIds.add(invariantId);
+        this.insertMemoryEvent({
+          ...normalizeScope(scope),
+          entity_kind: 'context_invariant',
+          entity_id: invariantId,
+          event_type: 'context_invariant.deleted',
+          payload: {
+            refs: { invariantId, existed },
+          },
+          created_at: nowSeconds(),
+        });
+        return existed;
+      });
+    },
+
+    upsertContextEscalationPolicy(scope, policy) {
+      runInTransaction(() => {
+        const entry = getGovernanceEntry(scope);
+        entry.escalationPolicy = cloneValue(policy);
+        this.insertMemoryEvent({
+          ...normalizeScope(scope),
+          entity_kind: 'context_escalation_policy',
+          entity_id: '__policy__',
+          event_type: 'context_escalation_policy.set',
+          payload: {
+            after: cloneValue(policy),
+          },
+          created_at: nowSeconds(),
+        });
+      });
+    },
+
     transaction(fn) {
-      return fn();
+      return runInTransaction(fn);
     },
 
     close() {},
   };
+
+  /**
+   * Genuine synchronous transaction (Phase 2.1/3.7 partial): snapshot every
+   * mutable store before running `fn`; on throw, restore the snapshot so no
+   * partial state (rows or events) survives. Nested calls reuse the outermost
+   * snapshot so an inner rollback is subsumed by the outer one.
+   *
+   * `structuredClone` is used for a deep, reference-independent copy; ids and
+   * scopedConfig are captured too so a rolled-back write does not leak an
+   * advanced id counter or a config mutation.
+   */
+  function runInTransaction<T>(fn: () => T): T {
+    if (txnDepth > 0) {
+      // Already inside a transaction; the outer frame owns rollback.
+      txnDepth += 1;
+      try {
+        return fn();
+      } finally {
+        txnDepth -= 1;
+      }
+    }
+    const stateSnapshot = structuredClone(state);
+    const idsSnapshot = { ...ids };
+    const configSnapshot = new Map(
+      [...scopedConfig.entries()].map(([key, value]) => [key, { ...value }]),
+    );
+    const governanceSnapshot = cloneGovernance(governance);
+    txnDepth = 1;
+    try {
+      const result = fn();
+      txnDepth = 0;
+      return result;
+    } catch (error) {
+      // Restore each field in place so closures capturing `state` see the
+      // rolled-back values (we mutate the existing object, not reassign it).
+      Object.assign(state, stateSnapshot);
+      Object.assign(ids, idsSnapshot);
+      scopedConfig.clear();
+      for (const [key, value] of configSnapshot) scopedConfig.set(key, value);
+      governance.clear();
+      for (const [key, value] of governanceSnapshot) governance.set(key, value);
+      txnDepth = 0;
+      throw error;
+    }
+  }
 }
 
 export function createInMemoryAdapterWithEmbeddings(

@@ -122,9 +122,13 @@ describe('postgres adapter transactions', () => {
 
   it('passes through low-confidence facts and boolean candidate source flags', async () => {
     const writes: Array<{ text: string; values?: unknown[] }> = [];
-    const pool = {
-      async query(text: string, values?: unknown[]) {
-        writes.push({ text, values });
+    // These primitives now run inside `this.transaction`, so queries are routed
+    // to the pool.connect() client rather than pool.query. Share ONE query
+    // handler between pool.query and the connected client so the INSERT/SELECT
+    // fixtures are served on whichever executor the adapter picks.
+    const handleQuery = async (text: string, values?: unknown[]) => {
+      writes.push({ text, values });
+      {
         if (text.startsWith('INSERT INTO knowledge_memory')) {
           return {
             rows: [
@@ -208,12 +212,13 @@ describe('postgres adapter transactions', () => {
           };
         }
         return { rows: [] };
-      },
+      }
+    };
+    const pool = {
+      query: handleQuery,
       async connect() {
         return {
-          async query() {
-            return { rows: [] };
-          },
+          query: handleQuery,
           release() {},
         };
       },

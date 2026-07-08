@@ -287,6 +287,183 @@ describe('SQLite work claims (plan 0.1: reclaimable after expiry/release)', () =
   });
 });
 
+describe('SQLite lazy lease expiry: reads never write (plan 2.5)', () => {
+  let adapter: StorageAdapter;
+
+  beforeEach(() => {
+    adapter = createSQLiteAdapter(':memory:');
+  });
+
+  afterEach(() => {
+    adapter.close();
+  });
+
+  function claimExpiringInThePast() {
+    const item = adapter.insertWorkItem({
+      ...scope(),
+      kind: 'unresolved_work',
+      title: 'leased work',
+      visibility_class: 'private',
+    });
+    const now = Math.floor(Date.now() / 1000);
+    // Claimed an hour ago with a 60s lease => already lapsed against the clock.
+    return adapter.claimWorkItem({
+      ...scope(),
+      work_item_id: item.id,
+      actor: actor('agent-a'),
+      visibility_class: 'private',
+      lease_seconds: 60,
+      claimed_at: now - 3600,
+    });
+  }
+
+  function expiredEventCount(claimId: number): number {
+    return adapter
+      .listMemoryEvents(scope(), { entityKind: 'work_claim', limit: 1000 })
+      .events.filter((e) => e.event_type === 'work_claim.expired' && e.entity_id === String(claimId))
+      .length;
+  }
+
+  it('two concurrent list/get reads of a lapsed claim emit zero expiry events and write nothing', () => {
+    const claim = claimExpiringInThePast();
+    const eventsBefore = adapter.listMemoryEvents(scope(), { limit: 1000 }).events.length;
+
+    // Simulate two concurrent readers hitting every read path.
+    expect(adapter.getActiveWorkClaim(claim.work_item_id)).toBeNull();
+    expect(adapter.getActiveWorkClaim(claim.work_item_id)).toBeNull();
+    const listedA = adapter.listWorkClaims(scope(), { includeExpired: true });
+    const listedB = adapter.listWorkClaims(scope(), { includeExpired: true });
+    adapter.listWorkClaimsCrossScope(scope(), 'tenant', { includeExpired: true });
+    adapter.listWorkClaimsCrossScope(scope(), 'tenant', { includeExpired: true });
+
+    // Reads report the EFFECTIVE status (expired) without mutating the store.
+    expect(listedA.find((c) => c.id === claim.id)?.status).toBe('expired');
+    expect(listedB.find((c) => c.id === claim.id)?.status).toBe('expired');
+
+    // No expiry events emitted by reads.
+    expect(expiredEventCount(claim.id)).toBe(0);
+    expect(adapter.listMemoryEvents(scope(), { limit: 1000 }).events.length).toBe(eventsBefore);
+    // getWorkClaimById reports the EFFECTIVE status (D6): consistent with the
+    // list paths above.
+    expect(adapter.getWorkClaimById(claim.id)?.status).toBe('expired');
+    // Prove the reads did NOT durably write the expiry: the reaper can still
+    // find and transition the row, which is only possible if it is stored as
+    // 'active'. A read-write would have already expired it, so the reaper would
+    // return [] and emit zero events.
+    const now = Math.floor(Date.now() / 1000);
+    expect(adapter.expireStaleClaims(scope(), now)).toEqual([claim.id]);
+    expect(expiredEventCount(claim.id)).toBe(1);
+  });
+
+  it('expireStaleClaims durably expires the claim and emits exactly one event', () => {
+    const claim = claimExpiringInThePast();
+    const now = Math.floor(Date.now() / 1000);
+
+    // Reads first (must not have expired anything).
+    adapter.listWorkClaims(scope(), { includeExpired: true });
+    expect(expiredEventCount(claim.id)).toBe(0);
+
+    const expired = adapter.expireStaleClaims(scope(), now);
+    expect(expired).toEqual([claim.id]);
+    expect(expiredEventCount(claim.id)).toBe(1);
+    expect(adapter.getWorkClaimById(claim.id)?.status).toBe('expired');
+
+    // A second reaper pass is a no-op — the already-expired claim is not
+    // re-selected, so no duplicate event.
+    const again = adapter.expireStaleClaims(scope(), now + 1000);
+    expect(again).toEqual([]);
+    expect(expiredEventCount(claim.id)).toBe(1);
+  });
+});
+
+describe('SQLite lazy handoff expiry (plan 2.5, D5/D6)', () => {
+  let adapter: StorageAdapter;
+
+  beforeEach(() => {
+    adapter = createSQLiteAdapter(':memory:');
+  });
+
+  afterEach(() => {
+    adapter.close();
+  });
+
+  // A pending handoff whose lease already lapsed against the real clock
+  // (expires_at 60s in the past). effectiveHandoff must read it as 'expired'
+  // without writing.
+  function handoffExpiringInThePast() {
+    const item = adapter.insertWorkItem({
+      ...scope(),
+      kind: 'unresolved_work',
+      title: 'handoff work',
+      visibility_class: 'private',
+    });
+    const now = Math.floor(Date.now() / 1000);
+    return adapter.createHandoff({
+      ...scope(),
+      work_item_id: item.id,
+      from_actor: actor('agent-a'),
+      to_actor: actor('agent-b'),
+      summary: 'take this over',
+      expires_at: now - 60,
+      visibility_class: 'private',
+    });
+  }
+
+  function handoffExpiredEventCount(handoffId: number): number {
+    return adapter
+      .listMemoryEvents(scope(), { entityKind: 'handoff', limit: 1000 })
+      .events.filter((e) => e.event_type === 'handoff.expired' && e.entity_id === String(handoffId))
+      .length;
+  }
+
+  it('two list/get reads of a lapsed handoff emit zero events and write nothing (D5/D6)', () => {
+    const handoff = handoffExpiringInThePast();
+    const eventsBefore = adapter.listMemoryEvents(scope(), { limit: 1000 }).events.length;
+
+    // Two list calls (the double-emission bug class): both compute effective
+    // 'expired' without writing.
+    const listedA = adapter.listHandoffs(scope());
+    const listedB = adapter.listHandoffs(scope());
+    adapter.listHandoffsCrossScope(scope(), 'tenant');
+    adapter.listHandoffsCrossScope(scope(), 'tenant');
+    expect(listedA.find((h) => h.id === handoff.id)?.status).toBe('expired');
+    expect(listedB.find((h) => h.id === handoff.id)?.status).toBe('expired');
+    // D6: by-id read applies the same effective status as the list paths.
+    expect(adapter.getHandoffById(handoff.id)?.status).toBe('expired');
+
+    // No expiry events emitted by reads.
+    expect(handoffExpiredEventCount(handoff.id)).toBe(0);
+    expect(adapter.listMemoryEvents(scope(), { limit: 1000 }).events.length).toBe(eventsBefore);
+    // Prove the reads did NOT durably write the expiry: the reaper can still
+    // find and transition the pending row (only possible if it is stored as
+    // 'pending'). A read-write would have already expired it, so the reaper
+    // would return [] and emit zero events.
+    const now = Math.floor(Date.now() / 1000);
+    expect(adapter.expireStaleHandoffs(scope(), now)).toEqual([handoff.id]);
+    expect(handoffExpiredEventCount(handoff.id)).toBe(1);
+  });
+
+  it('expireStaleHandoffs durably expires the handoff and emits exactly one event (D5)', () => {
+    const handoff = handoffExpiringInThePast();
+    const now = Math.floor(Date.now() / 1000);
+
+    // Reads first (must not have expired anything).
+    adapter.listHandoffs(scope());
+    expect(handoffExpiredEventCount(handoff.id)).toBe(0);
+
+    const expired = adapter.expireStaleHandoffs(scope(), now);
+    expect(expired).toEqual([handoff.id]);
+    expect(handoffExpiredEventCount(handoff.id)).toBe(1);
+    expect(adapter.getHandoffById(handoff.id)?.status).toBe('expired');
+
+    // A second reaper pass is a no-op — the already-expired handoff is not
+    // re-selected (guarded UPDATE ... WHERE status='pending'), so no duplicate.
+    const again = adapter.expireStaleHandoffs(scope(), now + 1000);
+    expect(again).toEqual([]);
+    expect(handoffExpiredEventCount(handoff.id)).toBe(1);
+  });
+});
+
 describe('SQLite work item optimistic locking (plan 0.7)', () => {
   let adapter: StorageAdapter;
 
@@ -395,10 +572,17 @@ describe('SQLite work item optimistic locking (plan 0.7)', () => {
       proto.prepare = originalPrepare;
     }
 
-    // The interleaved bump landed but the guarded write did not, so title is
-    // unchanged and version reflects only the concurrent bump.
+    // The guarded write matched zero rows and threw ConflictError. Because
+    // updateWorkItem is now wrapped in a transaction (Phase 2.1 atomic
+    // mutation+event), the ConflictError rolls the whole transaction back —
+    // including the interleaved bump, which the test injects on the SAME
+    // connection and is therefore subsumed by that transaction. So the row is
+    // left exactly as it was: title unchanged and version 1. The SQL guard is
+    // still what detected the conflict (verified to FAIL when the
+    // `AND version = ?` clause is removed). A genuine concurrent writer on a
+    // separate connection/transaction would of course still land its own bump.
     const current = adapter.getWorkItemById(item.id);
     expect(current?.title).toBe('raced item');
-    expect(current?.version).toBe(2);
+    expect(current?.version).toBe(1);
   });
 });

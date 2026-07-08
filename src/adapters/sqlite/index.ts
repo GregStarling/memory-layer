@@ -325,6 +325,24 @@ function createAdapterFromDatabase(
   db: Database.Database,
   telemetry?: TelemetryOptions,
 ): StorageAdapter {
+  // Phase 2.1: run a row-mutation-plus-event primitive atomically. Always wrap
+  // `fn` in a native better-sqlite3 transaction. better-sqlite3 nests
+  // transactions with SAVEPOINTs — a nested `.transaction()` does NOT throw
+  // "cannot start a transaction within a transaction"; it opens a savepoint and,
+  // if `fn` throws, rolls back to it. This gives the correct semantics on BOTH
+  // paths:
+  //   - Uncaught throw: the savepoint rolls back AND the error propagates to the
+  //     enclosing transaction, which also rolls back — so a composition
+  //     (batch insert, promoteKnowledgeCandidate) stays all-or-nothing.
+  //   - Caught inner throw: only the inner primitive's writes are undone (rolled
+  //     back to its savepoint) while the outer composition continues — which the
+  //     prior "reuse the ambient frame with no savepoint" form could not do (a
+  //     caught inner throw left its partial writes stranded in the ambient txn).
+  // Verified empirically against better-sqlite3's savepoint behavior.
+  function atomic<T>(fn: () => T): T {
+    return db.transaction(fn)();
+  }
+
   function readTemporalWatermark(
     projectionName = 'temporal',
   ): TemporalProjectionWatermark | null {
@@ -498,9 +516,15 @@ function createAdapterFromDatabase(
     }
     const rows = db
       .prepare(
+        // Ordering contract (Phase 2.3): event_id ASC alone. event_id is the
+        // append-only AUTOINCREMENT id assigned inside the mutation's
+        // transaction, so it is the true causal write order. created_at is
+        // display metadata only and may be caller-supplied/backdated, so it is
+        // never an ORDER BY key — ordering by it while the cursor is
+        // `event_id > ?` risks skips/repeats when timestamps are backdated.
         `SELECT * FROM memory_event_log
          WHERE ${clauses.join(' AND ')}
-         ORDER BY created_at ASC, event_id ASC
+         ORDER BY event_id ASC
          LIMIT ?`,
       )
       .all(...params, resolved.limit + 1) as MemoryEventRow[];
@@ -538,9 +562,11 @@ function createAdapterFromDatabase(
     }
     const rows = db
       .prepare(
+        // Ordering contract (Phase 2.3): event_id ASC alone — see
+        // listScopedMemoryEvents for rationale.
         `SELECT * FROM memory_event_log
          WHERE ${clauses.join(' AND ')}
-         ORDER BY created_at ASC, event_id ASC
+         ORDER BY event_id ASC
          LIMIT ?`,
       )
       .all(...params, resolved.limit + 1) as MemoryEventRow[];
@@ -662,6 +688,23 @@ function createAdapterFromDatabase(
     };
   }
 
+  // Compute the EFFECTIVE view of a claim at `now` WITHOUT mutating stored
+  // state (Phase 2.5). A read that observes an active-but-lapsed claim
+  // (`status = 'active'` but `expires_at <= now`) returns a copy whose status is
+  // `expired`; the underlying row is left untouched. Durable expiry writes
+  // happen only in claim/renew/release and in `expireStaleClaims` (the reaper).
+  // This removes the write-on-read that let two concurrent readers each emit a
+  // `work_claim.expired` event for the same lapse (audit ~2337-2369).
+  function effectiveClaim(claim: WorkClaim, now: number): WorkClaim {
+    if (claim.status !== 'active' || claim.expires_at > now) return claim;
+    return {
+      ...claim,
+      status: 'expired',
+      released_at: claim.released_at ?? now,
+      release_reason: claim.release_reason ?? 'expired',
+    };
+  }
+
   // Move a displaced (dead) claim row out of work_claims_current and into
   // work_claims_history, preserving its original id and all columns. This frees
   // the single UNIQUE(work_item_id) slot in work_claims_current for a fresh
@@ -709,6 +752,22 @@ function createAdapterFromDatabase(
       source_event_id: row.source_event_id != null ? String(row.source_event_id) : null,
       visibility_class: (row.visibility_class as HandoffRecord['visibility_class']) ?? 'private',
       version: Number(row.version ?? 1),
+    };
+  }
+
+  // Compute the EFFECTIVE view of a handoff at `now` WITHOUT mutating stored
+  // state (Phase 2.5, D5 — handoff analogue of effectiveClaim). A read that
+  // observes a pending-but-expired handoff returns a copy whose status is
+  // `expired`; the underlying row is left untouched. Durable expiry writes
+  // happen only in accept/reject/cancel and `expireStaleHandoffs` (the reaper).
+  function effectiveHandoff(handoff: HandoffRecord, now: number): HandoffRecord {
+    if (handoff.status !== 'pending' || handoff.expires_at == null || handoff.expires_at > now) {
+      return handoff;
+    }
+    return {
+      ...handoff,
+      status: 'expired',
+      decision_reason: handoff.decision_reason ?? 'expired',
     };
   }
 
@@ -825,45 +884,48 @@ function createAdapterFromDatabase(
     const scope = validateNewTurn(input);
     const tokenEstimate = input.token_estimate ?? estimateTokens(input.content);
     const createdAt = input.created_at ?? nowSeconds();
-    const result = db
-      .prepare(
-        `INSERT INTO turns
-          (session_id, tenant_id, system_id, workspace_id, collaboration_id, scope_id, actor, role, content, priority, token_estimate, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        input.session_id,
-        scope.tenant_id,
-        scope.system_id,
-        scope.workspace_id,
-        scope.collaboration_id,
-        scope.scope_id,
-        input.actor,
-        input.role,
-        input.content,
-        input.priority ?? (input.role === 'system' ? 1.5 : 1),
-        tokenEstimate,
-        createdAt,
-      );
-    const turn = getTurnById(Number(result.lastInsertRowid))!;
-    insertMemoryEventInternal({
-      ...scope,
-      session_id: turn.session_id,
-      actor_id: turn.actor,
-      entity_kind: 'turn',
-      entity_id: String(turn.id),
-      event_type: 'turn.created',
-      payload: {
-        after: cloneValue(turn),
-      },
-      created_at: turn.created_at,
+    return atomic(() => {
+      const result = db
+        .prepare(
+          `INSERT INTO turns
+            (session_id, tenant_id, system_id, workspace_id, collaboration_id, scope_id, actor, role, content, priority, token_estimate, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.session_id,
+          scope.tenant_id,
+          scope.system_id,
+          scope.workspace_id,
+          scope.collaboration_id,
+          scope.scope_id,
+          input.actor,
+          input.role,
+          input.content,
+          input.priority ?? (input.role === 'system' ? 1.5 : 1),
+          tokenEstimate,
+          createdAt,
+        );
+      const turn = getTurnById(Number(result.lastInsertRowid))!;
+      insertMemoryEventInternal({
+        ...scope,
+        session_id: turn.session_id,
+        actor_id: turn.actor,
+        entity_kind: 'turn',
+        entity_id: String(turn.id),
+        event_type: 'turn.created',
+        payload: {
+          after: cloneValue(turn),
+        },
+        created_at: turn.created_at,
+      });
+      return turn;
     });
-    return turn;
   }
 
   function insertValidatedKnowledgeMemory(input: NewKnowledgeMemory): KnowledgeMemory {
     const scope = validateNewKnowledgeMemory(input);
     const createdAt = nowSeconds();
+    return atomic(() => {
     const result = db
       .prepare(
         `INSERT INTO knowledge_memory
@@ -937,6 +999,7 @@ function createAdapterFromDatabase(
       created_at: knowledge.created_at,
     });
     return knowledge;
+    });
   }
 
   function bootstrapTemporalCutover(): void {
@@ -1185,6 +1248,7 @@ function createAdapterFromDatabase(
 
     archiveTurn(id: number, archivedAt: number, compactionLogId: number): void {
       assertArchiveInput(id, archivedAt, compactionLogId);
+      atomic(() => {
       const before = getTurnById(id);
       db.prepare(
         `UPDATE turns
@@ -1211,6 +1275,7 @@ function createAdapterFromDatabase(
           created_at: archivedAt,
         });
       }
+      });
     },
 
     getArchivedTurnRange(sessionId: string, startId: number, endId: number, scope): Turn[] {
@@ -1228,6 +1293,7 @@ function createAdapterFromDatabase(
       const scope = validateNewWorkingMemory(input);
       const createdAt = nowSeconds();
       const expiresAt = input.expires_at ?? createdAt + 86400;
+      return atomic(() => {
       const result = db
         .prepare(
           `INSERT INTO working_memory
@@ -1266,6 +1332,7 @@ function createAdapterFromDatabase(
         created_at: workingMemory.created_at,
       });
       return workingMemory;
+      });
     },
 
     getWorkingMemoryById,
@@ -1326,6 +1393,7 @@ function createAdapterFromDatabase(
     },
 
     expireWorkingMemory(id: number): void {
+      atomic(() => {
       const before = getWorkingMemoryById(id);
       const expiredAt = nowSeconds();
       db.prepare('UPDATE working_memory SET expires_at = ? WHERE id = ?').run(expiredAt, id);
@@ -1347,9 +1415,11 @@ function createAdapterFromDatabase(
           created_at: expiredAt,
         });
       }
+      });
     },
 
     markWorkingMemoryPromoted(id: number, knowledgeMemoryId: number): void {
+      atomic(() => {
       const before = getWorkingMemoryById(id);
       db.prepare(
         'UPDATE working_memory SET promoted_to_knowledge_id = ? WHERE id = ?',
@@ -1372,6 +1442,7 @@ function createAdapterFromDatabase(
           created_at: nowSeconds(),
         });
       }
+      });
     },
 
     insertKnowledgeMemory(input: NewKnowledgeMemory): KnowledgeMemory {
@@ -1385,6 +1456,7 @@ function createAdapterFromDatabase(
     insertKnowledgeCandidate(input): KnowledgeCandidate {
       const scope = validateNewKnowledgeCandidate(input);
       const createdAt = input.created_at ?? nowSeconds();
+      return atomic(() => {
       const result = db
         .prepare(
           `INSERT INTO knowledge_candidate
@@ -1415,7 +1487,20 @@ function createAdapterFromDatabase(
           input.promoted_knowledge_id ?? null,
           createdAt,
         );
-      return getKnowledgeCandidateById(Number(result.lastInsertRowid))!;
+      const candidate = getKnowledgeCandidateById(Number(result.lastInsertRowid))!;
+      // Phase 2.2: candidate lifecycle audit event (mirrors in-memory).
+      insertMemoryEventInternal({
+        ...scope,
+        entity_kind: 'knowledge_candidate',
+        entity_id: String(candidate.id),
+        event_type: 'knowledge_candidate.created',
+        payload: {
+          after: cloneValue(candidate),
+        },
+        created_at: candidate.created_at,
+      });
+      return candidate;
+      });
     },
 
     insertKnowledgeCandidates(inputs): KnowledgeCandidate[] {
@@ -1499,28 +1584,68 @@ function createAdapterFromDatabase(
     },
 
     promoteKnowledgeCandidate(candidateId, input): KnowledgeMemory {
-      const knowledge = insertValidatedKnowledgeMemory(input);
-      db.prepare(
-        'UPDATE knowledge_candidate SET promoted_knowledge_id = ?, state = ? WHERE id = ?',
-      ).run(knowledge.id, 'provisional', candidateId);
-      return knowledge;
+      // Phase 2.2: candidate flip + knowledge insert + both events are one
+      // all-or-nothing transaction. A throw from insertValidatedKnowledgeMemory
+      // (e.g. validation) rolls back with no partial state; the candidate flip
+      // and its event only commit alongside the knowledge row and its event.
+      return atomic(() => {
+        const before = getKnowledgeCandidateById(candidateId);
+        const knowledge = insertValidatedKnowledgeMemory(input);
+        db.prepare(
+          'UPDATE knowledge_candidate SET promoted_knowledge_id = ?, state = ? WHERE id = ?',
+        ).run(knowledge.id, 'provisional', candidateId);
+        const after = getKnowledgeCandidateById(candidateId);
+        if (before && after) {
+          insertMemoryEventInternal({
+            ...normalizeScope(after),
+            entity_kind: 'knowledge_candidate',
+            entity_id: String(after.id),
+            event_type: 'knowledge_candidate.promoted',
+            payload: {
+              before: cloneValue(before),
+              after: cloneValue(after),
+              refs: {
+                knowledge_memory_id: knowledge.id,
+              },
+            },
+            created_at: nowSeconds(),
+          });
+        }
+        return knowledge;
+      });
     },
 
     deleteExpiredKnowledgeCandidates(scope, olderThan): number[] {
-      const rows = db
-        .prepare(
-          `SELECT id FROM knowledge_candidate
-           WHERE ${SCOPE_WHERE} AND promoted_knowledge_id IS NULL AND created_at < ?`,
-        )
-        .all(...scopeValues(scope), olderThan) as Array<{ id: number }>;
-      const ids = rows.map((r) => r.id);
-      if (ids.length > 0) {
-        db.prepare(
-          `DELETE FROM knowledge_candidate
-           WHERE ${SCOPE_WHERE} AND promoted_knowledge_id IS NULL AND created_at < ?`,
-        ).run(...scopeValues(scope), olderThan);
-      }
-      return ids;
+      return atomic(() => {
+        const rows = db
+          .prepare(
+            `SELECT * FROM knowledge_candidate
+             WHERE ${SCOPE_WHERE} AND promoted_knowledge_id IS NULL AND created_at < ?`,
+          )
+          .all(...scopeValues(scope), olderThan) as KnowledgeCandidateRow[];
+        const candidates = rows.map(rowToKnowledgeCandidate);
+        const ids = candidates.map((c) => c.id);
+        if (ids.length > 0) {
+          db.prepare(
+            `DELETE FROM knowledge_candidate
+             WHERE ${SCOPE_WHERE} AND promoted_knowledge_id IS NULL AND created_at < ?`,
+          ).run(...scopeValues(scope), olderThan);
+          // Phase 2.2: candidate lifecycle audit event (mirrors in-memory).
+          for (const candidate of candidates) {
+            insertMemoryEventInternal({
+              ...normalizeScope(candidate),
+              entity_kind: 'knowledge_candidate',
+              entity_id: String(candidate.id),
+              event_type: 'knowledge_candidate.expired',
+              payload: {
+                before: cloneValue(candidate),
+              },
+              created_at: nowSeconds(),
+            });
+          }
+        }
+        return ids;
+      });
     },
 
     getKnowledgeMemoryById,
@@ -1884,6 +2009,7 @@ function createAdapterFromDatabase(
       if (assignments.length === 0) {
         return getKnowledgeMemoryById(id);
       }
+      return atomic(() => {
       db.prepare(`UPDATE knowledge_memory SET ${assignments.join(', ')} WHERE id = ?`).run(...values, id);
       const after = getKnowledgeMemoryById(id);
       if (before && after) {
@@ -1901,11 +2027,13 @@ function createAdapterFromDatabase(
         });
       }
       return after;
+      });
     },
 
     insertWorkItem(input: NewWorkItem): WorkItem {
       const scope = validateNewWorkItem(input);
       const createdAt = input.created_at ?? nowSeconds();
+      return atomic(() => {
       const result = db
         .prepare(
           `INSERT INTO work_items
@@ -1946,6 +2074,7 @@ function createAdapterFromDatabase(
         created_at: workItem.created_at,
       });
       return workItem;
+      });
     },
 
     getActiveWorkItems(scope): WorkItem[] {
@@ -2004,6 +2133,7 @@ function createAdapterFromDatabase(
     },
 
     updateWorkItemStatus(id, status): void {
+      atomic(() => {
       const before = db
         .prepare('SELECT * FROM work_items WHERE id = ?')
         .get(id) as WorkItem | undefined;
@@ -2035,9 +2165,11 @@ function createAdapterFromDatabase(
           created_at: updatedAt,
         });
       }
+      });
     },
 
     updateWorkItem(id, patch: WorkItemPatch, options?: { expectedVersion?: number }): WorkItem | null {
+      return atomic(() => {
       const before = db
         .prepare('SELECT * FROM work_items WHERE id = ?')
         .get(id) as WorkItem | undefined;
@@ -2106,9 +2238,11 @@ function createAdapterFromDatabase(
         created_at: updatedAt,
       });
       return afterItem;
+      });
     },
 
     deleteWorkItem(id): void {
+      atomic(() => {
       const before = db
         .prepare('SELECT * FROM work_items WHERE id = ?')
         .get(id) as WorkItem | undefined;
@@ -2127,6 +2261,7 @@ function createAdapterFromDatabase(
           created_at: nowSeconds(),
         });
       }
+      });
     },
 
     claimWorkItem(input: NewWorkClaimInput): WorkClaim {
@@ -2344,20 +2479,27 @@ function createAdapterFromDatabase(
     },
 
     getWorkClaimById(claimId): WorkClaim | null {
+      // Read path (D6): apply the same effective-status computation as the list
+      // paths so status is consistent across read paths (no write).
+      const now = nowSeconds();
       const row = db
         .prepare('SELECT * FROM work_claims_current WHERE id = ?')
         .get(claimId) as Record<string, unknown> | undefined;
-      if (row) return mapWorkClaim(row);
+      if (row) return effectiveClaim(mapWorkClaim(row), now);
       // Displaced claims live in history (0.1); a caller holding an old claim id
       // must still be able to resolve it.
       const historyRow = db
         .prepare('SELECT * FROM work_claims_history WHERE id = ?')
         .get(claimId) as Record<string, unknown> | undefined;
       if (!historyRow) return null;
-      return mapWorkClaim(historyRow);
+      return effectiveClaim(mapWorkClaim(historyRow), now);
     },
 
     getActiveWorkClaim(workItemId): WorkClaim | null {
+      // Read path (Phase 2.5): compute effective status without writing. A
+      // lapsed active claim reads as no active claim; the durable expiry is
+      // written by claim/renew/release or the reaper, never by this read.
+      const now = nowSeconds();
       const row = db
         .prepare(
           `SELECT * FROM work_claims_current
@@ -2367,66 +2509,15 @@ function createAdapterFromDatabase(
         .get(workItemId) as Record<string, unknown> | undefined;
       if (!row) return null;
       const claim = mapWorkClaim(row);
-      if (claim.expires_at > nowSeconds()) return claim;
-      const expiredAt = nowSeconds();
-      db.prepare(
-        `UPDATE work_claims_current
-         SET status = 'expired', released_at = ?, release_reason = 'expired', version = version + 1
-         WHERE id = ?`,
-      ).run(expiredAt, claim.id);
-      const expired = mapWorkClaim(
-        db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(claim.id) as Record<string, unknown>,
-      );
-      insertMemoryEventInternal({
-        ...normalizeScope(expired),
-        session_id: expired.session_id,
-        actor_id: expired.actor.actor_id,
-        actor_kind: expired.actor.actor_kind,
-        actor_system_id: expired.actor.system_id,
-        actor_display_name: expired.actor.display_name,
-        actor_metadata: expired.actor.metadata,
-        entity_kind: 'work_claim',
-        entity_id: String(expired.id),
-        event_type: 'work_claim.expired',
-        payload: { before: cloneValue(claim), after: cloneValue(expired) },
-        created_at: expiredAt,
-      });
-      return null;
+      return claim.expires_at > now ? claim : null;
     },
 
     listWorkClaims(scope, options?: WorkClaimQuery): WorkClaim[] {
+      // Read path (Phase 2.5): compute effective status without writing. No
+      // write-on-read expiry here — that removes the double-emission where two
+      // concurrent readers each expired the same lapsed claim. Durable expiry
+      // is the reaper's job (expireStaleClaims).
       const now = nowSeconds();
-      const expiredRows = db
-        .prepare(
-          `SELECT * FROM work_claims_current
-           WHERE ${SCOPE_WHERE} AND status = 'active' AND expires_at <= ?`,
-        )
-        .all(...scopeValues(scope), now) as Array<Record<string, unknown>>;
-      for (const row of expiredRows) {
-        const before = mapWorkClaim(row);
-        db.prepare(
-          `UPDATE work_claims_current
-           SET status = 'expired', released_at = ?, release_reason = 'expired', version = version + 1
-           WHERE id = ?`,
-        ).run(now, before.id);
-        const after = mapWorkClaim(
-          db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(before.id) as Record<string, unknown>,
-        );
-        insertMemoryEventInternal({
-          ...normalizeScope(after),
-          session_id: after.session_id,
-          actor_id: after.actor.actor_id,
-          actor_kind: after.actor.actor_kind,
-          actor_system_id: after.actor.system_id,
-          actor_display_name: after.actor.display_name,
-          actor_metadata: after.actor.metadata,
-          entity_kind: 'work_claim',
-          entity_id: String(after.id),
-          event_type: 'work_claim.expired',
-          payload: { before: cloneValue(before), after: cloneValue(after) },
-          created_at: now,
-        });
-      }
       // Displaced historical claims (0.1) are always expired/released, so they
       // only matter when the caller asks for them. Skip the history branch and its
       // scan entirely for the common default listing; otherwise UNION it in so
@@ -2450,7 +2541,7 @@ function createAdapterFromDatabase(
               .all(...scopeValues(scope))
       ) as Array<Record<string, unknown>>;
       return rows
-        .map(mapWorkClaim)
+        .map((row) => effectiveClaim(mapWorkClaim(row), now))
         .filter((claim) => {
           if (!options?.includeExpired && claim.status === 'expired') return false;
           if (!options?.includeReleased && claim.status === 'released') return false;
@@ -2467,38 +2558,8 @@ function createAdapterFromDatabase(
     },
 
     listWorkClaimsCrossScope(scope, level, options?: WorkClaimQuery): WorkClaim[] {
+      // Read path (Phase 2.5): compute effective status without writing.
       const now = nowSeconds();
-      const expiredRows = db
-        .prepare(
-          `SELECT * FROM work_claims_current
-           WHERE ${scopeWhereForLevel(scope, level)} AND status = 'active' AND expires_at <= ?`,
-        )
-        .all(...scopeParamsForLevel(scope, level), now) as Array<Record<string, unknown>>;
-      for (const row of expiredRows) {
-        const before = mapWorkClaim(row);
-        db.prepare(
-          `UPDATE work_claims_current
-           SET status = 'expired', released_at = ?, release_reason = 'expired', version = version + 1
-           WHERE id = ?`,
-        ).run(now, before.id);
-        const after = mapWorkClaim(
-          db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(before.id) as Record<string, unknown>,
-        );
-        insertMemoryEventInternal({
-          ...normalizeScope(after),
-          session_id: after.session_id,
-          actor_id: after.actor.actor_id,
-          actor_kind: after.actor.actor_kind,
-          actor_system_id: after.actor.system_id,
-          actor_display_name: after.actor.display_name,
-          actor_metadata: after.actor.metadata,
-          entity_kind: 'work_claim',
-          entity_id: String(after.id),
-          event_type: 'work_claim.expired',
-          payload: { before: cloneValue(before), after: cloneValue(after) },
-          created_at: now,
-        });
-      }
       // Displaced historical claims (0.1) are always expired/released, so skip the
       // history branch and its scan for the common default cross-scope listing;
       // only UNION it in when includeExpired/includeReleased is requested.
@@ -2524,7 +2585,7 @@ function createAdapterFromDatabase(
               .all(...scopeParamsForLevel(scope, level))
       ) as Array<Record<string, unknown>>;
       return rows
-        .map(mapWorkClaim)
+        .map((row) => effectiveClaim(mapWorkClaim(row), now))
         .filter((claim) => {
           if (!options?.includeExpired && claim.status === 'expired') return false;
           if (!options?.includeReleased && claim.status === 'released') return false;
@@ -2540,6 +2601,54 @@ function createAdapterFromDatabase(
         });
     },
 
+    expireStaleClaims(scope, now): number[] {
+      // Phase 2.5 reaper. Transactional (composes with an ambient maintenance
+      // transaction via `atomic`): transition every ACTIVE claim whose lease has
+      // lapsed to 'expired', emitting exactly one work_claim.expired event per
+      // claim. Exactly-once holds because the SELECT filter requires
+      // `status = 'active'`, so an already-expired row is never re-selected on a
+      // subsequent call. This is the ONLY read/maintenance path that writes an
+      // expiry event; the list/get reads compute effective status without
+      // writing (see effectiveClaim), so concurrent readers can never
+      // double-emit.
+      return atomic((): number[] => {
+        const expiredRows = db
+          .prepare(
+            `SELECT * FROM work_claims_current
+             WHERE ${SCOPE_WHERE} AND status = 'active' AND expires_at <= ?`,
+          )
+          .all(...scopeValues(scope), now) as Array<Record<string, unknown>>;
+        const expiredIds: number[] = [];
+        for (const row of expiredRows) {
+          const before = mapWorkClaim(row);
+          db.prepare(
+            `UPDATE work_claims_current
+             SET status = 'expired', released_at = ?, release_reason = 'expired', version = version + 1
+             WHERE id = ?`,
+          ).run(now, before.id);
+          const after = mapWorkClaim(
+            db.prepare('SELECT * FROM work_claims_current WHERE id = ?').get(before.id) as Record<string, unknown>,
+          );
+          insertMemoryEventInternal({
+            ...normalizeScope(after),
+            session_id: after.session_id,
+            actor_id: after.actor.actor_id,
+            actor_kind: after.actor.actor_kind,
+            actor_system_id: after.actor.system_id,
+            actor_display_name: after.actor.display_name,
+            actor_metadata: after.actor.metadata,
+            entity_kind: 'work_claim',
+            entity_id: String(after.id),
+            event_type: 'work_claim.expired',
+            payload: { before: cloneValue(before), after: cloneValue(after) },
+            created_at: now,
+          });
+          expiredIds.push(after.id);
+        }
+        return expiredIds;
+      });
+    },
+
     createHandoff(input: NewHandoffInput): HandoffRecord {
       assertActorRef(input.from_actor, 'from_actor');
       assertActorRef(input.to_actor, 'to_actor');
@@ -2547,6 +2656,7 @@ function createAdapterFromDatabase(
       const createdAt = input.created_at ?? nowSeconds();
       const fromParts = serializeActorMetadata(input.from_actor);
       const toParts = serializeActorMetadata(input.to_actor);
+      return atomic(() => {
       const result = db.prepare(
         `INSERT INTO handoff_records
           (tenant_id, system_id, workspace_id, collaboration_id, scope_id, work_item_id, session_id,
@@ -2588,14 +2698,18 @@ function createAdapterFromDatabase(
         created_at: createdAt,
       });
       return handoff;
+      });
     },
 
     getHandoffById(handoffId): HandoffRecord | null {
+      // Read path (D6): apply the same effective-status computation as the list
+      // paths so status is consistent across read paths (no write).
+      const now = nowSeconds();
       const row = db
         .prepare('SELECT * FROM handoff_records WHERE id = ?')
         .get(handoffId) as Record<string, unknown> | undefined;
       if (!row) return null;
-      return mapHandoff(row);
+      return effectiveHandoff(mapHandoff(row), now);
     },
 
     acceptHandoff(handoffId, actor, reason): HandoffRecord | null {
@@ -2807,42 +2921,15 @@ function createAdapterFromDatabase(
     },
 
     listHandoffs(scope, options?: HandoffQuery): HandoffRecord[] {
+      // Read path (D5): compute effective status without writing. Durable expiry
+      // happens only in accept/reject/cancel and expireStaleHandoffs (the
+      // maintenance reaper), so repeated list calls emit ZERO events. This
+      // removes the write-on-read double-emission (same bug class as 2.5 claims).
       const now = nowSeconds();
-      const expiredRows = db
-        .prepare(
-          `SELECT * FROM handoff_records
-           WHERE ${SCOPE_WHERE} AND status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?`,
-        )
-        .all(...scopeValues(scope), now) as Array<Record<string, unknown>>;
-      for (const row of expiredRows) {
-        const before = mapHandoff(row);
-        db.prepare(
-          `UPDATE handoff_records
-           SET status = 'expired', decision_reason = 'expired', version = version + 1
-           WHERE id = ?`,
-        ).run(before.id);
-        const after = mapHandoff(
-          db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(before.id) as Record<string, unknown>,
-        );
-        insertMemoryEventInternal({
-          ...normalizeScope(after),
-          session_id: after.session_id,
-          actor_id: after.to_actor.actor_id,
-          actor_kind: after.to_actor.actor_kind,
-          actor_system_id: after.to_actor.system_id,
-          actor_display_name: after.to_actor.display_name,
-          actor_metadata: after.to_actor.metadata,
-          entity_kind: 'handoff',
-          entity_id: String(after.id),
-          event_type: 'handoff.expired',
-          payload: { before: cloneValue(before), after: cloneValue(after) },
-          created_at: now,
-        });
-      }
       const rows = db
         .prepare(`SELECT * FROM handoff_records WHERE ${SCOPE_WHERE} ORDER BY created_at DESC`)
         .all(...scopeValues(scope)) as Array<Record<string, unknown>>;
-      return rows.map(mapHandoff).filter((handoff) => {
+      return rows.map((row) => effectiveHandoff(mapHandoff(row), now)).filter((handoff) => {
         if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
         if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
         if (!options?.actor) return true;
@@ -2859,42 +2946,12 @@ function createAdapterFromDatabase(
     },
 
     listHandoffsCrossScope(scope, level, options?: HandoffQuery): HandoffRecord[] {
+      // Read path (D5): compute effective status without writing (see listHandoffs).
       const now = nowSeconds();
-      const expiredRows = db
-        .prepare(
-          `SELECT * FROM handoff_records
-           WHERE ${scopeWhereForLevel(scope, level)} AND status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?`,
-        )
-        .all(...scopeParamsForLevel(scope, level), now) as Array<Record<string, unknown>>;
-      for (const row of expiredRows) {
-        const before = mapHandoff(row);
-        db.prepare(
-          `UPDATE handoff_records
-           SET status = 'expired', decision_reason = 'expired', version = version + 1
-           WHERE id = ?`,
-        ).run(before.id);
-        const after = mapHandoff(
-          db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(before.id) as Record<string, unknown>,
-        );
-        insertMemoryEventInternal({
-          ...normalizeScope(after),
-          session_id: after.session_id,
-          actor_id: after.to_actor.actor_id,
-          actor_kind: after.to_actor.actor_kind,
-          actor_system_id: after.to_actor.system_id,
-          actor_display_name: after.to_actor.display_name,
-          actor_metadata: after.to_actor.metadata,
-          entity_kind: 'handoff',
-          entity_id: String(after.id),
-          event_type: 'handoff.expired',
-          payload: { before: cloneValue(before), after: cloneValue(after) },
-          created_at: now,
-        });
-      }
       const rows = db
         .prepare(`SELECT * FROM handoff_records WHERE ${scopeWhereForLevel(scope, level)} ORDER BY created_at DESC`)
         .all(...scopeParamsForLevel(scope, level)) as Array<Record<string, unknown>>;
-      return rows.map(mapHandoff).filter((handoff) => {
+      return rows.map((row) => effectiveHandoff(mapHandoff(row), now)).filter((handoff) => {
         if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
         if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
         if (!options?.actor) return true;
@@ -2910,7 +2967,62 @@ function createAdapterFromDatabase(
       });
     },
 
+    expireStaleHandoffs(scope, now): number[] {
+      // Phase 2.5 reaper, D5 (handoff analogue of expireStaleClaims).
+      // Transactional (composes with an ambient maintenance transaction via
+      // `atomic`): transition every PENDING handoff whose lease has lapsed to
+      // 'expired', emitting exactly one handoff.expired event per handoff.
+      // Exactly-once holds because the guarded UPDATE requires
+      // `status = 'pending'` and rowCount is the authority — an already-expired
+      // row is never re-selected/updated on a subsequent call. This is the ONLY
+      // maintenance path that writes a handoff expiry event; the list/get reads
+      // compute effective status without writing (see effectiveHandoff), so
+      // concurrent readers can never double-emit.
+      return atomic((): number[] => {
+        const expiredRows = db
+          .prepare(
+            `SELECT * FROM handoff_records
+             WHERE ${SCOPE_WHERE} AND status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?`,
+          )
+          .all(...scopeValues(scope), now) as Array<Record<string, unknown>>;
+        const expiredIds: number[] = [];
+        for (const row of expiredRows) {
+          const before = mapHandoff(row);
+          // Guarded UPDATE: rowCount authority. Only claim the row if it is still
+          // pending (defends against a concurrent accept/reject inside the txn).
+          const result = db
+            .prepare(
+              `UPDATE handoff_records
+               SET status = 'expired', decision_reason = COALESCE(decision_reason, 'expired'), version = version + 1
+               WHERE id = ? AND status = 'pending'`,
+            )
+            .run(before.id);
+          if (result.changes === 0) continue;
+          const after = mapHandoff(
+            db.prepare('SELECT * FROM handoff_records WHERE id = ?').get(before.id) as Record<string, unknown>,
+          );
+          insertMemoryEventInternal({
+            ...normalizeScope(after),
+            session_id: after.session_id,
+            actor_id: after.to_actor.actor_id,
+            actor_kind: after.to_actor.actor_kind,
+            actor_system_id: after.to_actor.system_id,
+            actor_display_name: after.to_actor.display_name,
+            actor_metadata: after.to_actor.metadata,
+            entity_kind: 'handoff',
+            entity_id: String(after.id),
+            event_type: 'handoff.expired',
+            payload: { after: cloneValue(after) },
+            created_at: now,
+          });
+          expiredIds.push(after.id);
+        }
+        return expiredIds;
+      });
+    },
+
     touchKnowledgeMemory(id: number): void {
+      atomic(() => {
       const before = getKnowledgeMemoryById(id);
       const touchedAt = nowSeconds();
       db.prepare(
@@ -2936,11 +3048,13 @@ function createAdapterFromDatabase(
           created_at: touchedAt,
         });
       }
+      });
     },
 
     touchKnowledgeMemories(ids: number[]): void {
       const uniqueIds = [...new Set(ids)].filter((id) => Number.isInteger(id) && id > 0);
       if (uniqueIds.length === 0) return;
+      atomic(() => {
       const placeholders = uniqueIds.map(() => '?').join(', ');
       const beforeRows = db
         .prepare(`SELECT * FROM knowledge_memory WHERE id IN (${placeholders})`)
@@ -2978,9 +3092,11 @@ function createAdapterFromDatabase(
           }];
         }),
       );
+      });
     },
 
     retireKnowledgeMemory(id: number, retiredAt = nowSeconds()): void {
+      atomic(() => {
       const before = getKnowledgeMemoryById(id);
       db.prepare('UPDATE knowledge_memory SET retired_at = ? WHERE id = ?').run(retiredAt, id);
       const after = getKnowledgeMemoryById(id);
@@ -3000,9 +3116,11 @@ function createAdapterFromDatabase(
           created_at: retiredAt,
         });
       }
+      });
     },
 
     supersedeKnowledgeMemory(oldId: number, newId: number): void {
+      atomic(() => {
       const before = getKnowledgeMemoryById(oldId);
       const supersededAt = nowSeconds();
       db.prepare(
@@ -3027,6 +3145,7 @@ function createAdapterFromDatabase(
           created_at: supersededAt,
         });
       }
+      });
     },
 
     upsertContextMonitor(input) {
@@ -3115,6 +3234,7 @@ function createAdapterFromDatabase(
     insertPlaybook(input: NewPlaybook): Playbook {
       const scope = normalizeScope(input);
       const now = nowSeconds();
+      return atomic(() => {
       const result = db
         .prepare(
           `INSERT INTO playbooks
@@ -3144,6 +3264,7 @@ function createAdapterFromDatabase(
         created_at: playbook.created_at,
       });
       return playbook;
+      });
     },
     getPlaybookById(id: number): Playbook | null {
       const row = db.prepare('SELECT * FROM playbooks WHERE id = ?').get(id) as PlaybookRow | undefined;
@@ -3232,6 +3353,7 @@ function createAdapterFromDatabase(
       sets.push('updated_at = ?');
       values.push(nowSeconds());
       values.push(id);
+      return atomic(() => {
       db.prepare(`UPDATE playbooks SET ${sets.join(', ')} WHERE id = ?`).run(...values);
       const after = this.getPlaybookById(id);
       if (before && after) {
@@ -3250,8 +3372,10 @@ function createAdapterFromDatabase(
         });
       }
       return after;
+      });
     },
     recordPlaybookUse(id: number): void {
+      atomic(() => {
       const before = this.getPlaybookById(id);
       const usedAt = nowSeconds();
       db.prepare('UPDATE playbooks SET use_count = use_count + 1, last_used_at = ? WHERE id = ?').run(usedAt, id);
@@ -3273,6 +3397,7 @@ function createAdapterFromDatabase(
           created_at: usedAt,
         });
       }
+      });
     },
     insertPlaybookRevision(input: NewPlaybookRevision): PlaybookRevision {
       const playbook = this.getPlaybookById(input.playbook_id);
@@ -3280,6 +3405,7 @@ function createAdapterFromDatabase(
         throw new Error(`Playbook ${input.playbook_id} not found`);
       }
       const now = nowSeconds();
+      return atomic(() => {
       const result = db
         .prepare(
           `INSERT INTO playbook_revisions
@@ -3291,9 +3417,12 @@ function createAdapterFromDatabase(
           input.playbook_id, input.instructions, input.revision_reason,
           input.source_session_id ?? null, input.created_at ?? now,
         );
-      db.prepare('UPDATE playbooks SET revision_count = revision_count + 1 WHERE id = ?').run(input.playbook_id);
       const row = db.prepare('SELECT * FROM playbook_revisions WHERE id = ?').get(Number(result.lastInsertRowid)) as PlaybookRevision;
       const revision = rowToPlaybookRevision(row);
+      // D1: a revision mutates the parent playbook (revision_count, updated_at).
+      // Bump both so the after-snapshot matches the live playbook.
+      db.prepare('UPDATE playbooks SET revision_count = revision_count + 1, updated_at = ? WHERE id = ?')
+        .run(revision.created_at, input.playbook_id);
       insertMemoryEventInternal({
         ...normalizeScope(revision),
         session_id: revision.source_session_id,
@@ -3308,7 +3437,29 @@ function createAdapterFromDatabase(
         },
         created_at: revision.created_at,
       });
+      // D1: emit a playbook after-snapshot (playbook.updated) so temporal replay
+      // reconstructs the bumped revision_count/updated_at — foldTemporalState only
+      // folds the `playbook` entity kind, not `playbook_revision`.
+      const updatedPlaybook = this.getPlaybookById(input.playbook_id);
+      if (updatedPlaybook) {
+        insertMemoryEventInternal({
+          ...normalizeScope(updatedPlaybook),
+          session_id: updatedPlaybook.source_session_id,
+          entity_kind: 'playbook',
+          entity_id: String(updatedPlaybook.id),
+          event_type: 'playbook.updated',
+          payload: {
+            after: cloneValue(updatedPlaybook),
+            refs: {
+              revision_id: revision.id,
+              revision_count: updatedPlaybook.revision_count,
+            },
+          },
+          created_at: updatedPlaybook.updated_at,
+        });
+      }
       return revision;
+      });
     },
     getPlaybookRevisions(playbookId: number): PlaybookRevision[] {
       const rows = db
@@ -3320,6 +3471,7 @@ function createAdapterFromDatabase(
     insertAssociation(input: NewAssociation): Association {
       const scope = normalizeScope(input);
       const now = nowSeconds();
+      return atomic(() => {
       let result: Database.RunResult;
       try {
         result = db
@@ -3367,6 +3519,7 @@ function createAdapterFromDatabase(
         created_at: association.created_at,
       });
       return association;
+      });
     },
     getAssociationById(id: number): Association | null {
       const row = db.prepare('SELECT * FROM associations WHERE id = ?').get(id) as any;
@@ -3408,6 +3561,7 @@ function createAdapterFromDatabase(
       }));
     },
     deleteAssociation(id: number): void {
+      atomic(() => {
       const before = this.getAssociationById(id);
       db.prepare('DELETE FROM associations WHERE id = ?').run(id);
       if (before) {
@@ -3422,6 +3576,7 @@ function createAdapterFromDatabase(
           created_at: nowSeconds(),
         });
       }
+      });
     },
 
     insertMemoryEvent(input): MemoryEventRecord {
@@ -3454,19 +3609,21 @@ function createAdapterFromDatabase(
     getSessionState: readSessionStateProjection,
 
     upsertSessionState(input): SessionStateProjection {
-      const projection = writeSessionStateProjection(input);
-      insertMemoryEventInternal({
-        ...normalizeScope(projection),
-        session_id: projection.session_id,
-        entity_kind: 'session_state',
-        entity_id: projection.session_id,
-        event_type: 'session_state.updated',
-        payload: {
-          after: cloneValue(projection),
-        },
-        created_at: projection.updatedAt,
+      return atomic(() => {
+        const projection = writeSessionStateProjection(input);
+        insertMemoryEventInternal({
+          ...normalizeScope(projection),
+          session_id: projection.session_id,
+          entity_kind: 'session_state',
+          entity_id: projection.session_id,
+          event_type: 'session_state.updated',
+          payload: {
+            after: cloneValue(projection),
+          },
+          created_at: projection.updatedAt,
+        });
+        return projection;
       });
-      return projection;
     },
 
     getTemporalWatermark: readTemporalWatermark,
@@ -3476,26 +3633,40 @@ function createAdapterFromDatabase(
     insertSourceDocument(input: NewSourceDocument): SourceDocument {
       const n = normalizeScope(input);
       const createdAt = nowSeconds();
-      const row = db
-        .prepare(
-          `INSERT INTO source_documents
-            (tenant_id, system_id, workspace_id, collaboration_id, scope_id, title, content_hash,
-             mime_type, url, metadata, status, fact_count, token_estimate, created_at, processed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NULL)
-           RETURNING *`,
-        )
-        .get(
-          ...scopeValues(n),
-          input.title,
-          input.content_hash,
-          input.mime_type ?? 'text/plain',
-          input.url ?? null,
-          JSON.stringify(input.metadata ?? {}),
-          input.status ?? 'pending',
-          input.token_estimate ?? 0,
-          createdAt,
-        ) as Record<string, unknown>;
-      return mapSourceDocumentRow(row);
+      return atomic(() => {
+        const row = db
+          .prepare(
+            `INSERT INTO source_documents
+              (tenant_id, system_id, workspace_id, collaboration_id, scope_id, title, content_hash,
+               mime_type, url, metadata, status, fact_count, token_estimate, created_at, processed_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NULL)
+             RETURNING *`,
+          )
+          .get(
+            ...scopeValues(n),
+            input.title,
+            input.content_hash,
+            input.mime_type ?? 'text/plain',
+            input.url ?? null,
+            JSON.stringify(input.metadata ?? {}),
+            input.status ?? 'pending',
+            input.token_estimate ?? 0,
+            createdAt,
+          ) as Record<string, unknown>;
+        const doc = mapSourceDocumentRow(row);
+        // Phase 2.2: source-document ingestion audit event (mirrors in-memory).
+        insertMemoryEventInternal({
+          ...n,
+          entity_kind: 'source_document',
+          entity_id: String(doc.id),
+          event_type: 'source_document.created',
+          payload: {
+            after: cloneValue(doc),
+          },
+          created_at: doc.created_at,
+        });
+        return doc;
+      });
     },
 
     getSourceDocumentById(id: number): SourceDocument | null {
@@ -3539,10 +3710,28 @@ function createAdapterFromDatabase(
       if (patch.processed_at !== undefined) { setClauses.push('processed_at = ?'); values.push(patch.processed_at); }
       if (setClauses.length === 0) return this.getSourceDocumentById(id);
       values.push(id);
-      const row = db
-        .prepare(`UPDATE source_documents SET ${setClauses.join(', ')} WHERE id = ? RETURNING *`)
-        .get(...values) as Record<string, unknown> | undefined;
-      return row ? mapSourceDocumentRow(row) : null;
+      return atomic(() => {
+        const before = this.getSourceDocumentById(id);
+        const row = db
+          .prepare(`UPDATE source_documents SET ${setClauses.join(', ')} WHERE id = ? RETURNING *`)
+          .get(...values) as Record<string, unknown> | undefined;
+        if (!row) return null;
+        const doc = mapSourceDocumentRow(row);
+        // Phase 2.2: source-document ingestion audit event (mirrors in-memory).
+        insertMemoryEventInternal({
+          ...normalizeScope(doc),
+          entity_kind: 'source_document',
+          entity_id: String(doc.id),
+          event_type: 'source_document.updated',
+          payload: {
+            before: before ? cloneValue(before) : undefined,
+            after: cloneValue(doc),
+            patch: cloneValue(patch as Record<string, unknown>),
+          },
+          created_at: nowSeconds(),
+        });
+        return doc;
+      });
     },
 
     getScopeConfig(scope, key): string | null {
@@ -3671,6 +3860,10 @@ function createAdapterFromDatabase(
     },
 
     upsertDefaultContextContract(scope, contract) {
+      // Phase 2.2: governance upsert + audit event are atomic. Governance is a
+      // last-writer-wins config store (authoritative state is getGovernanceState);
+      // the event is an audit trail, not a temporal-replay source.
+      atomic(() => {
       const sv = scopeValues(scope);
       const now = nowSeconds();
       const isDeleted = contract == null ? 1 : 0;
@@ -3686,28 +3879,42 @@ function createAdapterFromDatabase(
            WHERE ${SCOPE_WHERE} AND is_default = 1`,
         )
         .run(isDeleted, contractJson, now, ...sv);
-      if (updated.changes > 0) {
-        return;
+      if (updated.changes === 0) {
+        db.prepare(
+          `INSERT INTO context_contracts (
+             tenant_id,
+             system_id,
+             workspace_id,
+             collaboration_id,
+             scope_id,
+             name,
+             is_default,
+             is_deleted,
+             contract_json,
+             created_at,
+             updated_at
+           )
+           VALUES (?, ?, ?, ?, ?, NULL, 1, ?, ?, ?, ?)`,
+        ).run(...sv, isDeleted, contractJson, now, now);
       }
-      db.prepare(
-        `INSERT INTO context_contracts (
-           tenant_id,
-           system_id,
-           workspace_id,
-           collaboration_id,
-           scope_id,
-           name,
-           is_default,
-           is_deleted,
-           contract_json,
-           created_at,
-           updated_at
-         )
-         VALUES (?, ?, ?, ?, ?, NULL, 1, ?, ?, ?, ?)`,
-      ).run(...sv, isDeleted, contractJson, now, now);
+      insertMemoryEventInternal({
+        ...normalizeScope(scope),
+        entity_kind: 'context_contract',
+        entity_id: '__default__',
+        event_type: contract == null ? 'context_contract.deleted' : 'context_contract.set',
+        payload: {
+          after: contract == null
+            ? { state: 'cleared' }
+            : { state: 'set', contract: cloneValue(contract) },
+          refs: { name: null, isDefault: true },
+        },
+        created_at: now,
+      });
+      });
     },
 
     upsertNamedContextContract(scope, name, contract) {
+      atomic(() => {
       const sv = scopeValues(scope);
       const now = nowSeconds();
       const contractJson = JSON.stringify(contract);
@@ -3721,28 +3928,40 @@ function createAdapterFromDatabase(
            WHERE ${SCOPE_WHERE} AND is_default = 0 AND name = ?`,
         )
         .run(contractJson, now, ...sv, name);
-      if (updated.changes > 0) {
-        return;
+      if (updated.changes === 0) {
+        db.prepare(
+          `INSERT INTO context_contracts (
+             tenant_id,
+             system_id,
+             workspace_id,
+             collaboration_id,
+             scope_id,
+             name,
+             is_default,
+             is_deleted,
+             contract_json,
+             created_at,
+             updated_at
+           )
+           VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
+        ).run(...sv, name, contractJson, now, now);
       }
-      db.prepare(
-        `INSERT INTO context_contracts (
-           tenant_id,
-           system_id,
-           workspace_id,
-           collaboration_id,
-           scope_id,
-           name,
-           is_default,
-           is_deleted,
-           contract_json,
-           created_at,
-           updated_at
-         )
-         VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
-      ).run(...sv, name, contractJson, now, now);
+      insertMemoryEventInternal({
+        ...normalizeScope(scope),
+        entity_kind: 'context_contract',
+        entity_id: name,
+        event_type: 'context_contract.set',
+        payload: {
+          after: cloneValue(contract),
+          refs: { name, isDefault: false },
+        },
+        created_at: now,
+      });
+      });
     },
 
     deleteNamedContextContract(scope, name): boolean {
+      return atomic(() => {
       const sv = scopeValues(scope);
       const now = nowSeconds();
       const existing = db
@@ -3752,6 +3971,7 @@ function createAdapterFromDatabase(
            WHERE ${SCOPE_WHERE} AND is_default = 0 AND name = ?`,
         )
         .get(...sv, name) as { is_deleted: number } | undefined;
+      let existed: boolean;
       if (existing) {
         db.prepare(
           `UPDATE context_contracts
@@ -3760,28 +3980,42 @@ function createAdapterFromDatabase(
                updated_at = ?
            WHERE ${SCOPE_WHERE} AND is_default = 0 AND name = ?`,
         ).run(now, ...sv, name);
-        return existing.is_deleted === 0;
+        existed = existing.is_deleted === 0;
+      } else {
+        db.prepare(
+          `INSERT INTO context_contracts (
+             tenant_id,
+             system_id,
+             workspace_id,
+             collaboration_id,
+             scope_id,
+             name,
+             is_default,
+             is_deleted,
+             contract_json,
+             created_at,
+             updated_at
+           )
+           VALUES (?, ?, ?, ?, ?, ?, 0, 1, NULL, ?, ?)`,
+        ).run(...sv, name, now, now);
+        existed = false;
       }
-      db.prepare(
-        `INSERT INTO context_contracts (
-           tenant_id,
-           system_id,
-           workspace_id,
-           collaboration_id,
-           scope_id,
-           name,
-           is_default,
-           is_deleted,
-           contract_json,
-           created_at,
-           updated_at
-         )
-         VALUES (?, ?, ?, ?, ?, ?, 0, 1, NULL, ?, ?)`,
-      ).run(...sv, name, now, now);
-      return false;
+      insertMemoryEventInternal({
+        ...normalizeScope(scope),
+        entity_kind: 'context_contract',
+        entity_id: name,
+        event_type: 'context_contract.deleted',
+        payload: {
+          refs: { name, isDefault: false, existed },
+        },
+        created_at: now,
+      });
+      return existed;
+      });
     },
 
     upsertContextInvariant(scope, invariant) {
+      atomic(() => {
       const sv = scopeValues(scope);
       const now = nowSeconds();
       const updated = db
@@ -3804,39 +4038,50 @@ function createAdapterFromDatabase(
           ...sv,
           invariant.id,
         );
-      if (updated.changes > 0) {
-        return;
+      if (updated.changes === 0) {
+        db.prepare(
+          `INSERT INTO context_invariants (
+             tenant_id,
+             system_id,
+             workspace_id,
+             collaboration_id,
+             scope_id,
+             invariant_id,
+             title,
+             instruction,
+             severity,
+             scope_level,
+             is_deleted,
+             created_at,
+             updated_at
+           )
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        ).run(
+          ...sv,
+          invariant.id,
+          invariant.title,
+          invariant.instruction,
+          invariant.severity ?? null,
+          invariant.scopeLevel ?? null,
+          now,
+          now,
+        );
       }
-      db.prepare(
-        `INSERT INTO context_invariants (
-           tenant_id,
-           system_id,
-           workspace_id,
-           collaboration_id,
-           scope_id,
-           invariant_id,
-           title,
-           instruction,
-           severity,
-           scope_level,
-           is_deleted,
-           created_at,
-           updated_at
-         )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-      ).run(
-        ...sv,
-        invariant.id,
-        invariant.title,
-        invariant.instruction,
-        invariant.severity ?? null,
-        invariant.scopeLevel ?? null,
-        now,
-        now,
-      );
+      insertMemoryEventInternal({
+        ...normalizeScope(scope),
+        entity_kind: 'context_invariant',
+        entity_id: invariant.id,
+        event_type: 'context_invariant.set',
+        payload: {
+          after: cloneValue(invariant),
+        },
+        created_at: now,
+      });
+      });
     },
 
     deleteContextInvariant(scope, invariantId): boolean {
+      return atomic(() => {
       const sv = scopeValues(scope);
       const now = nowSeconds();
       const existing = db
@@ -3846,6 +4091,7 @@ function createAdapterFromDatabase(
            WHERE ${SCOPE_WHERE} AND invariant_id = ?`,
         )
         .get(...sv, invariantId) as { is_deleted: number } | undefined;
+      let existed: boolean;
       if (existing) {
         db.prepare(
           `UPDATE context_invariants
@@ -3857,30 +4103,44 @@ function createAdapterFromDatabase(
                updated_at = ?
            WHERE ${SCOPE_WHERE} AND invariant_id = ?`,
         ).run(now, ...sv, invariantId);
-        return existing.is_deleted === 0;
+        existed = existing.is_deleted === 0;
+      } else {
+        db.prepare(
+          `INSERT INTO context_invariants (
+             tenant_id,
+             system_id,
+             workspace_id,
+             collaboration_id,
+             scope_id,
+             invariant_id,
+             title,
+             instruction,
+             severity,
+             scope_level,
+             is_deleted,
+             created_at,
+             updated_at
+           )
+           VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 1, ?, ?)`,
+        ).run(...sv, invariantId, now, now);
+        existed = false;
       }
-      db.prepare(
-        `INSERT INTO context_invariants (
-           tenant_id,
-           system_id,
-           workspace_id,
-           collaboration_id,
-           scope_id,
-           invariant_id,
-           title,
-           instruction,
-           severity,
-           scope_level,
-           is_deleted,
-           created_at,
-           updated_at
-         )
-         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 1, ?, ?)`,
-      ).run(...sv, invariantId, now, now);
-      return false;
+      insertMemoryEventInternal({
+        ...normalizeScope(scope),
+        entity_kind: 'context_invariant',
+        entity_id: invariantId,
+        event_type: 'context_invariant.deleted',
+        payload: {
+          refs: { invariantId, existed },
+        },
+        created_at: now,
+      });
+      return existed;
+      });
     },
 
     upsertContextEscalationPolicy(scope, policy) {
+      atomic(() => {
       const sv = scopeValues(scope);
       const now = nowSeconds();
       db.prepare(
@@ -3889,6 +4149,17 @@ function createAdapterFromDatabase(
          ON CONFLICT(tenant_id, system_id, workspace_id, collaboration_id, scope_id)
          DO UPDATE SET policy_json = excluded.policy_json, updated_at = excluded.updated_at`,
       ).run(...sv, JSON.stringify(policy), now, now);
+      insertMemoryEventInternal({
+        ...normalizeScope(scope),
+        entity_kind: 'context_escalation_policy',
+        entity_id: '__policy__',
+        event_type: 'context_escalation_policy.set',
+        payload: {
+          after: cloneValue(policy),
+        },
+        created_at: now,
+      });
+      });
     },
 
     transaction<T>(fn: () => T): T {

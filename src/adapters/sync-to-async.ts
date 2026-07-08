@@ -126,6 +126,7 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
     listWorkClaims: (scope, options) => Promise.resolve(adapter.listWorkClaims(scope, options)),
     listWorkClaimsCrossScope: (scope, level, options) =>
       Promise.resolve(adapter.listWorkClaimsCrossScope(scope, level, options)),
+    expireStaleClaims: (scope, now) => Promise.resolve(adapter.expireStaleClaims(scope, now)),
     createHandoff: (input) => Promise.resolve(adapter.createHandoff(input)),
     getHandoffById: (handoffId) => Promise.resolve(adapter.getHandoffById(handoffId)),
     acceptHandoff: (handoffId, actor, reason) =>
@@ -137,6 +138,7 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
     listHandoffs: (scope, options) => Promise.resolve(adapter.listHandoffs(scope, options)),
     listHandoffsCrossScope: (scope, level, options) =>
       Promise.resolve(adapter.listHandoffsCrossScope(scope, level, options)),
+    expireStaleHandoffs: (scope, now) => Promise.resolve(adapter.expireStaleHandoffs(scope, now)),
 
     upsertContextMonitor: (input) => Promise.resolve(adapter.upsertContextMonitor(input)),
     getContextMonitor: (scope) => Promise.resolve(adapter.getContextMonitor(scope)),

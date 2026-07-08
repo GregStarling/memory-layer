@@ -242,4 +242,150 @@ describe('sqlite embeddings', () => {
       }),
     );
   });
+
+  // ---- 2.4 dimension/model versioning: SQL-side filtering ----
+  it('excludes vectors whose dimensions mismatch the active provider filter (2.4)', () => {
+    const scope = makeScope();
+    const a = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'A',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+    const b = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'B',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+    // Old 2-dim vectors from a previous provider.
+    adapter.embeddings.storeEmbedding(a.id, new Float32Array([1, 0]), {
+      model: 'old-model',
+      dimensions: 2,
+    });
+    adapter.embeddings.storeEmbedding(b.id, new Float32Array([0, 1]), {
+      model: 'old-model',
+      dimensions: 2,
+    });
+
+    // Active provider now emits 3-dim vectors: every stored vector mismatches and
+    // must be excluded IN SQL (never distance-compared).
+    const query = new Float32Array([1, 0, 0]);
+    const filter = { model: 'new-model', dimensions: 3 };
+    expect(adapter.embeddings.findSimilar(scope, query, { filter })).toEqual([]);
+    const coverage = adapter.embeddings.getEmbeddingCoverage!(scope, filter);
+    expect(coverage).toEqual({ total: 2, matching: 0, mismatched: 2 });
+  });
+
+  it('surfaces legacy unknown-model vectors when dimensions agree (2.4)', () => {
+    const scope = makeScope();
+    const k = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'legacy',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+    // Stored without metadata => model 'unknown', dimensions 3.
+    adapter.embeddings.storeEmbedding(k.id, new Float32Array([1, 0, 0]));
+    // Active provider is a NAMED model at the same dimensionality. 'unknown' is
+    // not excluded on model grounds, so the vector still participates.
+    const filter = { model: 'new-model', dimensions: 3 };
+    const results = adapter.embeddings.findSimilar(scope, new Float32Array([1, 0, 0]), { filter });
+    expect(results.map((r) => r.knowledgeMemoryId)).toEqual([k.id]);
+    expect(adapter.embeddings.getEmbeddingCoverage!(scope, filter)).toEqual({
+      total: 1,
+      matching: 1,
+      mismatched: 0,
+    });
+  });
+
+  it('does NOT exclude known-model vectors when the QUERY model is unknown (D2)', () => {
+    const scope = makeScope();
+    const k = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'real',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+    // A vector stored under a KNOWN, named model at the active dimensionality.
+    adapter.embeddings.storeEmbedding(k.id, new Float32Array([1, 0, 0]), {
+      model: 'v1',
+      dimensions: 3,
+    });
+    // The active provider has NO configured model (model: 'unknown') — filter by
+    // dimensions ALONE. The buggy `(model='unknown' OR model=?)` form with an
+    // 'unknown' query model degenerates to `(model='unknown' OR model='unknown')`,
+    // which wrongly excludes the real 'v1' vector and kills semantic search.
+    const filter = { model: 'unknown', dimensions: 3 };
+    const results = adapter.embeddings.findSimilar(scope, new Float32Array([1, 0, 0]), { filter });
+    expect(results.map((r) => r.knowledgeMemoryId)).toEqual([k.id]);
+    expect(adapter.embeddings.getEmbeddingCoverage!(scope, filter)).toEqual({
+      total: 1,
+      matching: 1,
+      mismatched: 0,
+    });
+    // Sanity: with a KNOWN, DIFFERENT active model the same vector is excluded.
+    const wrongModel = { model: 'v2', dimensions: 3 };
+    expect(
+      adapter.embeddings.findSimilar(scope, new Float32Array([1, 0, 0]), { filter: wrongModel }),
+    ).toEqual([]);
+  });
+
+  it('restores coverage once vectors are re-embedded at the active dimensions (2.4)', () => {
+    const scope = makeScope();
+    const a = adapter.insertKnowledgeMemory({
+      ...scope,
+      fact: 'A',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+    adapter.embeddings.storeEmbedding(a.id, new Float32Array([1, 0]), {
+      model: 'old-model',
+      dimensions: 2,
+    });
+    const filter = { model: 'new-model', dimensions: 3 };
+    expect(adapter.embeddings.getEmbeddingCoverage!(scope, filter).matching).toBe(0);
+
+    // Re-embed with the active provider's model + dimensions.
+    adapter.embeddings.storeEmbedding(a.id, new Float32Array([1, 0, 0]), {
+      model: 'new-model',
+      dimensions: 3,
+    });
+    expect(adapter.embeddings.getEmbeddingCoverage!(scope, filter)).toEqual({
+      total: 1,
+      matching: 1,
+      mismatched: 0,
+    });
+    const results = adapter.embeddings.findSimilar(scope, new Float32Array([1, 0, 0]), { filter });
+    expect(results.map((r) => r.knowledgeMemoryId)).toEqual([a.id]);
+  });
+
+  it('applies the dimensions filter to cross-scope similarity too (2.4)', () => {
+    const scopeA = makeScope({ scope_id: 'thread-1' });
+    const scopeB = makeScope({ scope_id: 'thread-2' });
+    const k = adapter.insertKnowledgeMemory({
+      ...scopeA,
+      fact: 'shared',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+    adapter.embeddings.storeEmbedding(k.id, new Float32Array([1, 0]), {
+      model: 'old-model',
+      dimensions: 2,
+    });
+    // 3-dim active provider: the 2-dim stored vector is excluded in SQL.
+    const results = adapter.embeddings.findSimilarCrossScope(
+      scopeB,
+      'workspace',
+      new Float32Array([1, 0, 0]),
+      { filter: { model: 'new-model', dimensions: 3 } },
+    );
+    expect(results).toEqual([]);
+  });
 });

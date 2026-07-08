@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 
 import type { AsyncStorageAdapter } from '../../contracts/async-storage.js';
 import { UniqueConstraintError } from '../../contracts/storage.js';
-import { ConflictError } from '../../contracts/errors.js';
+import { ConflictError, ValidationError } from '../../contracts/errors.js';
 import type {
   ActorRef,
   HandoffQuery,
@@ -28,6 +28,8 @@ import type {
 import { compareTemporalIds, normalizeTemporalId } from '../../contracts/temporal.js';
 import type {
   EmbeddingAdapter,
+  EmbeddingCoverage,
+  EmbeddingQueryFilter,
   EmbeddingVector,
   SimilarEmbeddingResult,
 } from '../../contracts/embedding.js';
@@ -154,6 +156,57 @@ function mapSourceDocumentRow(row: Record<string, unknown>): SourceDocument {
 
 function vectorToLiteral(vector: EmbeddingVector): string {
   return `[${Array.from(vector, (value) => (Number.isFinite(value) ? value : 0)).join(',')}]`;
+}
+
+/**
+ * Build the distance expression and WHERE clauses shared by findSimilar /
+ * findSimilarCrossScope (Phase 2.4). Mutates `params` in place (pushing any
+ * bound values it needs) and returns:
+ *  - `distExpr`: the cosine-distance expression to use in SELECT/WHERE/ORDER BY.
+ *    When the concrete dimension is known it casts BOTH operands to `vector(N)`
+ *    so the expression is textually identical to the partial HNSW index
+ *    expression `((embedding::vector(N)) vector_cosine_ops) WHERE dimensions = N`
+ *    — the planner only uses the per-dimension HNSW index when the ORDER BY
+ *    expression matches the index expression exactly. Without a dimension it
+ *    falls back to the bare column (correct, but a sequential scan).
+ *  - `extraClauses`: dimension / model filters (Phase 2.4 / D2).
+ */
+function buildSimilarityClauses(
+  filter: EmbeddingQueryFilter | undefined,
+  vectorParam: number,
+  params: unknown[],
+  prefix: string,
+): { distExpr: string; extraClauses: string[] } {
+  const rawDim = filter?.dimensions;
+  const typedDim = rawDim != null && Number.isInteger(rawDim) && rawDim > 0 ? rawDim : null;
+  const distExpr =
+    typedDim != null
+      ? `(${prefix}.embedding::vector(${typedDim})) <=> $${vectorParam}::vector(${typedDim})`
+      : `${prefix}.embedding <=> $${vectorParam}::vector`;
+  const extraClauses: string[] = [];
+  if (rawDim != null) {
+    if (typedDim != null) {
+      // Inline the dimension as a literal so it matches the partial index
+      // predicate `WHERE dimensions = N` exactly; a bound $-parameter would not,
+      // and the planner would skip the partial index.
+      extraClauses.push(`${prefix}.dimensions = ${typedDim}`);
+    } else {
+      params.push(rawDim);
+      extraClauses.push(`${prefix}.dimensions = $${params.length}`);
+    }
+  }
+  // D2: filter by model ONLY when the active model is known. The manager already
+  // omits model from the filter when the active model is 'unknown'; the explicit
+  // `!== 'unknown'` guard hardens the adapter against a passed-through 'unknown'.
+  // Stored 'unknown' vectors are never excluded on model grounds so
+  // pre-versioning data still surfaces when dimensions agree (mirrors the
+  // memory/sqlite matchesFilter rule: skip model filtering when either side is
+  // 'unknown').
+  if (filter?.model != null && filter.model !== 'unknown') {
+    params.push(filter.model);
+    extraClauses.push(`(${prefix}.model = $${params.length} OR ${prefix}.model = 'unknown')`);
+  }
+  return { distExpr, extraClauses };
 }
 
 function parseVectorValue(value: unknown): EmbeddingVector | null {
@@ -484,6 +537,49 @@ function mapWorkClaim(row: Record<string, unknown>): WorkClaim {
     source_event_id: row.source_event_id != null ? String(row.source_event_id) : null,
     visibility_class: row.visibility_class as WorkClaim['visibility_class'],
     version: Number(row.version ?? 1),
+  };
+}
+
+// Phase 2.5: read paths compute EFFECTIVE claim status without writing.
+function isClaimExpired(claim: WorkClaim, now: number): boolean {
+  return claim.status === 'active' && claim.expires_at <= now;
+}
+
+/**
+ * Effective view of a claim at `now` WITHOUT mutating stored state (Phase 2.5).
+ * A read that observes an active-but-expired claim returns a copy whose status
+ * is `expired`; the underlying row is left untouched — durable expiry happens
+ * only in claim/renew/release and `expireStaleClaims` (the reaper). Mirrors the
+ * in-memory reference `effectiveClaim`.
+ */
+function effectiveClaim(claim: WorkClaim, now: number): WorkClaim {
+  if (!isClaimExpired(claim, now)) return claim;
+  return {
+    ...claim,
+    status: 'expired',
+    released_at: claim.released_at ?? now,
+    release_reason: claim.release_reason ?? 'expired',
+  };
+}
+
+function isHandoffExpired(handoff: HandoffRecord, now: number): boolean {
+  return handoff.status === 'pending' && handoff.expires_at != null && handoff.expires_at <= now;
+}
+
+/**
+ * Effective view of a handoff at `now` WITHOUT mutating stored state (Phase 2.5,
+ * D5 — handoff analogue of {@link effectiveClaim}). A read that observes a
+ * pending-but-expired handoff returns a copy whose status is `expired`; the
+ * underlying row is left untouched — durable expiry happens only in
+ * accept/reject/cancel and `expireStaleHandoffs` (the reaper). Mirrors the
+ * in-memory reference `effectiveHandoff`.
+ */
+function effectiveHandoff(handoff: HandoffRecord, now: number): HandoffRecord {
+  if (!isHandoffExpired(handoff, now)) return handoff;
+  return {
+    ...handoff,
+    status: 'expired',
+    decision_reason: handoff.decision_reason ?? 'expired',
   };
 }
 
@@ -991,9 +1087,15 @@ export function createPostgresAdapter(
     }
     params.push(resolved.limit + 1);
     const { rows } = await pool.query(
+      // Phase 2.3: ordering is event_id ASC ALONE. event_id is an append-only
+      // BIGSERIAL assigned in the same transaction as the mutation, so it is the
+      // true causal order. created_at is display metadata (may be caller-supplied
+      // or backdated) and must NEVER be an ORDER BY key — pairing it with the
+      // `event_id > cursor` pagination cursor caused skips/repeats when rows had
+      // backdated timestamps.
       `SELECT * FROM memory_event_log
        WHERE ${clauses.join(' AND ')}
-       ORDER BY created_at ASC, event_id ASC
+       ORDER BY event_id ASC
        LIMIT $${nextParam}`,
       params,
     );
@@ -1036,9 +1138,10 @@ export function createPostgresAdapter(
     }
     params.push(resolved.limit + 1);
     const { rows } = await pool.query(
+      // Phase 2.3: event_id ASC alone (see listScopedMemoryEvents).
       `SELECT * FROM memory_event_log
        WHERE ${clauses.join(' AND ')}
-       ORDER BY created_at ASC, event_id ASC
+       ORDER BY event_id ASC
        LIMIT $${nextParam}`,
       params,
     );
@@ -1141,15 +1244,25 @@ export function createPostgresAdapter(
   async function expireHandoffRecord(
     row: Record<string, unknown>,
     expiredAt = now(),
-  ): Promise<HandoffRecord> {
-    const { rows } = await pool.query(
+  ): Promise<HandoffRecord | null> {
+    // Phase 2.5 (D5) race fix: the UPDATE is self-guarding, mirroring
+    // expireClaimRecord. The prior `WHERE id = $1` (only) flipped the row and
+    // emitted handoff.expired UNCONDITIONALLY, so two concurrent readers (the
+    // old write-on-read listHandoffs) or a reaper racing accept/reject/cancel
+    // could each emit a duplicate handoff.expired for the same handoff. The
+    // status/expiry guard makes rowCount the authority: 0 affected rows means
+    // someone else already handled it — return null and emit NOTHING.
+    const { rows, rowCount } = await pool.query(
       `UPDATE handoff_records
-       SET status = 'expired', decision_reason = 'expired', version = COALESCE(version, 1) + 1
-       WHERE id = $1
+       SET status = 'expired', decision_reason = COALESCE(decision_reason, 'expired'), version = COALESCE(version, 1) + 1
+       WHERE id = $1 AND status = 'pending' AND expires_at IS NOT NULL AND expires_at <= $2
        RETURNING *`,
-      [Number(row.id)],
+      [Number(row.id), expiredAt],
     );
-    const expired = mapHandoff(rows[0] ?? row);
+    if (rowCount === 0 || !rows[0]) {
+      return null;
+    }
+    const expired = mapHandoff(rows[0]);
     await insertMemoryEventInternal({
       ...normalizeScope(expired),
       session_id: expired.session_id,
@@ -1177,29 +1290,36 @@ export function createPostgresAdapter(
 
   return {
     async insertTurn(input: NewTurn): Promise<Turn> {
-      const n = normalizeScope(input);
-      const createdAt = now();
-      const tokenEst = input.token_estimate ?? estimateTokens(input.content);
-      const { rows } = await pool.query(
-        `INSERT INTO turns (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, actor, role, content, priority, token_estimate, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-         RETURNING *`,
-        [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.session_id, input.actor, input.role, input.content, input.priority ?? (input.role === 'system' ? 1.5 : 1), tokenEst, createdAt],
-      );
-      const turn = mapTurn(rows[0]);
-      await insertMemoryEventInternal({
-        ...n,
-        session_id: turn.session_id,
-        actor_id: turn.actor,
-        entity_kind: 'turn',
-        entity_id: String(turn.id),
-        event_type: 'turn.created',
-        payload: {
-          after: turn,
-        },
-        created_at: createdAt,
+      // Phase 2.1: row-write + event-write share ONE connection inside a
+      // BEGIN/COMMIT (this.transaction reuses the ambient tx client when nested,
+      // otherwise opens a fresh single-connection transaction). This closes the
+      // pooled-connection split where the two statements could land on different
+      // physical connections and half-commit.
+      return this.transaction(async () => {
+        const n = normalizeScope(input);
+        const createdAt = now();
+        const tokenEst = input.token_estimate ?? estimateTokens(input.content);
+        const { rows } = await pool.query(
+          `INSERT INTO turns (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, actor, role, content, priority, token_estimate, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           RETURNING *`,
+          [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.session_id, input.actor, input.role, input.content, input.priority ?? (input.role === 'system' ? 1.5 : 1), tokenEst, createdAt],
+        );
+        const turn = mapTurn(rows[0]);
+        await insertMemoryEventInternal({
+          ...n,
+          session_id: turn.session_id,
+          actor_id: turn.actor,
+          entity_kind: 'turn',
+          entity_id: String(turn.id),
+          event_type: 'turn.created',
+          payload: {
+            after: turn,
+          },
+          created_at: createdAt,
+        });
+        return turn;
       });
-      return turn;
     },
 
     async insertTurns(inputs) {
@@ -1289,31 +1409,34 @@ export function createPostgresAdapter(
     },
 
     async archiveTurn(id, archivedAt, compactionLogId) {
-      const before = await this.getTurnById(id);
-      await pool.query(
-        `UPDATE turns SET status = 'archived', archived_at = $2, compaction_log_id = $3 WHERE id = $1`,
-        [id, archivedAt, compactionLogId],
-      );
-      const after = await this.getTurnById(id);
-      if (before && after) {
-        await insertMemoryEventInternal({
-          ...normalizeScope(after),
-          session_id: after.session_id,
-          actor_id: after.actor,
-          entity_kind: 'turn',
-          entity_id: String(after.id),
-          event_type: 'turn.archived',
-          payload: {
-            before,
-            after,
-            patch: {
-              archived_at: archivedAt,
-              compaction_log_id: compactionLogId,
+      // Phase 2.1: atomic row-update + event (single connection, BEGIN/COMMIT).
+      await this.transaction(async () => {
+        const before = await this.getTurnById(id);
+        await pool.query(
+          `UPDATE turns SET status = 'archived', archived_at = $2, compaction_log_id = $3 WHERE id = $1`,
+          [id, archivedAt, compactionLogId],
+        );
+        const after = await this.getTurnById(id);
+        if (before && after) {
+          await insertMemoryEventInternal({
+            ...normalizeScope(after),
+            session_id: after.session_id,
+            actor_id: after.actor,
+            entity_kind: 'turn',
+            entity_id: String(after.id),
+            event_type: 'turn.archived',
+            payload: {
+              before,
+              after,
+              patch: {
+                archived_at: archivedAt,
+                compaction_log_id: compactionLogId,
+              },
             },
-          },
-          created_at: archivedAt,
-        });
-      }
+            created_at: archivedAt,
+          });
+        }
+      });
     },
 
     async getArchivedTurnRange(sessionId, startId, endId, scope) {
@@ -1337,30 +1460,33 @@ export function createPostgresAdapter(
     },
 
     async insertWorkingMemory(input) {
-      const n = normalizeScope(input);
-      const createdAt = now();
-      const { rows } = await pool.query(
-        `INSERT INTO working_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, summary, key_entities, topic_tags, turn_id_start, turn_id_end, turn_count, compaction_trigger, created_at, episode_recap)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-         RETURNING *`,
-        [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.session_id, input.summary,
-         JSON.stringify(input.key_entities), JSON.stringify(input.topic_tags),
-         input.turn_id_start, input.turn_id_end, input.turn_count, input.compaction_trigger, createdAt,
-         input.episode_recap ? JSON.stringify(input.episode_recap) : null],
-      );
-      const workingMemory = mapWorkingMemory(rows[0]);
-      await insertMemoryEventInternal({
-        ...n,
-        session_id: workingMemory.session_id,
-        entity_kind: 'working_memory',
-        entity_id: String(workingMemory.id),
-        event_type: 'working_memory.created',
-        payload: {
-          after: workingMemory,
-        },
-        created_at: createdAt,
+      // Phase 2.1: atomic row + event.
+      return this.transaction(async () => {
+        const n = normalizeScope(input);
+        const createdAt = now();
+        const { rows } = await pool.query(
+          `INSERT INTO working_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, summary, key_entities, topic_tags, turn_id_start, turn_id_end, turn_count, compaction_trigger, created_at, episode_recap)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+           RETURNING *`,
+          [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.session_id, input.summary,
+           JSON.stringify(input.key_entities), JSON.stringify(input.topic_tags),
+           input.turn_id_start, input.turn_id_end, input.turn_count, input.compaction_trigger, createdAt,
+           input.episode_recap ? JSON.stringify(input.episode_recap) : null],
+        );
+        const workingMemory = mapWorkingMemory(rows[0]);
+        await insertMemoryEventInternal({
+          ...n,
+          session_id: workingMemory.session_id,
+          entity_kind: 'working_memory',
+          entity_id: String(workingMemory.id),
+          event_type: 'working_memory.created',
+          payload: {
+            after: workingMemory,
+          },
+          created_at: createdAt,
+        });
+        return workingMemory;
       });
-      return workingMemory;
     },
 
     async getWorkingMemoryById(id) {
@@ -1416,91 +1542,100 @@ export function createPostgresAdapter(
     },
 
     async expireWorkingMemory(id) {
-      const before = await this.getWorkingMemoryById(id);
-      const expiredAt = now();
-      await pool.query(`UPDATE working_memory SET status = 'expired', expires_at = $2 WHERE id = $1`, [id, expiredAt]);
-      const after = await this.getWorkingMemoryById(id);
-      if (before && after) {
-        await insertMemoryEventInternal({
-          ...normalizeScope(after),
-          session_id: after.session_id,
-          entity_kind: 'working_memory',
-          entity_id: String(after.id),
-          event_type: 'working_memory.expired',
-          payload: {
-            before,
-            after,
-            patch: {
-              expires_at: expiredAt,
+      // Phase 2.1: atomic row-update + event.
+      await this.transaction(async () => {
+        const before = await this.getWorkingMemoryById(id);
+        const expiredAt = now();
+        await pool.query(`UPDATE working_memory SET status = 'expired', expires_at = $2 WHERE id = $1`, [id, expiredAt]);
+        const after = await this.getWorkingMemoryById(id);
+        if (before && after) {
+          await insertMemoryEventInternal({
+            ...normalizeScope(after),
+            session_id: after.session_id,
+            entity_kind: 'working_memory',
+            entity_id: String(after.id),
+            event_type: 'working_memory.expired',
+            payload: {
+              before,
+              after,
+              patch: {
+                expires_at: expiredAt,
+              },
             },
-          },
-          created_at: expiredAt,
-        });
-      }
+            created_at: expiredAt,
+          });
+        }
+      });
     },
 
     async markWorkingMemoryPromoted(id, knowledgeMemoryId) {
-      const before = await this.getWorkingMemoryById(id);
-      await pool.query(`UPDATE working_memory SET promoted_to_knowledge_id = $2 WHERE id = $1`, [id, knowledgeMemoryId]);
-      const after = await this.getWorkingMemoryById(id);
-      if (before && after) {
-        await insertMemoryEventInternal({
-          ...normalizeScope(after),
-          session_id: after.session_id,
-          entity_kind: 'working_memory',
-          entity_id: String(after.id),
-          event_type: 'working_memory.promoted',
-          payload: {
-            before,
-            after,
-            refs: {
-              knowledge_memory_id: knowledgeMemoryId,
+      // Phase 2.1: atomic row-update + event.
+      await this.transaction(async () => {
+        const before = await this.getWorkingMemoryById(id);
+        await pool.query(`UPDATE working_memory SET promoted_to_knowledge_id = $2 WHERE id = $1`, [id, knowledgeMemoryId]);
+        const after = await this.getWorkingMemoryById(id);
+        if (before && after) {
+          await insertMemoryEventInternal({
+            ...normalizeScope(after),
+            session_id: after.session_id,
+            entity_kind: 'working_memory',
+            entity_id: String(after.id),
+            event_type: 'working_memory.promoted',
+            payload: {
+              before,
+              after,
+              refs: {
+                knowledge_memory_id: knowledgeMemoryId,
+              },
             },
-          },
-          created_at: now(),
-        });
-      }
+            created_at: now(),
+          });
+        }
+      });
     },
 
     async insertKnowledgeMemory(input) {
-      const n = normalizeScope(input);
-      const createdAt = now();
-      const { rows } = await pool.query(
-        `INSERT INTO knowledge_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id, fact, fact_type, knowledge_state, knowledge_class, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated, source, confidence, confidence_score, grounding_strength, evidence_count, trust_score, verification_status, verification_notes, last_verified_at, next_reverification_at, last_confirmed_at, confirmation_count, source_system_id, source_scope_id, source_collaboration_id, source_working_memory_id, source_turn_ids, successful_use_count, failed_use_count, disputed_at, dispute_reason, contradiction_score, superseded_at, retired_at, valid_from, valid_until, rationale, tags, created_at, last_accessed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $44)
-         RETURNING *`,
-        [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.fact, input.fact_type,
-         input.knowledge_state ?? 'trusted', input.knowledge_class ?? 'project_fact',
-         input.fact_subject ?? null, input.fact_attribute ?? null, input.fact_value ?? null,
-         input.normalized_fact ?? null, input.slot_key ?? null, input.is_negated ?? false,
-         input.source, input.confidence ?? 'medium', input.confidence_score ?? 0.5,
-         input.grounding_strength ?? 'moderate',
-         input.evidence_count ?? Math.max(1, (input.source_turn_ids ?? []).length),
-         input.trust_score ?? (input.confidence_score ?? 0.5),
-         input.verification_status ?? 'unverified', input.verification_notes ?? null,
-         input.last_verified_at ?? null, input.next_reverification_at ?? null,
-         input.last_confirmed_at ?? null, input.confirmation_count ?? 0,
-         input.source_system_id ?? n.system_id, input.source_scope_id ?? n.scope_id,
-         input.source_collaboration_id ?? n.collaboration_id,
-         input.source_working_memory_id ?? null, JSON.stringify(input.source_turn_ids ?? []),
-         input.successful_use_count ?? 0, input.failed_use_count ?? 0,
-         input.disputed_at ?? null, input.dispute_reason ?? null, input.contradiction_score ?? 0,
-         input.superseded_at ?? null, input.retired_at ?? null,
-         input.valid_from ?? null, input.valid_until ?? null, input.rationale ?? null,
-         JSON.stringify(input.tags ?? []), createdAt],
-      );
-      const knowledge = mapKnowledgeMemory(rows[0]);
-      await insertMemoryEventInternal({
-        ...n,
-        entity_kind: 'knowledge_memory',
-        entity_id: String(knowledge.id),
-        event_type: 'knowledge.created',
-        payload: {
-          after: knowledge,
-        },
-        created_at: createdAt,
+      // Phase 2.1: atomic row + event.
+      return this.transaction(async () => {
+        const n = normalizeScope(input);
+        const createdAt = now();
+        const { rows } = await pool.query(
+          `INSERT INTO knowledge_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id, fact, fact_type, knowledge_state, knowledge_class, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated, source, confidence, confidence_score, grounding_strength, evidence_count, trust_score, verification_status, verification_notes, last_verified_at, next_reverification_at, last_confirmed_at, confirmation_count, source_system_id, source_scope_id, source_collaboration_id, source_working_memory_id, source_turn_ids, successful_use_count, failed_use_count, disputed_at, dispute_reason, contradiction_score, superseded_at, retired_at, valid_from, valid_until, rationale, tags, created_at, last_accessed_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $44)
+           RETURNING *`,
+          [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.fact, input.fact_type,
+           input.knowledge_state ?? 'trusted', input.knowledge_class ?? 'project_fact',
+           input.fact_subject ?? null, input.fact_attribute ?? null, input.fact_value ?? null,
+           input.normalized_fact ?? null, input.slot_key ?? null, input.is_negated ?? false,
+           input.source, input.confidence ?? 'medium', input.confidence_score ?? 0.5,
+           input.grounding_strength ?? 'moderate',
+           input.evidence_count ?? Math.max(1, (input.source_turn_ids ?? []).length),
+           input.trust_score ?? (input.confidence_score ?? 0.5),
+           input.verification_status ?? 'unverified', input.verification_notes ?? null,
+           input.last_verified_at ?? null, input.next_reverification_at ?? null,
+           input.last_confirmed_at ?? null, input.confirmation_count ?? 0,
+           input.source_system_id ?? n.system_id, input.source_scope_id ?? n.scope_id,
+           input.source_collaboration_id ?? n.collaboration_id,
+           input.source_working_memory_id ?? null, JSON.stringify(input.source_turn_ids ?? []),
+           input.successful_use_count ?? 0, input.failed_use_count ?? 0,
+           input.disputed_at ?? null, input.dispute_reason ?? null, input.contradiction_score ?? 0,
+           input.superseded_at ?? null, input.retired_at ?? null,
+           input.valid_from ?? null, input.valid_until ?? null, input.rationale ?? null,
+           JSON.stringify(input.tags ?? []), createdAt],
+        );
+        const knowledge = mapKnowledgeMemory(rows[0]);
+        await insertMemoryEventInternal({
+          ...n,
+          entity_kind: 'knowledge_memory',
+          entity_id: String(knowledge.id),
+          event_type: 'knowledge.created',
+          payload: {
+            after: knowledge,
+          },
+          created_at: createdAt,
+        });
+        return knowledge;
       });
-      return knowledge;
     },
 
     async insertKnowledgeMemories(inputs) {
@@ -1514,38 +1649,53 @@ export function createPostgresAdapter(
     },
 
     async insertKnowledgeCandidate(input: NewKnowledgeCandidate): Promise<KnowledgeCandidate> {
-      const n = normalizeScope(input);
-      const { rows } = await pool.query(
-        `INSERT INTO knowledge_candidate
-          (tenant_id, system_id, workspace_id, collaboration_id, scope_id, working_memory_id, fact, fact_type,
-           knowledge_class, normalized_fact, slot_key, confidence, source_summary, source_turns,
-           grounding_strength, evidence_count, trust_score, state, promoted_knowledge_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
-         RETURNING *`,
-        [
-          n.tenant_id,
-          n.system_id,
-          n.workspace_id,
-          n.collaboration_id,
-          n.scope_id,
-          input.working_memory_id,
-          input.fact,
-          input.fact_type,
-          input.knowledge_class,
-          input.normalized_fact,
-          input.slot_key ?? null,
-          input.confidence,
-          input.source_summary ?? false,
-          input.source_turns ?? true,
-          input.grounding_strength ?? 'weak',
-          input.evidence_count ?? 0,
-          input.trust_score ?? 0,
-          input.state ?? 'candidate',
-          input.promoted_knowledge_id ?? null,
-          input.created_at ?? now(),
-        ],
-      );
-      return mapKnowledgeCandidate(rows[0]);
+      // Phase 2.2: candidate lifecycle is now audited. Row + event are atomic.
+      return this.transaction(async () => {
+        const n = normalizeScope(input);
+        const createdAt = input.created_at ?? now();
+        const { rows } = await pool.query(
+          `INSERT INTO knowledge_candidate
+            (tenant_id, system_id, workspace_id, collaboration_id, scope_id, working_memory_id, fact, fact_type,
+             knowledge_class, normalized_fact, slot_key, confidence, source_summary, source_turns,
+             grounding_strength, evidence_count, trust_score, state, promoted_knowledge_id, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+           RETURNING *`,
+          [
+            n.tenant_id,
+            n.system_id,
+            n.workspace_id,
+            n.collaboration_id,
+            n.scope_id,
+            input.working_memory_id,
+            input.fact,
+            input.fact_type,
+            input.knowledge_class,
+            input.normalized_fact,
+            input.slot_key ?? null,
+            input.confidence,
+            input.source_summary ?? false,
+            input.source_turns ?? true,
+            input.grounding_strength ?? 'weak',
+            input.evidence_count ?? 0,
+            input.trust_score ?? 0,
+            input.state ?? 'candidate',
+            input.promoted_knowledge_id ?? null,
+            createdAt,
+          ],
+        );
+        const candidate = mapKnowledgeCandidate(rows[0]);
+        await insertMemoryEventInternal({
+          ...n,
+          entity_kind: 'knowledge_candidate',
+          entity_id: String(candidate.id),
+          event_type: 'knowledge_candidate.created',
+          payload: {
+            after: candidate,
+          },
+          created_at: candidate.created_at,
+        });
+        return candidate;
+      });
     },
 
     async insertKnowledgeCandidates(inputs): Promise<KnowledgeCandidate[]> {
@@ -1622,23 +1772,81 @@ export function createPostgresAdapter(
     },
 
     async promoteKnowledgeCandidate(candidateId, input): Promise<KnowledgeMemory> {
-      const knowledge = await this.insertKnowledgeMemory(input);
-      await pool.query(
-        'UPDATE knowledge_candidate SET promoted_knowledge_id = $1, state = $2 WHERE id = $3',
-        [knowledge.id, 'provisional', candidateId],
-      );
-      return knowledge;
+      // Phase 2.2: candidate flip + knowledge insert + BOTH events are one
+      // transaction. A throw anywhere (e.g. knowledge validation) rolls the
+      // whole thing back — no orphaned knowledge row, no dangling candidate
+      // flip. insertKnowledgeMemory opens a nested SAVEPOINT (ambient client),
+      // so it commits/rolls back with this outer transaction.
+      return this.transaction(async () => {
+        // Phase 2.4 (minor) lock-order fix: acquire the candidate row lock FIRST,
+        // BEFORE insertKnowledgeMemory touches the shared projection_watermarks
+        // 'temporal' row via its event write. deleteExpiredKnowledgeCandidates
+        // locks the candidate (DELETE) then the watermark; without FOR UPDATE
+        // here, promotion locked the watermark (inside the knowledge event) then
+        // the candidate — the opposite order — so the two could deadlock (ABBA)
+        // on (candidate, watermark). Locking the candidate first makes BOTH paths
+        // acquire candidate-before-watermark, a consistent global order.
+        // NOTE(follow-up, post-4.3.0): every primitive still funnels its event
+        // write through the single 'temporal' watermark row, which serializes all
+        // concurrent event writers on one hot row. That is a throughput limit,
+        // not a correctness bug; removing it needs a watermark redesign (e.g. a
+        // sequence or per-scope watermark) that is out of scope for this MINOR.
+        const { rows: beforeRows } = await pool.query(
+          'SELECT * FROM knowledge_candidate WHERE id = $1 FOR UPDATE',
+          [candidateId],
+        );
+        const before = beforeRows[0] ? mapKnowledgeCandidate(beforeRows[0]) : null;
+        const knowledge = await this.insertKnowledgeMemory(input);
+        const { rows: afterRows } = await pool.query(
+          'UPDATE knowledge_candidate SET promoted_knowledge_id = $1, state = $2 WHERE id = $3 RETURNING *',
+          [knowledge.id, 'provisional', candidateId],
+        );
+        if (afterRows[0]) {
+          const after = mapKnowledgeCandidate(afterRows[0]);
+          await insertMemoryEventInternal({
+            ...normalizeScope(after),
+            entity_kind: 'knowledge_candidate',
+            entity_id: String(after.id),
+            event_type: 'knowledge_candidate.promoted',
+            payload: {
+              before,
+              after,
+              refs: {
+                knowledge_memory_id: knowledge.id,
+              },
+            },
+            created_at: now(),
+          });
+        }
+        return knowledge;
+      });
     },
 
     async deleteExpiredKnowledgeCandidates(scope, olderThan): Promise<number[]> {
-      const n = normalizeScope(scope);
-      const { rows } = await pool.query(
-        `DELETE FROM knowledge_candidate
-         WHERE ${scopeWhere()} AND promoted_knowledge_id IS NULL AND created_at < $6
-         RETURNING id`,
-        [...scopeParams(n), olderThan],
-      );
-      return rows.map((r: Record<string, unknown>) => Number(r.id));
+      // Phase 2.2: expiry is audited; delete + events are atomic.
+      return this.transaction(async () => {
+        const n = normalizeScope(scope);
+        const { rows } = await pool.query(
+          `DELETE FROM knowledge_candidate
+           WHERE ${scopeWhere()} AND promoted_knowledge_id IS NULL AND created_at < $6
+           RETURNING *`,
+          [...scopeParams(n), olderThan],
+        );
+        const expired = rows.map(mapKnowledgeCandidate);
+        for (const candidate of expired) {
+          await insertMemoryEventInternal({
+            ...normalizeScope(candidate),
+            entity_kind: 'knowledge_candidate',
+            entity_id: String(candidate.id),
+            event_type: 'knowledge_candidate.expired',
+            payload: {
+              before: candidate,
+            },
+            created_at: now(),
+          });
+        }
+        return expired.map((candidate) => candidate.id);
+      });
     },
 
     async getKnowledgeMemoryById(id) {
@@ -1814,6 +2022,8 @@ export function createPostgresAdapter(
     },
 
     async updateKnowledgeMemory(id, patch) {
+      // Phase 2.1: atomic row-update + event.
+      return this.transaction(async () => {
       const before = await this.getKnowledgeMemoryById(id);
       const assignments: string[] = [];
       const values: unknown[] = [];
@@ -1862,36 +2072,42 @@ export function createPostgresAdapter(
         });
       }
       return after;
+      });
     },
 
     async touchKnowledgeMemory(id) {
-      const before = await this.getKnowledgeMemoryById(id);
-      const touchedAt = now();
-      await pool.query(
-        `UPDATE knowledge_memory SET access_count = access_count + 1, last_accessed_at = $2 WHERE id = $1`,
-        [id, touchedAt],
-      );
-      const after = await this.getKnowledgeMemoryById(id);
-      if (before && after) {
-        await insertMemoryEventInternal({
-          ...normalizeScope(after),
-          entity_kind: 'knowledge_memory',
-          entity_id: String(after.id),
-          event_type: 'knowledge.touched',
-          payload: {
-            before,
-            after,
-            patch: {
-              last_accessed_at: touchedAt,
-              access_count: after.access_count,
+      // Phase 2.1: atomic row-update + event.
+      await this.transaction(async () => {
+        const before = await this.getKnowledgeMemoryById(id);
+        const touchedAt = now();
+        await pool.query(
+          `UPDATE knowledge_memory SET access_count = access_count + 1, last_accessed_at = $2 WHERE id = $1`,
+          [id, touchedAt],
+        );
+        const after = await this.getKnowledgeMemoryById(id);
+        if (before && after) {
+          await insertMemoryEventInternal({
+            ...normalizeScope(after),
+            entity_kind: 'knowledge_memory',
+            entity_id: String(after.id),
+            event_type: 'knowledge.touched',
+            payload: {
+              before,
+              after,
+              patch: {
+                last_accessed_at: touchedAt,
+                access_count: after.access_count,
+              },
             },
-          },
-          created_at: touchedAt,
-        });
-      }
+            created_at: touchedAt,
+          });
+        }
+      });
     },
 
     async touchKnowledgeMemories(ids: number[]) {
+      // Phase 2.1: atomic batch row-update + batch events.
+      await this.transaction(async () => {
       const uniqueIds = [...new Set(ids)].filter((id) => Number.isInteger(id) && id > 0);
       if (uniqueIds.length === 0) return;
       const { rows: beforeRows } = await pool.query(
@@ -1935,85 +2151,95 @@ export function createPostgresAdapter(
           }];
         }),
       );
+      });
     },
 
     async retireKnowledgeMemory(id, retiredAt) {
-      const before = await this.getKnowledgeMemoryById(id);
-      const effectiveRetiredAt = retiredAt ?? now();
-      await pool.query(
-        `UPDATE knowledge_memory SET retired_at = $2 WHERE id = $1`,
-        [id, effectiveRetiredAt],
-      );
-      const after = await this.getKnowledgeMemoryById(id);
-      if (before && after) {
-        await insertMemoryEventInternal({
-          ...normalizeScope(after),
-          entity_kind: 'knowledge_memory',
-          entity_id: String(after.id),
-          event_type: 'knowledge.retired',
-          payload: {
-            before,
-            after,
-            patch: {
-              retired_at: effectiveRetiredAt,
+      // Phase 2.1: atomic row-update + event.
+      await this.transaction(async () => {
+        const before = await this.getKnowledgeMemoryById(id);
+        const effectiveRetiredAt = retiredAt ?? now();
+        await pool.query(
+          `UPDATE knowledge_memory SET retired_at = $2 WHERE id = $1`,
+          [id, effectiveRetiredAt],
+        );
+        const after = await this.getKnowledgeMemoryById(id);
+        if (before && after) {
+          await insertMemoryEventInternal({
+            ...normalizeScope(after),
+            entity_kind: 'knowledge_memory',
+            entity_id: String(after.id),
+            event_type: 'knowledge.retired',
+            payload: {
+              before,
+              after,
+              patch: {
+                retired_at: effectiveRetiredAt,
+              },
             },
-          },
-          created_at: effectiveRetiredAt,
-        });
-      }
+            created_at: effectiveRetiredAt,
+          });
+        }
+      });
     },
 
     async supersedeKnowledgeMemory(oldId, newId) {
-      const before = await this.getKnowledgeMemoryById(oldId);
-      const supersededAt = now();
-      await pool.query(
-        `UPDATE knowledge_memory
-         SET superseded_by_id = $2, superseded_at = $3, knowledge_state = 'superseded', retired_at = $3
-         WHERE id = $1`,
-        [oldId, newId, supersededAt],
-      );
-      const after = await this.getKnowledgeMemoryById(oldId);
-      if (before && after) {
-        await insertMemoryEventInternal({
-          ...normalizeScope(after),
-          entity_kind: 'knowledge_memory',
-          entity_id: String(after.id),
-          event_type: 'knowledge.superseded',
-          payload: {
-            before,
-            after,
-            refs: {
-              new_id: newId,
+      // Phase 2.1: atomic row-update + event.
+      await this.transaction(async () => {
+        const before = await this.getKnowledgeMemoryById(oldId);
+        const supersededAt = now();
+        await pool.query(
+          `UPDATE knowledge_memory
+           SET superseded_by_id = $2, superseded_at = $3, knowledge_state = 'superseded', retired_at = $3
+           WHERE id = $1`,
+          [oldId, newId, supersededAt],
+        );
+        const after = await this.getKnowledgeMemoryById(oldId);
+        if (before && after) {
+          await insertMemoryEventInternal({
+            ...normalizeScope(after),
+            entity_kind: 'knowledge_memory',
+            entity_id: String(after.id),
+            event_type: 'knowledge.superseded',
+            payload: {
+              before,
+              after,
+              refs: {
+                new_id: newId,
+              },
             },
-          },
-          created_at: supersededAt,
-        });
-      }
+            created_at: supersededAt,
+          });
+        }
+      });
     },
 
     async insertWorkItem(input) {
-      const n = normalizeScope(input);
-      const createdAt = now();
-      const { rows } = await pool.query(
-        `INSERT INTO work_items (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, title, kind, status, detail, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
-         RETURNING *`,
-        [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.session_id,
-         input.title, input.kind ?? 'objective', input.status ?? 'open', input.detail ?? null, createdAt],
-      );
-      const workItem = mapWorkItem(rows[0]);
-      await insertMemoryEventInternal({
-        ...n,
-        session_id: workItem.session_id,
-        entity_kind: 'work_item',
-        entity_id: String(workItem.id),
-        event_type: 'work_item.created',
-        payload: {
-          after: workItem,
-        },
-        created_at: createdAt,
+      // Phase 2.1: atomic row + event.
+      return this.transaction(async () => {
+        const n = normalizeScope(input);
+        const createdAt = now();
+        const { rows } = await pool.query(
+          `INSERT INTO work_items (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, title, kind, status, detail, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
+           RETURNING *`,
+          [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.session_id,
+           input.title, input.kind ?? 'objective', input.status ?? 'open', input.detail ?? null, createdAt],
+        );
+        const workItem = mapWorkItem(rows[0]);
+        await insertMemoryEventInternal({
+          ...n,
+          session_id: workItem.session_id,
+          entity_kind: 'work_item',
+          entity_id: String(workItem.id),
+          event_type: 'work_item.created',
+          payload: {
+            after: workItem,
+          },
+          created_at: createdAt,
+        });
+        return workItem;
       });
-      return workItem;
     },
 
     async getActiveWorkItems(scope) {
@@ -2074,36 +2300,44 @@ export function createPostgresAdapter(
     },
 
     async updateWorkItemStatus(id, status) {
-      const { rows: beforeRows } = await pool.query('SELECT * FROM work_items WHERE id = $1', [id]);
-      const updatedAt = now();
-      await pool.query(
-        `UPDATE work_items SET status = $2, version = COALESCE(version, 1) + 1, updated_at = $3 WHERE id = $1`,
-        [id, status, updatedAt],
-      );
-      const { rows: afterRows } = await pool.query('SELECT * FROM work_items WHERE id = $1', [id]);
-      if (beforeRows[0] && afterRows[0]) {
-        const before = mapWorkItem(beforeRows[0]);
-        const after = mapWorkItem(afterRows[0]);
-        await insertMemoryEventInternal({
-          ...normalizeScope(after),
-          session_id: after.session_id,
-          entity_kind: 'work_item',
-          entity_id: String(after.id),
-          event_type: 'work_item.status_changed',
-          payload: {
-            before,
-            after,
-            patch: {
-              status,
-              updated_at: updatedAt,
+      // Phase 2.1: atomic row-update + event.
+      await this.transaction(async () => {
+        const { rows: beforeRows } = await pool.query('SELECT * FROM work_items WHERE id = $1', [id]);
+        const updatedAt = now();
+        await pool.query(
+          `UPDATE work_items SET status = $2, version = COALESCE(version, 1) + 1, updated_at = $3 WHERE id = $1`,
+          [id, status, updatedAt],
+        );
+        const { rows: afterRows } = await pool.query('SELECT * FROM work_items WHERE id = $1', [id]);
+        if (beforeRows[0] && afterRows[0]) {
+          const before = mapWorkItem(beforeRows[0]);
+          const after = mapWorkItem(afterRows[0]);
+          await insertMemoryEventInternal({
+            ...normalizeScope(after),
+            session_id: after.session_id,
+            entity_kind: 'work_item',
+            entity_id: String(after.id),
+            event_type: 'work_item.status_changed',
+            payload: {
+              before,
+              after,
+              patch: {
+                status,
+                updated_at: updatedAt,
+              },
             },
-          },
-          created_at: updatedAt,
-        });
-      }
+            created_at: updatedAt,
+          });
+        }
+      });
     },
 
     async updateWorkItem(id, patch: WorkItemPatch, options?: { expectedVersion?: number }) {
+      // Phase 2.1: atomic row-update + event. The optimistic-lock guard lives in
+      // the UPDATE's WHERE (Phase 0.7); wrapping in a transaction makes the
+      // conditional row-update and its event commit together, and a ConflictError
+      // throw rolls back cleanly.
+      return this.transaction(async () => {
       const { rows: beforeRows } = await pool.query('SELECT * FROM work_items WHERE id = $1', [id]);
       if (!beforeRows[0]) return null;
       const before = mapWorkItem(beforeRows[0]);
@@ -2157,25 +2391,29 @@ export function createPostgresAdapter(
         created_at: updatedAt,
       });
       return after;
+      });
     },
 
     async deleteWorkItem(id) {
-      const { rows } = await pool.query('SELECT * FROM work_items WHERE id = $1', [id]);
-      await pool.query('DELETE FROM work_items WHERE id = $1', [id]);
-      if (rows[0]) {
-        const workItem = mapWorkItem(rows[0]);
-        await insertMemoryEventInternal({
-          ...normalizeScope(workItem),
-          session_id: workItem.session_id,
-          entity_kind: 'work_item',
-          entity_id: String(workItem.id),
-          event_type: 'work_item.deleted',
-          payload: {
-            before: workItem,
-          },
-          created_at: now(),
-        });
-      }
+      // Phase 2.1: atomic row-delete + event.
+      await this.transaction(async () => {
+        const { rows } = await pool.query('SELECT * FROM work_items WHERE id = $1', [id]);
+        await pool.query('DELETE FROM work_items WHERE id = $1', [id]);
+        if (rows[0]) {
+          const workItem = mapWorkItem(rows[0]);
+          await insertMemoryEventInternal({
+            ...normalizeScope(workItem),
+            session_id: workItem.session_id,
+            entity_kind: 'work_item',
+            entity_id: String(workItem.id),
+            event_type: 'work_item.deleted',
+            payload: {
+              before: workItem,
+            },
+            created_at: now(),
+          });
+        }
+      });
     },
 
     async claimWorkItem(input: NewWorkClaimInput): Promise<WorkClaim> {
@@ -2379,43 +2617,33 @@ export function createPostgresAdapter(
     },
 
     async getWorkClaimById(claimId: number): Promise<WorkClaim | null> {
+      // Phase 2.5 (D6): by-id reads apply the same effective-status computation
+      // as the list paths, so an active-but-expired claim reads as `expired`
+      // consistently across read paths (without writing).
       const { rows } = await pool.query('SELECT * FROM work_claims_current WHERE id = $1', [claimId]);
       if (!rows[0]) return null;
-      return mapWorkClaim(rows[0]);
+      return effectiveClaim(mapWorkClaim(rows[0]), now());
     },
 
     async getActiveWorkClaim(workItemId: number): Promise<WorkClaim | null> {
+      // Phase 2.5: read path computes effective status without writing. An
+      // active-but-expired claim reads as no active claim; the row is expired
+      // durably only by claim/renew/release or the expireStaleClaims reaper.
       const existingRow = await getAnyClaimRowByWorkItem(workItemId);
       if (!existingRow) return null;
-      const claim = mapWorkClaim(existingRow);
-      if (claim.status === 'active' && claim.expires_at <= now()) {
-        await this.transaction(async () => {
-          await expireClaimRecord(existingRow);
-        });
-        return null;
-      }
+      const claim = effectiveClaim(mapWorkClaim(existingRow), now());
       return claim.status === 'active' ? claim : null;
     },
 
     async listWorkClaims(scope: MemoryScope, options?: WorkClaimQuery): Promise<WorkClaim[]> {
-      const expiredAt = now();
-      const { rows: expiredRows } = await pool.query(
-        `SELECT * FROM work_claims_current
-         WHERE ${scopeWhere()} AND status = 'active' AND expires_at <= $6`,
-        [...scopeParams(scope), expiredAt],
-      );
-      if (expiredRows.length > 0) {
-        await this.transaction(async () => {
-          for (const row of expiredRows) {
-            await expireClaimRecord(row, expiredAt);
-          }
-        });
-      }
+      // Phase 2.5: reads never write. Effective status is computed against `now`;
+      // durable expiry is the reaper's (expireStaleClaims) job.
+      const currentNow = now();
       const { rows } = await pool.query(
         `SELECT * FROM work_claims_current WHERE ${scopeWhere()} ORDER BY claimed_at DESC`,
         scopeParams(scope),
       );
-      const claims = rows.map(mapWorkClaim);
+      const claims = rows.map((row) => effectiveClaim(mapWorkClaim(row), currentNow));
       return claims.filter((claim) => {
         if (!options?.includeExpired && claim.status === 'expired') return false;
         if (!options?.includeReleased && claim.status === 'released') return false;
@@ -2431,25 +2659,14 @@ export function createPostgresAdapter(
       level: ScopeLevel,
       options?: WorkClaimQuery,
     ): Promise<WorkClaim[]> {
-      const expiredAt = now();
+      // Phase 2.5: reads never write (see listWorkClaims).
+      const currentNow = now();
       const levelParams = wideScopeParams(scope, level);
-      const { rows: expiredRows } = await pool.query(
-        `SELECT * FROM work_claims_current
-         WHERE ${wideScopeWhere(scope, level)} AND status = 'active' AND expires_at <= $${levelParams.length + 1}`,
-        [...levelParams, expiredAt],
-      );
-      if (expiredRows.length > 0) {
-        await this.transaction(async () => {
-          for (const row of expiredRows) {
-            await expireClaimRecord(row, expiredAt);
-          }
-        });
-      }
       const { rows } = await pool.query(
         `SELECT * FROM work_claims_current WHERE ${wideScopeWhere(scope, level)} ORDER BY claimed_at DESC`,
         levelParams,
       );
-      const claims = rows.map(mapWorkClaim);
+      const claims = rows.map((row) => effectiveClaim(mapWorkClaim(row), currentNow));
       return claims.filter((claim) => {
         if (!options?.includeExpired && claim.status === 'expired') return false;
         if (!options?.includeReleased && claim.status === 'released') return false;
@@ -2457,6 +2674,59 @@ export function createPostgresAdapter(
         if (options?.visibilityClass && claim.visibility_class !== options.visibilityClass) return false;
         if (options?.actor && !sameActor(claim.actor, options.actor)) return false;
         return true;
+      });
+    },
+
+    async expireStaleClaims(scope: MemoryScope, currentNow: number): Promise<number[]> {
+      // Phase 2.5 reaper. Race-safe on two axes:
+      //  1. The candidate SELECT runs INSIDE the transaction with FOR UPDATE
+      //     SKIP LOCKED, so two concurrent reapers partition the stale rows
+      //     rather than both grabbing the same ones.
+      //  2. expireClaimRecord's UPDATE is self-guarding
+      //     (WHERE status='active' AND expires_at<=now, rowCount authority): if a
+      //     racing claimWorkItem re-activated a row between SELECT and UPDATE it
+      //     affects 0 rows and emits NO event.
+      // Together these guarantee exactly one work_claim.expired per genuine
+      // expiry and exactly one winner against a concurrent reclaim.
+      return this.transaction(async () => {
+        const { rows: expiredRows } = await pool.query(
+          `SELECT * FROM work_claims_current
+           WHERE ${scopeWhere()} AND status = 'active' AND expires_at <= $6
+           FOR UPDATE SKIP LOCKED`,
+          [...scopeParams(scope), currentNow],
+        );
+        const expiredIds: number[] = [];
+        for (const row of expiredRows) {
+          const expired = await expireClaimRecord(row, currentNow);
+          if (expired) expiredIds.push(expired.id);
+        }
+        return expiredIds;
+      });
+    },
+
+    async expireStaleHandoffs(scope: MemoryScope, currentNow: number): Promise<number[]> {
+      // Phase 2.5 reaper (D5), handoff analogue of expireStaleClaims. Race-safe
+      // on the same two axes:
+      //  1. The candidate SELECT runs INSIDE the transaction with FOR UPDATE
+      //     SKIP LOCKED, so two concurrent reapers partition the stale rows.
+      //  2. expireHandoffRecord's UPDATE is self-guarding
+      //     (WHERE status='pending' AND expires_at<=now, rowCount authority): if
+      //     a racing accept/reject/cancel changed the row between SELECT and
+      //     UPDATE it affects 0 rows and emits NO event.
+      // Together these guarantee exactly one handoff.expired per genuine expiry.
+      return this.transaction(async () => {
+        const { rows: expiredRows } = await pool.query(
+          `SELECT * FROM handoff_records
+           WHERE ${scopeWhere()} AND status = 'pending' AND expires_at IS NOT NULL AND expires_at <= $6
+           FOR UPDATE SKIP LOCKED`,
+          [...scopeParams(scope), currentNow],
+        );
+        const expiredIds: number[] = [];
+        for (const row of expiredRows) {
+          const expired = await expireHandoffRecord(row, currentNow);
+          if (expired) expiredIds.push(expired.id);
+        }
+        return expiredIds;
       });
     },
 
@@ -2526,9 +2796,12 @@ export function createPostgresAdapter(
     },
 
     async getHandoffById(handoffId: number): Promise<HandoffRecord | null> {
+      // Phase 2.5 (D6): by-id reads apply the same effective-status computation
+      // as listHandoffs, so a pending-but-expired handoff reads as `expired`
+      // consistently across read paths (without writing).
       const { rows } = await pool.query('SELECT * FROM handoff_records WHERE id = $1', [handoffId]);
       if (!rows[0]) return null;
-      return mapHandoff(rows[0]);
+      return effectiveHandoff(mapHandoff(rows[0]), now());
     },
 
     async acceptHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null> {
@@ -2684,24 +2957,15 @@ export function createPostgresAdapter(
     },
 
     async listHandoffs(scope: MemoryScope, options?: HandoffQuery): Promise<HandoffRecord[]> {
-      const expiredAt = now();
-      const { rows: expiredRows } = await pool.query(
-        `SELECT * FROM handoff_records
-         WHERE ${scopeWhere()} AND status = 'pending' AND expires_at IS NOT NULL AND expires_at <= $6`,
-        [...scopeParams(scope), expiredAt],
-      );
-      if (expiredRows.length > 0) {
-        await this.transaction(async () => {
-          for (const row of expiredRows) {
-            await expireHandoffRecord(row, expiredAt);
-          }
-        });
-      }
+      // D5: reads never write. Effective status is computed against `now`;
+      // durable expiry is the reaper's (expireStaleHandoffs) job. Two concurrent
+      // list calls on an expired handoff therefore emit ZERO handoff.expired.
+      const currentNow = now();
       const { rows } = await pool.query(
         `SELECT * FROM handoff_records WHERE ${scopeWhere()} ORDER BY created_at DESC`,
         scopeParams(scope),
       );
-      const handoffs = rows.map(mapHandoff);
+      const handoffs = rows.map((row) => effectiveHandoff(mapHandoff(row), currentNow));
       return handoffs.filter((handoff) => {
         if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
         if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
@@ -2719,25 +2983,14 @@ export function createPostgresAdapter(
       level: ScopeLevel,
       options?: HandoffQuery,
     ): Promise<HandoffRecord[]> {
-      const expiredAt = now();
+      // D5: reads never write (see listHandoffs).
+      const currentNow = now();
       const levelParams = wideScopeParams(scope, level);
-      const { rows: expiredRows } = await pool.query(
-        `SELECT * FROM handoff_records
-         WHERE ${wideScopeWhere(scope, level)} AND status = 'pending' AND expires_at IS NOT NULL AND expires_at <= $${levelParams.length + 1}`,
-        [...levelParams, expiredAt],
-      );
-      if (expiredRows.length > 0) {
-        await this.transaction(async () => {
-          for (const row of expiredRows) {
-            await expireHandoffRecord(row, expiredAt);
-          }
-        });
-      }
       const { rows } = await pool.query(
         `SELECT * FROM handoff_records WHERE ${wideScopeWhere(scope, level)} ORDER BY created_at DESC`,
         levelParams,
       );
-      const handoffs = rows.map(mapHandoff);
+      const handoffs = rows.map((row) => effectiveHandoff(mapHandoff(row), currentNow));
       return handoffs.filter((handoff) => {
         if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
         if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
@@ -2803,33 +3056,36 @@ export function createPostgresAdapter(
     },
 
     async insertPlaybook(input) {
-      const n = normalizeScope(input);
-      const createdAt = input.created_at ?? now();
-      const { rows } = await pool.query(
-        `INSERT INTO playbooks (tenant_id, system_id, workspace_id, collaboration_id, scope_id, title, description, instructions,
-           references_json, templates, scripts, assets, tags, rationale, status, source_session_id, source_working_memory_id, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $18)
-         RETURNING *`,
-        [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id,
-         input.title, input.description, input.instructions,
-         JSON.stringify(input.references ?? []), JSON.stringify(input.templates ?? []),
-         JSON.stringify(input.scripts ?? []), JSON.stringify(input.assets ?? []),
-         JSON.stringify(input.tags ?? []), input.rationale ?? null, input.status ?? 'draft',
-         input.source_session_id ?? null, input.source_working_memory_id ?? null, createdAt],
-      );
-      const playbook = mapPlaybook(rows[0]);
-      await insertMemoryEventInternal({
-        ...n,
-        session_id: playbook.source_session_id,
-        entity_kind: 'playbook',
-        entity_id: String(playbook.id),
-        event_type: 'playbook.created',
-        payload: {
-          after: playbook,
-        },
-        created_at: createdAt,
+      // Phase 2.1: atomic row + event.
+      return this.transaction(async () => {
+        const n = normalizeScope(input);
+        const createdAt = input.created_at ?? now();
+        const { rows } = await pool.query(
+          `INSERT INTO playbooks (tenant_id, system_id, workspace_id, collaboration_id, scope_id, title, description, instructions,
+             references_json, templates, scripts, assets, tags, rationale, status, source_session_id, source_working_memory_id, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $18)
+           RETURNING *`,
+          [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id,
+           input.title, input.description, input.instructions,
+           JSON.stringify(input.references ?? []), JSON.stringify(input.templates ?? []),
+           JSON.stringify(input.scripts ?? []), JSON.stringify(input.assets ?? []),
+           JSON.stringify(input.tags ?? []), input.rationale ?? null, input.status ?? 'draft',
+           input.source_session_id ?? null, input.source_working_memory_id ?? null, createdAt],
+        );
+        const playbook = mapPlaybook(rows[0]);
+        await insertMemoryEventInternal({
+          ...n,
+          session_id: playbook.source_session_id,
+          entity_kind: 'playbook',
+          entity_id: String(playbook.id),
+          event_type: 'playbook.created',
+          payload: {
+            after: playbook,
+          },
+          created_at: createdAt,
+        });
+        return playbook;
       });
-      return playbook;
     },
     async getPlaybookById(id) {
       const { rows } = await pool.query('SELECT * FROM playbooks WHERE id = $1', [id]);
@@ -2896,6 +3152,8 @@ export function createPostgresAdapter(
       }));
     },
     async updatePlaybook(id, patch) {
+      // Phase 2.1: atomic row-update + event.
+      return this.transaction(async () => {
       const before = await this.getPlaybookById(id);
       const sets: string[] = [];
       const values: unknown[] = [];
@@ -2935,66 +3193,96 @@ export function createPostgresAdapter(
         });
       }
       return after;
+      });
     },
     async recordPlaybookUse(id) {
-      const before = await this.getPlaybookById(id);
-      const usedAt = now();
-      await pool.query(
-        'UPDATE playbooks SET use_count = use_count + 1, last_used_at = $1 WHERE id = $2',
-        [usedAt, id],
-      );
-      const after = await this.getPlaybookById(id);
-      if (before && after) {
-        await insertMemoryEventInternal({
-          ...normalizeScope(after),
-          session_id: after.source_session_id,
-          entity_kind: 'playbook',
-          entity_id: String(after.id),
-          event_type: 'playbook.used',
-          payload: {
-            before,
-            after,
-            refs: {
-              use_count: after.use_count,
+      // Phase 2.1: atomic row-update + event.
+      await this.transaction(async () => {
+        const before = await this.getPlaybookById(id);
+        const usedAt = now();
+        await pool.query(
+          'UPDATE playbooks SET use_count = use_count + 1, last_used_at = $1 WHERE id = $2',
+          [usedAt, id],
+        );
+        const after = await this.getPlaybookById(id);
+        if (before && after) {
+          await insertMemoryEventInternal({
+            ...normalizeScope(after),
+            session_id: after.source_session_id,
+            entity_kind: 'playbook',
+            entity_id: String(after.id),
+            event_type: 'playbook.used',
+            payload: {
+              before,
+              after,
+              refs: {
+                use_count: after.use_count,
+              },
             },
-          },
-          created_at: usedAt,
-        });
-      }
+            created_at: usedAt,
+          });
+        }
+      });
     },
     async insertPlaybookRevision(input) {
-      const playbook = await this.getPlaybookById(input.playbook_id);
-      if (!playbook) {
-        throw new Error(`Playbook ${input.playbook_id} not found`);
-      }
-      const { rows } = await pool.query(
-        `INSERT INTO playbook_revisions (tenant_id, system_id, workspace_id, collaboration_id, scope_id, playbook_id, instructions, revision_reason, source_session_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-         RETURNING *`,
-        [playbook.tenant_id, playbook.system_id, playbook.workspace_id, playbook.collaboration_id, playbook.scope_id,
-         input.playbook_id, input.instructions, input.revision_reason,
-         input.source_session_id ?? null, input.created_at ?? now()],
-      );
-      await pool.query(
-        'UPDATE playbooks SET revision_count = revision_count + 1 WHERE id = $1',
-        [input.playbook_id],
-      );
-      const revision = mapPlaybookRevision(rows[0]);
-      await insertMemoryEventInternal({
-        ...normalizeScope(revision),
-        session_id: revision.source_session_id,
-        entity_kind: 'playbook_revision',
-        entity_id: String(revision.id),
-        event_type: 'playbook.revised',
-        payload: {
-          after: revision,
-          refs: {
-            playbook_id: revision.playbook_id,
+      // Phase 2.1: revision insert + playbook counter bump + event are atomic.
+      return this.transaction(async () => {
+        const playbook = await this.getPlaybookById(input.playbook_id);
+        if (!playbook) {
+          throw new Error(`Playbook ${input.playbook_id} not found`);
+        }
+        const createdAt = input.created_at ?? now();
+        const { rows } = await pool.query(
+          `INSERT INTO playbook_revisions (tenant_id, system_id, workspace_id, collaboration_id, scope_id, playbook_id, instructions, revision_reason, source_session_id, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           RETURNING *`,
+          [playbook.tenant_id, playbook.system_id, playbook.workspace_id, playbook.collaboration_id, playbook.scope_id,
+           input.playbook_id, input.instructions, input.revision_reason,
+           input.source_session_id ?? null, createdAt],
+        );
+        // D1: a revision mutates the parent playbook (revision_count, updated_at).
+        // Bump both and capture the after-image so we can emit a playbook
+        // after-snapshot below — foldTemporalState only folds the `playbook`
+        // entity kind, not `playbook_revision`, so replay needs this event to
+        // reconstruct the bumped revision_count/updated_at.
+        const { rows: playbookRows } = await pool.query(
+          'UPDATE playbooks SET revision_count = revision_count + 1, updated_at = $2 WHERE id = $1 RETURNING *',
+          [input.playbook_id, createdAt],
+        );
+        const revision = mapPlaybookRevision(rows[0]);
+        const updatedPlaybook = mapPlaybook(playbookRows[0]);
+        await insertMemoryEventInternal({
+          ...normalizeScope(revision),
+          session_id: revision.source_session_id,
+          entity_kind: 'playbook_revision',
+          entity_id: String(revision.id),
+          event_type: 'playbook.revised',
+          payload: {
+            after: revision,
+            refs: {
+              playbook_id: revision.playbook_id,
+            },
           },
-        },
-        created_at: revision.created_at,
+          created_at: revision.created_at,
+        });
+        // D1: playbook after-snapshot (event_id-ordered AFTER playbook.revised).
+        await insertMemoryEventInternal({
+          ...normalizeScope(updatedPlaybook),
+          session_id: updatedPlaybook.source_session_id,
+          entity_kind: 'playbook',
+          entity_id: String(updatedPlaybook.id),
+          event_type: 'playbook.updated',
+          payload: {
+            after: updatedPlaybook,
+            refs: {
+              revision_id: revision.id,
+              revision_count: updatedPlaybook.revision_count,
+            },
+          },
+          created_at: updatedPlaybook.updated_at,
+        });
+        return revision;
       });
-      return revision;
     },
     async getPlaybookRevisions(playbookId) {
       const { rows } = await pool.query(
@@ -3005,32 +3293,36 @@ export function createPostgresAdapter(
     },
 
     async insertAssociation(input) {
+      // Phase 2.1: atomic row + event. A unique-violation aborts before any
+      // event is written; the transaction rolls back either way.
       const n = normalizeScope(input);
       try {
-        const { rows } = await pool.query(
-          `INSERT INTO associations
-            (tenant_id, system_id, workspace_id, collaboration_id, scope_id,
-             source_kind, source_id, target_kind, target_id, association_type, provenance, confidence, auto_generated, visibility_class, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-           RETURNING *`,
-          [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id,
-           input.source_kind, input.source_id, input.target_kind, input.target_id,
-           input.association_type, input.provenance ?? 'inferred', input.confidence ?? 0.8,
-           input.auto_generated ?? false, input.visibility_class ?? 'private',
-           input.created_at ?? now()],
-        );
-        const association = mapAssociation(rows[0]);
-        await insertMemoryEventInternal({
-          ...n,
-          entity_kind: 'association',
-          entity_id: String(association.id),
-          event_type: 'association.created',
-          payload: {
-            after: association,
-          },
-          created_at: association.created_at,
+        return await this.transaction(async () => {
+          const { rows } = await pool.query(
+            `INSERT INTO associations
+              (tenant_id, system_id, workspace_id, collaboration_id, scope_id,
+               source_kind, source_id, target_kind, target_id, association_type, provenance, confidence, auto_generated, visibility_class, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+             RETURNING *`,
+            [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id,
+             input.source_kind, input.source_id, input.target_kind, input.target_id,
+             input.association_type, input.provenance ?? 'inferred', input.confidence ?? 0.8,
+             input.auto_generated ?? false, input.visibility_class ?? 'private',
+             input.created_at ?? now()],
+          );
+          const association = mapAssociation(rows[0]);
+          await insertMemoryEventInternal({
+            ...n,
+            entity_kind: 'association',
+            entity_id: String(association.id),
+            event_type: 'association.created',
+            payload: {
+              after: association,
+            },
+            created_at: association.created_at,
+          });
+          return association;
         });
-        return association;
       } catch (err) {
         // Postgres unique_violation is SQLSTATE 23505.
         if (err && typeof err === 'object' && (err as { code?: string }).code === '23505') {
@@ -3078,20 +3370,23 @@ export function createPostgresAdapter(
       return rows.map(mapAssociation);
     },
     async deleteAssociation(id) {
-      const before = await this.getAssociationById(id);
-      await pool.query('DELETE FROM associations WHERE id = $1', [id]);
-      if (before) {
-        await insertMemoryEventInternal({
-          ...normalizeScope(before),
-          entity_kind: 'association',
-          entity_id: String(before.id),
-          event_type: 'association.deleted',
-          payload: {
-            before,
-          },
-          created_at: now(),
-        });
-      }
+      // Phase 2.1: atomic row-delete + event.
+      await this.transaction(async () => {
+        const before = await this.getAssociationById(id);
+        await pool.query('DELETE FROM associations WHERE id = $1', [id]);
+        if (before) {
+          await insertMemoryEventInternal({
+            ...normalizeScope(before),
+            entity_kind: 'association',
+            entity_id: String(before.id),
+            event_type: 'association.deleted',
+            payload: {
+              before,
+            },
+            created_at: now(),
+          });
+        }
+      });
     },
 
     async insertMemoryEvent(input) {
@@ -3126,19 +3421,22 @@ export function createPostgresAdapter(
     },
 
     async upsertSessionState(input) {
-      const projection = await writeSessionStateProjection(input);
-      await insertMemoryEventInternal({
-        ...normalizeScope(projection),
-        session_id: projection.session_id,
-        entity_kind: 'session_state',
-        entity_id: projection.session_id,
-        event_type: 'session_state.updated',
-        payload: {
-          after: projection,
-        },
-        created_at: projection.updatedAt,
+      // Phase 2.1: atomic projection upsert + event.
+      return this.transaction(async () => {
+        const projection = await writeSessionStateProjection(input);
+        await insertMemoryEventInternal({
+          ...normalizeScope(projection),
+          session_id: projection.session_id,
+          entity_kind: 'session_state',
+          entity_id: projection.session_id,
+          event_type: 'session_state.updated',
+          payload: {
+            after: projection,
+          },
+          created_at: projection.updatedAt,
+        });
+        return projection;
       });
-      return projection;
     },
 
     async getTemporalWatermark(projectionName) {
@@ -3184,23 +3482,37 @@ export function createPostgresAdapter(
     },
 
     async insertSourceDocument(input: NewSourceDocument): Promise<SourceDocument> {
-      const n = normalizeScope(input);
-      const createdAt = nowSeconds();
-      const { rows } = await pool.query(
-        `INSERT INTO source_documents
-          (tenant_id, system_id, workspace_id, collaboration_id, scope_id, title, content_hash,
-           mime_type, url, metadata, status, fact_count, token_estimate, created_at, processed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-         RETURNING *`,
-        [
-          n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id,
-          input.title, input.content_hash, input.mime_type ?? 'text/plain',
-          input.url ?? null, JSON.stringify(input.metadata ?? {}),
-          input.status ?? 'pending', 0, input.token_estimate ?? 0,
-          createdAt, null,
-        ],
-      );
-      return mapSourceDocumentRow(rows[0]);
+      // Phase 2.2: source-document ingestion is audited; row + event atomic.
+      return this.transaction(async () => {
+        const n = normalizeScope(input);
+        const createdAt = nowSeconds();
+        const { rows } = await pool.query(
+          `INSERT INTO source_documents
+            (tenant_id, system_id, workspace_id, collaboration_id, scope_id, title, content_hash,
+             mime_type, url, metadata, status, fact_count, token_estimate, created_at, processed_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+           RETURNING *`,
+          [
+            n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id,
+            input.title, input.content_hash, input.mime_type ?? 'text/plain',
+            input.url ?? null, JSON.stringify(input.metadata ?? {}),
+            input.status ?? 'pending', 0, input.token_estimate ?? 0,
+            createdAt, null,
+          ],
+        );
+        const doc = mapSourceDocumentRow(rows[0]);
+        await insertMemoryEventInternal({
+          ...n,
+          entity_kind: 'source_document',
+          entity_id: String(doc.id),
+          event_type: 'source_document.created',
+          payload: {
+            after: doc,
+          },
+          created_at: doc.created_at,
+        });
+        return doc;
+      });
     },
 
     async getSourceDocumentById(id: number): Promise<SourceDocument | null> {
@@ -3235,15 +3547,33 @@ export function createPostgresAdapter(
     },
 
     async updateSourceDocument(id: number, patch: { status?: SourceDocumentStatus; fact_count?: number; processed_at?: number | null }): Promise<SourceDocument | null> {
-      const setClauses: string[] = [];
-      const values: unknown[] = [id];
-      let pi = 2;
-      if (patch.status !== undefined) { setClauses.push(`status = $${pi++}`); values.push(patch.status); }
-      if (patch.fact_count !== undefined) { setClauses.push(`fact_count = $${pi++}`); values.push(patch.fact_count); }
-      if (patch.processed_at !== undefined) { setClauses.push(`processed_at = $${pi++}`); values.push(patch.processed_at); }
-      if (setClauses.length === 0) return this.getSourceDocumentById(id);
-      const { rows } = await pool.query(`UPDATE source_documents SET ${setClauses.join(', ')} WHERE id = $1 RETURNING *`, values);
-      return rows.length > 0 ? mapSourceDocumentRow(rows[0]) : null;
+      // Phase 2.2: source-document update is audited; row + event atomic.
+      return this.transaction(async () => {
+        const setClauses: string[] = [];
+        const values: unknown[] = [id];
+        let pi = 2;
+        if (patch.status !== undefined) { setClauses.push(`status = $${pi++}`); values.push(patch.status); }
+        if (patch.fact_count !== undefined) { setClauses.push(`fact_count = $${pi++}`); values.push(patch.fact_count); }
+        if (patch.processed_at !== undefined) { setClauses.push(`processed_at = $${pi++}`); values.push(patch.processed_at); }
+        if (setClauses.length === 0) return this.getSourceDocumentById(id);
+        const beforeRow = await this.getSourceDocumentById(id);
+        const { rows } = await pool.query(`UPDATE source_documents SET ${setClauses.join(', ')} WHERE id = $1 RETURNING *`, values);
+        if (rows.length === 0) return null;
+        const after = mapSourceDocumentRow(rows[0]);
+        await insertMemoryEventInternal({
+          ...normalizeScope(after),
+          entity_kind: 'source_document',
+          entity_id: String(after.id),
+          event_type: 'source_document.updated',
+          payload: {
+            before: beforeRow,
+            after,
+            patch,
+          },
+          created_at: nowSeconds(),
+        });
+        return after;
+      });
     },
 
     async getScopeConfig(scope: MemoryScope, key: string): Promise<string | null> {
@@ -3303,8 +3633,84 @@ export function createPostgresEmbeddingAdapter(
   pool: PgPool,
   options?: PostgresAdapterOptions,
 ): EmbeddingAdapter {
+  // Phase 2.4: track which per-dimension HNSW indexes we have already ensured
+  // this process, so the CREATE INDEX round-trip only runs the first time a
+  // given dimension appears. This is a fast-path optimisation; correctness does
+  // not depend on it (CREATE INDEX IF NOT EXISTS is idempotent and the DB is the
+  // source of truth across processes).
+  const ensuredHnswDimensions = new Set<number>();
+
+  // A distinct 64-bit advisory-lock key per dimension so two concurrent
+  // storeEmbedding calls that both introduce the same new dimension serialise
+  // their CREATE INDEX rather than racing (CONCURRENTLY is not used, so the
+  // plain CREATE takes an exclusive lock; the advisory lock avoids one waiter
+  // erroring on a duplicate-relation race window). A fixed namespace prefix
+  // keeps the key from colliding with unrelated advisory locks.
+  const HNSW_ADVISORY_NAMESPACE = 0x656d6248; // 'embH'
+
+  async function ensureHnswIndexForDimension(dimensions: number): Promise<void> {
+    if (!Number.isInteger(dimensions) || dimensions <= 0) return;
+    if (ensuredHnswDimensions.has(dimensions)) return;
+    const indexName = `emb_hnsw_${dimensions}`;
+    try {
+      // Phase 2.4 fix: pg_advisory_lock is SESSION-level, so the lock and unlock
+      // MUST run on the same physical connection. Previously these were three
+      // separate pool.query calls that could each land on a DIFFERENT pooled
+      // connection, leaking a session lock on the connection that acquired it
+      // (the unlock ran on another connection and was a no-op) and hanging later
+      // writers. Acquire ONE client for lock+create+unlock and release it in a
+      // finally so the whole critical section is pinned to that connection.
+      const client = await pool.connect();
+      try {
+        // Advisory lock scoped to (namespace, dimensions).
+        await client.query('SELECT pg_advisory_lock($1, $2)', [HNSW_ADVISORY_NAMESPACE, dimensions]);
+        try {
+          // The index name and vector(N) cast are derived from a validated
+          // integer dimension, so there is no injection surface. IF NOT EXISTS
+          // makes this idempotent; the advisory lock removes the concurrent-
+          // create race.
+          await client.query(
+            `CREATE INDEX IF NOT EXISTS ${indexName}
+               ON knowledge_embeddings
+               USING hnsw ((embedding::vector(${dimensions})) vector_cosine_ops)
+               WHERE dimensions = ${dimensions}`,
+          );
+          ensuredHnswDimensions.add(dimensions);
+        } finally {
+          await client.query('SELECT pg_advisory_unlock($1, $2)', [HNSW_ADVISORY_NAMESPACE, dimensions]);
+        }
+      } finally {
+        client.release();
+      }
+    } catch (err) {
+      // Never let index maintenance fail a write: the row is already stored and
+      // similarity queries fall back to a sequential scan (still correct, just
+      // slower) if the index cannot be built (e.g. pgvector missing, or a
+      // duplicate-create raced past IF NOT EXISTS). Log and continue.
+      options?.logger?.warn?.(
+        `memory-layer: could not ensure HNSW index ${indexName} (dimensions=${dimensions}): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
   return {
-    async storeEmbedding(knowledgeMemoryId, vector): Promise<void> {
+    async storeEmbedding(knowledgeMemoryId, vector, metadata): Promise<void> {
+      const model = metadata?.model ?? 'unknown';
+      // Phase 2.4 (minor) fix: the `dimensions` column is the sole key for the
+      // partial HNSW index and the `vector(N)` casts in findSimilar, so it MUST
+      // equal the actual stored vector length. Deriving it from a caller-supplied
+      // metadata.dimensions let a lying value diverge from the real vector and
+      // reintroduce the "different vector dimensions" cast error at query time.
+      // We derive dimensions from vector.length and reject a contradicting
+      // metadata.dimensions rather than silently trusting it.
+      const dimensions = vector.length;
+      if (metadata?.dimensions != null && metadata.dimensions !== dimensions) {
+        throw new ValidationError(
+          `memory-layer: embedding metadata.dimensions (${metadata.dimensions}) does not match vector length (${dimensions})`,
+        );
+      }
       const { rows } = await pool.query(
         `INSERT INTO knowledge_embeddings (
            knowledge_memory_id,
@@ -3314,6 +3720,8 @@ export function createPostgresEmbeddingAdapter(
            collaboration_id,
            scope_id,
            embedding,
+           model,
+           dimensions,
            created_at
          )
          SELECT
@@ -3324,7 +3732,9 @@ export function createPostgresEmbeddingAdapter(
            km.collaboration_id,
            km.scope_id,
            $2::vector,
-           $3
+           $3,
+           $4,
+           $5
          FROM knowledge_memory km
          WHERE km.id = $1
          ON CONFLICT (knowledge_memory_id) DO UPDATE SET
@@ -3334,13 +3744,18 @@ export function createPostgresEmbeddingAdapter(
            collaboration_id = EXCLUDED.collaboration_id,
            scope_id = EXCLUDED.scope_id,
            embedding = EXCLUDED.embedding,
+           model = EXCLUDED.model,
+           dimensions = EXCLUDED.dimensions,
            created_at = EXCLUDED.created_at
          RETURNING knowledge_memory_id`,
-        [knowledgeMemoryId, vectorToLiteral(vector), nowSeconds()],
+        [knowledgeMemoryId, vectorToLiteral(vector), model, dimensions, nowSeconds()],
       );
       if (!rows[0]) {
         throw new Error(`memory-layer: cannot store embedding for missing knowledge ${knowledgeMemoryId}`);
       }
+      // Lazily ensure the partial HNSW index for this dimension exists. Done
+      // after the row is committed so a failing index build never loses data.
+      await ensureHnswIndexForDimension(dimensions);
     },
 
     async getEmbedding(knowledgeMemoryId): Promise<EmbeddingVector | null> {
@@ -3356,22 +3771,30 @@ export function createPostgresEmbeddingAdapter(
       queryVector: EmbeddingVector,
       options,
     ): Promise<SimilarEmbeddingResult[]> {
-      const params = [...scopeParams(scope), vectorToLiteral(queryVector)];
+      // Phase 2.4: exclude dimension-mismatched (and, when known, model-
+      // mismatched) vectors in SQL BEFORE the <=> operator ever runs, so a
+      // mixed-dimension table can never surface the "different vector
+      // dimensions" runtime error. When no filter is supplied we fall back to
+      // legacy behaviour (compare all vectors).
+      const filter = options?.filter;
+      const params: unknown[] = [...scopeParams(scope), vectorToLiteral(queryVector)];
       const minSimilarity = options?.minSimilarity ?? 0;
       const limit = options?.limit ?? 10;
-      params.push(minSimilarity, limit);
-      const vectorParam = params.length - 2;
-      const minSimilarityParam = params.length - 1;
+      const vectorParam = params.length; // last pushed = the query vector
+      const { distExpr, extraClauses } = buildSimilarityClauses(filter, vectorParam, params, 'ke');
+      params.push(minSimilarity);
+      const minSimilarityParam = params.length;
+      params.push(limit);
       const limitParam = params.length;
       const { rows } = await pool.query(
-        `SELECT ke.knowledge_memory_id, 1 - (ke.embedding <=> $${vectorParam}::vector) AS similarity
+        `SELECT ke.knowledge_memory_id, 1 - (${distExpr}) AS similarity
          FROM knowledge_embeddings ke
          JOIN knowledge_memory km ON km.id = ke.knowledge_memory_id
          WHERE ${scopeWhere('ke')}
            AND km.superseded_by_id IS NULL
-           AND km.retired_at IS NULL
-           AND 1 - (ke.embedding <=> $${vectorParam}::vector) >= $${minSimilarityParam}
-         ORDER BY ke.embedding <=> $${vectorParam}::vector ASC
+           AND km.retired_at IS NULL${extraClauses.length ? '\n           AND ' + extraClauses.join('\n           AND ') : ''}
+           AND 1 - (${distExpr}) >= $${minSimilarityParam}
+         ORDER BY ${distExpr} ASC
          LIMIT $${limitParam}`,
         params,
       );
@@ -3387,22 +3810,25 @@ export function createPostgresEmbeddingAdapter(
       queryVector: EmbeddingVector,
       options,
     ): Promise<SimilarEmbeddingResult[]> {
-      const params = [...wideScopeParams(scope, level), vectorToLiteral(queryVector)];
+      const filter = options?.filter;
+      const params: unknown[] = [...wideScopeParams(scope, level), vectorToLiteral(queryVector)];
       const minSimilarity = options?.minSimilarity ?? 0;
       const limit = options?.limit ?? 10;
-      params.push(minSimilarity, limit);
-      const vectorParam = params.length - 2;
-      const minSimilarityParam = params.length - 1;
+      const vectorParam = params.length; // last pushed = the query vector
+      const { distExpr, extraClauses } = buildSimilarityClauses(filter, vectorParam, params, 'ke');
+      params.push(minSimilarity);
+      const minSimilarityParam = params.length;
+      params.push(limit);
       const limitParam = params.length;
       const { rows } = await pool.query(
-        `SELECT ke.knowledge_memory_id, 1 - (ke.embedding <=> $${vectorParam}::vector) AS similarity
+        `SELECT ke.knowledge_memory_id, 1 - (${distExpr}) AS similarity
          FROM knowledge_embeddings ke
          JOIN knowledge_memory km ON km.id = ke.knowledge_memory_id
          WHERE ${wideScopeWhere(scope, level, 'ke')}
            AND km.superseded_by_id IS NULL
-           AND km.retired_at IS NULL
-           AND 1 - (ke.embedding <=> $${vectorParam}::vector) >= $${minSimilarityParam}
-         ORDER BY ke.embedding <=> $${vectorParam}::vector ASC
+           AND km.retired_at IS NULL${extraClauses.length ? '\n           AND ' + extraClauses.join('\n           AND ') : ''}
+           AND 1 - (${distExpr}) >= $${minSimilarityParam}
+         ORDER BY ${distExpr} ASC
          LIMIT $${limitParam}`,
         params,
       );
@@ -3410,6 +3836,38 @@ export function createPostgresEmbeddingAdapter(
         knowledgeMemoryId: Number(row.knowledge_memory_id),
         similarity: Number(row.similarity),
       }));
+    },
+
+    async getEmbeddingCoverage(scope, filter): Promise<EmbeddingCoverage> {
+      // Count active-knowledge embeddings in scope, and how many match the
+      // active provider filter (same predicate as findSimilar, minus the
+      // distance operator). Mirrors the in-memory reference.
+      const params: unknown[] = [...scopeParams(scope)];
+      const matchClauses: string[] = [];
+      if (filter?.dimensions != null) {
+        params.push(filter.dimensions);
+        matchClauses.push(`ke.dimensions = $${params.length}`);
+      }
+      if (filter?.model != null && filter.model !== 'unknown') {
+        // D2: only when the active model is known (see buildSimilarityClauses).
+        params.push(filter.model);
+        matchClauses.push(`(ke.model = $${params.length} OR ke.model = 'unknown')`);
+      }
+      const matchExpr = matchClauses.length ? matchClauses.join(' AND ') : 'TRUE';
+      const { rows } = await pool.query(
+        `SELECT
+           COUNT(*)::int AS total,
+           COUNT(*) FILTER (WHERE ${matchExpr})::int AS matching
+         FROM knowledge_embeddings ke
+         JOIN knowledge_memory km ON km.id = ke.knowledge_memory_id
+         WHERE ${scopeWhere('ke')}
+           AND km.superseded_by_id IS NULL
+           AND km.retired_at IS NULL`,
+        params,
+      );
+      const total = Number(rows[0]?.total ?? 0);
+      const matching = Number(rows[0]?.matching ?? 0);
+      return { total, matching, mismatched: total - matching };
     },
 
     async deleteEmbedding(knowledgeMemoryId, scope): Promise<void> {

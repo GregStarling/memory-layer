@@ -1,6 +1,10 @@
 import type { AliasMap } from '../contracts/aliases.js';
 import type { OntologyConfig } from '../contracts/ontology.js';
-import type { EmbeddingAdapter, EmbeddingGenerator } from '../contracts/embedding.js';
+import type {
+  EmbeddingAdapter,
+  EmbeddingGenerator,
+  EmbeddingQueryFilter,
+} from '../contracts/embedding.js';
 import type {
   ActorRef,
   ContextViewPolicy,
@@ -193,6 +197,12 @@ export interface MemoryManagerConfig {
   extractor?: Extractor;
   embeddingAdapter?: EmbeddingAdapter;
   embeddingGenerator?: EmbeddingGenerator;
+  /**
+   * Identifier of the active embedding model (Phase 2.4). Stored alongside each
+   * vector so mismatched vectors are excluded from similarity search in the
+   * storage layer before any distance comparison. Defaults to `'unknown'`.
+   */
+  embeddingModel?: string;
   logger?: Logger;
   onEvent?: EventHook;
   eventEmitter?: MemoryEventEmitter;
@@ -438,6 +448,17 @@ export interface MemoryManager {
     demotedKnowledgeIds: number[];
   }>;
   runMaintenance(policy?: MaintenancePolicy): Promise<MaintenanceReport>;
+  /**
+   * Re-embed active knowledge whose stored embedding's (model, dimensions) do
+   * not match the active provider (Phase 2.4). Batches through the active
+   * knowledge set, re-embeds mismatched/missing rows with the active provider,
+   * and overwrites their stored vectors + metadata. No-op without an embedding
+   * adapter + generator. Returns the ids that were re-embedded.
+   *
+   * TODO(plan 6.3): expose via HTTP/MCP once the operation registry lands
+   * (transport churn deferred).
+   */
+  reembedKnowledge(options?: { batchSize?: number }): Promise<{ reembeddedIds: number[] }>;
   searchEpisodes(options: EpisodeSearchOptions): Promise<EpisodeSummary[]>;
   summarizeEpisode(sessionId: string, options?: { detailLevel?: EpisodeSummary['detailLevel'] }): Promise<EpisodeSummary>;
   reflect(options: ReflectOptions): Promise<ReflectResult>;
@@ -1258,6 +1279,26 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     }
   }
 
+  const activeEmbeddingModel = config.embeddingModel ?? 'unknown';
+
+  /**
+   * Build the active-provider similarity filter (Phase 2.4, D2) from a query
+   * vector: only stored embeddings with matching dimensions (and model, when
+   * the active model is KNOWN) are compared. When the manager has no configured
+   * embeddingModel (`activeEmbeddingModel === 'unknown'`) the model is OMITTED
+   * so adapters filter by dimensions alone — passing model='unknown' as a strict
+   * filter would wrongly exclude real-model vectors and kill semantic search.
+   * Returns undefined when there is no vector to size.
+   */
+  function activeEmbeddingFilter(
+    queryVector: Float32Array | undefined,
+  ): EmbeddingQueryFilter | undefined {
+    if (!queryVector) return undefined;
+    return activeEmbeddingModel === 'unknown'
+      ? { dimensions: queryVector.length }
+      : { model: activeEmbeddingModel, dimensions: queryVector.length };
+  }
+
   async function maybeEmbedKnowledge(knowledge: KnowledgeMemory[]): Promise<void> {
     if (!config.embeddingAdapter || !config.embeddingGenerator || knowledge.length === 0) {
       return;
@@ -1269,7 +1310,10 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       for (const [index, item] of knowledge.entries()) {
         const vector = vectors[index];
         if (vector) {
-          await config.embeddingAdapter!.storeEmbedding(item.id, vector);
+          await config.embeddingAdapter!.storeEmbedding(item.id, vector, {
+            model: activeEmbeddingModel,
+            dimensions: vector.length,
+          });
         }
       }
     } catch (error) {
@@ -1328,6 +1372,38 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       return filteredLexical;
     }
 
+    const embeddingFilter = activeEmbeddingFilter(queryVector);
+
+    // Detect silently-degraded semantic search (Phase 2.4): if stored
+    // embeddings exist for this scope but NONE match the active provider's
+    // model/dimensions, similarity search will return nothing on merit —
+    // surface a degraded-mode event so operators can see it and trigger reembed.
+    if (embeddingFilter && level === 'scope' && config.embeddingAdapter.getEmbeddingCoverage) {
+      try {
+        const coverage = await config.embeddingAdapter.getEmbeddingCoverage(
+          config.scope,
+          embeddingFilter,
+        );
+        if (coverage.total > 0 && coverage.matching === 0) {
+          emitDegradation('embeddings', {
+            stage: 'semantic_search',
+            reason: 'all_stored_embeddings_mismatch',
+            activeModel: activeEmbeddingModel,
+            activeDimensions: embeddingFilter.dimensions,
+            storedTotal: coverage.total,
+            storedMismatched: coverage.mismatched,
+          });
+          emitRetrievalFallback('semantic_search_failed', {
+            stage: 'semantic_search',
+            reason: 'all_stored_embeddings_mismatch',
+            scopeLevel: level,
+          });
+        }
+      } catch {
+        // Coverage diagnostics are best-effort; never fail the query on them.
+      }
+    }
+
     let semantic: Array<{ knowledgeMemoryId: number; similarity: number }>;
     try {
       semantic =
@@ -1335,10 +1411,12 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
           ? await config.embeddingAdapter.findSimilar(config.scope, queryVector, {
               limit: options?.limit ?? 10,
               minSimilarity: resolvedContextPolicy.semanticMinSimilarity,
+              filter: embeddingFilter,
             })
           : await config.embeddingAdapter.findSimilarCrossScope(config.scope, level, queryVector, {
               limit: options?.limit ?? 10,
               minSimilarity: resolvedContextPolicy.semanticMinSimilarity,
+              filter: embeddingFilter,
             });
     } catch (error) {
       config.logger?.warn('memory.embeddings.semantic_search_failed', {
@@ -1444,6 +1522,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       relevanceQuery,
       queryVector,
       embeddingAdapter: config.embeddingAdapter,
+      embeddingFilter: activeEmbeddingFilter(queryVector),
       crossScopeLevel: resolvedOptions.contract?.crossScopeLevel ?? config.crossScopeLevel,
       policy: config.contextPolicy,
       contract: resolvedOptions.contract,
@@ -2811,11 +2890,102 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         deletedAssociationCount: report.deletedAssociationIds.length,
         reverifiedKnowledgeCount: report.reverifiedKnowledgeIds.length,
         demotedKnowledgeCount: report.demotedKnowledgeIds.length,
+        expiredWorkClaimCount: report.expiredWorkClaimIds.length,
+        expiredHandoffCount: report.expiredHandoffIds.length,
       });
       await refreshSessionStateProjection();
       lastMaintenanceReport = report;
       lastMaintenanceTimestamp = Math.floor(Date.now() / 1000);
       return report;
+    },
+
+    async reembedKnowledge(options) {
+      // Phase 2.4: batch re-embed active knowledge whose stored (model,
+      // dimensions) mismatch the active provider (or has no stored vector).
+      // No-op without a provider; TODO(plan 6.3) transport routes deferred.
+      const reembeddedIds: number[] = [];
+      if (!config.embeddingAdapter || !config.embeddingGenerator) {
+        return { reembeddedIds };
+      }
+      const batchSize = Math.max(1, options?.batchSize ?? 50);
+      const activeKnowledge = await asyncAdapter.getActiveKnowledgeMemory(config.scope);
+
+      // Probe the active provider's dimensionality once.
+      let activeDims: number | undefined;
+      try {
+        const [probe] = await circuitBreakers.embeddings.execute(() =>
+          config.embeddingGenerator!(['__reembed_probe__']),
+        );
+        activeDims = probe?.length;
+      } catch {
+        activeDims = undefined;
+      }
+
+      // D3: staleness is metadata-aware. A stored embedding is stale when
+      // dimensions differ from the active provider OR (the active model is known
+      // AND the stored model differs) — the same-dimension model swap that a
+      // length-only check misses. getEmbeddingMetadata exposes the stored model;
+      // adapters that predate it fall back to a length-only check.
+      const readMetadata = config.embeddingAdapter.getEmbeddingMetadata?.bind(
+        config.embeddingAdapter,
+      );
+      const stale: KnowledgeMemory[] = [];
+      for (const item of activeKnowledge) {
+        if (readMetadata) {
+          const meta = await readMetadata(item.id);
+          if (
+            !meta ||
+            (activeDims != null && meta.dimensions !== activeDims) ||
+            (activeEmbeddingModel !== 'unknown' && meta.model !== activeEmbeddingModel)
+          ) {
+            stale.push(item);
+          }
+        } else {
+          const stored = await config.embeddingAdapter.getEmbedding(item.id);
+          if (!stored || (activeDims != null && stored.length !== activeDims)) {
+            stale.push(item);
+          }
+        }
+      }
+
+      for (let i = 0; i < stale.length; i += batchSize) {
+        const batch = stale.slice(i, i + batchSize);
+        try {
+          const vectors = await circuitBreakers.embeddings.execute(() =>
+            config.embeddingGenerator!(batch.map((item) => item.fact)),
+          );
+          for (const [index, item] of batch.entries()) {
+            const vector = vectors[index];
+            if (!vector) continue;
+            await config.embeddingAdapter!.storeEmbedding(item.id, vector, {
+              model: activeEmbeddingModel,
+              dimensions: vector.length,
+            });
+            reembeddedIds.push(item.id);
+          }
+        } catch (error) {
+          config.logger?.warn('memory.embeddings.reembed_failed', {
+            error: String(error),
+            batchStart: i,
+            batchSize: batch.length,
+          });
+          emitDegradation('embeddings', {
+            stage: 'reembed',
+            error: String(error),
+            batchStart: i,
+          });
+        }
+      }
+
+      emitMemoryEvent('manager', config.scope, { logger: config.logger, onEvent }, 0, {
+        action: 'reembed_knowledge',
+        activeModel: activeEmbeddingModel,
+        activeDimensions: activeDims ?? null,
+        candidateCount: stale.length,
+        reembeddedCount: reembeddedIds.length,
+      });
+
+      return { reembeddedIds };
     },
 
     async searchEpisodes(options) {

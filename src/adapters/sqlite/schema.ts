@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-export const CURRENT_SCHEMA_VERSION = 20;
+export const CURRENT_SCHEMA_VERSION = 21;
 
 /**
  * Returns true when a failed `ALTER TABLE ... ADD COLUMN` probe is benign for
@@ -904,6 +904,38 @@ export function createSQLiteSchema(database: Database.Database): void {
       // no-op because the _v17 tables already exist.
       renameContractsToV17(database);
       rebuildContractsFromV17IfPresent(database);
+    }
+
+    // ── v21 (Phase 2.4): embedding provenance columns ───────────────────────
+    // Make the knowledge_embeddings table AND its `model`/`dimensions`
+    // provenance columns a REAL gated migration so a v21 stamp genuinely implies
+    // the columns exist. Previously these columns were added lazily by
+    // ensureEmbeddingSchema (embeddings.ts) only when the embedding adapter was
+    // constructed — so a plain createSQLiteAdapter stamped v21 without the schema
+    // change, and the Phase 0 downgrade guard then blocked reopening with 4.2.x
+    // for no real change. Idempotent + transactional; the version stamp below
+    // runs last, so a crash before it rolls the whole migration back.
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS knowledge_embeddings (
+        knowledge_memory_id INTEGER PRIMARY KEY REFERENCES knowledge_memory(id) ON DELETE CASCADE,
+        vector BLOB NOT NULL,
+        dimensions INTEGER,
+        model TEXT NOT NULL DEFAULT 'unknown',
+        created_at INTEGER NOT NULL
+      );
+    `);
+    if (existingVersion < 21) {
+      // Pre-v21 databases created knowledge_embeddings without the `model` column.
+      // Add it idempotently, then backfill `dimensions` from the packed Float32
+      // blob length (4 bytes per component) for any legacy row missing it.
+      try {
+        database.exec("ALTER TABLE knowledge_embeddings ADD COLUMN model TEXT NOT NULL DEFAULT 'unknown'");
+      } catch (error) {
+        if (!isBenignAlterProbeError(error)) throw error;
+      }
+      database.exec(
+        'UPDATE knowledge_embeddings SET dimensions = length(vector) / 4 WHERE dimensions IS NULL',
+      );
     }
 
     // ── Stamp the schema version LAST ───────────────────────────────────────

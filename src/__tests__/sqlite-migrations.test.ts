@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 
 import { createSQLiteSchema, CURRENT_SCHEMA_VERSION } from '../adapters/sqlite/schema.js';
+import { createSQLiteAdapterWithEmbeddings } from '../adapters/sqlite/index.js';
 
 /**
  * Build a database at schema version 17 with a v17-shaped context_contracts
@@ -102,6 +103,100 @@ describe('SQLite migrations (plan 0.3)', () => {
     expect(tableExists(db, 'work_claims_current')).toBe(true);
     expect(tableExists(db, 'work_claims_history')).toBe(true);
     db.close();
+  });
+
+  it('is stamped at v21 for the embedding model/dimensions versioning (2.4)', () => {
+    const db = new Database(join(dir, 'v21.db'));
+    createSQLiteSchema(db);
+    expect(CURRENT_SCHEMA_VERSION).toBe(21);
+    expect(schemaVersion(db)).toBe(21);
+    db.close();
+  });
+
+  function embeddingColumns(db: Database.Database): string[] {
+    return (db.prepare("PRAGMA table_info('knowledge_embeddings')").all() as Array<{
+      name: string;
+    }>).map((c) => c.name);
+  }
+
+  it('createSQLiteSchema alone (no embedding adapter) produces the v21 model/dimensions columns (item 6)', () => {
+    // Regression: v21 must be a REAL migration in schema.ts, not a bare version
+    // stamp. Before the fix, the columns lived only in ensureEmbeddingSchema
+    // (run when the embedding adapter is constructed), so a plain
+    // createSQLiteSchema stamped v21 without the columns — and the Phase 0
+    // downgrade guard then blocked reopening with 4.2.x for no real change.
+    const db = new Database(join(dir, 'plain-v21.db'));
+    createSQLiteSchema(db);
+    expect(schemaVersion(db)).toBe(21);
+    const columns = embeddingColumns(db);
+    expect(columns).toContain('model');
+    expect(columns).toContain('dimensions');
+    db.close();
+  });
+
+  it('migrates a v20 db: adds model, backfills dimensions from blob length, and reopen no-ops (item 6)', () => {
+    const path = join(dir, 'v20.db');
+    const seed = new Database(path);
+    // A pre-v21 (v20) database: stamped at 20 with a legacy knowledge_embeddings
+    // table that lacks the `model` column and has a NULL-dimensions row
+    // (a 3-float vector = 12 bytes). createSQLiteSchema builds the rest via
+    // IF NOT EXISTS.
+    seed.exec(`
+      CREATE TABLE schema_meta (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        schema_version INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE knowledge_embeddings (
+        knowledge_memory_id INTEGER PRIMARY KEY,
+        vector BLOB NOT NULL,
+        dimensions INTEGER,
+        created_at INTEGER NOT NULL
+      );
+    `);
+    seed.prepare('INSERT INTO schema_meta (id, schema_version, updated_at) VALUES (1, 20, 0)').run();
+    const buf = Buffer.from(new Float32Array([1, 0, 0]).buffer);
+    seed
+      .prepare('INSERT INTO knowledge_embeddings (knowledge_memory_id, vector, dimensions, created_at) VALUES (?, ?, NULL, 0)')
+      .run(1, buf);
+    seed.close();
+
+    // First open runs the v21 migration: adds `model`, backfills dimensions
+    // (12 bytes / 4 = 3), stamps v21.
+    const first = new Database(path);
+    createSQLiteSchema(first);
+    expect(schemaVersion(first)).toBe(21);
+    expect(embeddingColumns(first)).toContain('model');
+    const row = first
+      .prepare('SELECT dimensions, model FROM knowledge_embeddings WHERE knowledge_memory_id = 1')
+      .get() as { dimensions: number; model: string };
+    expect(row.dimensions).toBe(3);
+    expect(row.model).toBe('unknown');
+    first.close();
+
+    // Reopen is a no-op (idempotent): the row is untouched and version stays v21.
+    const second = new Database(path);
+    createSQLiteSchema(second);
+    expect(schemaVersion(second)).toBe(21);
+    const reRow = second
+      .prepare('SELECT dimensions, model FROM knowledge_embeddings WHERE knowledge_memory_id = 1')
+      .get() as { dimensions: number; model: string };
+    expect(reRow).toEqual({ dimensions: 3, model: 'unknown' });
+    second.close();
+  });
+
+  it('the embedding adapter path also carries the model/dimensions columns (2.4)', () => {
+    // The defensive ensureEmbeddingSchema still yields the same shape when the
+    // embedding adapter is constructed on a fresh database.
+    const path = join(dir, 'adapter-embeddings.db');
+    const adapter = createSQLiteAdapterWithEmbeddings(path);
+    const raw = adapter as unknown as { close(): void };
+    const inner = new Database(path);
+    const columns = embeddingColumns(inner);
+    expect(columns).toContain('model');
+    expect(columns).toContain('dimensions');
+    inner.close();
+    raw.close();
   });
 
   it('completes the v17→v18 rebuild and stamps the version last', () => {

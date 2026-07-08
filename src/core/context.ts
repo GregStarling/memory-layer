@@ -46,6 +46,8 @@ export interface ContextAssemblyOptions {
   tokenBudget?: number;
   queryVector?: EmbeddingVector;
   embeddingAdapter?: EmbeddingAdapter;
+  /** Active-provider filter (Phase 2.4): excludes mismatched vectors in-store. */
+  embeddingFilter?: { model?: string; dimensions?: number };
   policy?: ContextPolicy;
   logger?: Logger;
   onEvent?: EventHook;
@@ -981,11 +983,13 @@ export async function buildMemoryContext(
             {
               limit: policy.maxKnowledgeItems * 2,
               minSimilarity: policy.semanticMinSimilarity,
+              filter: options.embeddingFilter,
             },
           )
         : await options.embeddingAdapter.findSimilar(normalizedScope, options.queryVector, {
             limit: policy.maxKnowledgeItems * 2,
             minSimilarity: policy.semanticMinSimilarity,
+            filter: options.embeddingFilter,
           });
       semanticRanks = normalizeSemanticRanks(semanticResults);
     } catch (error) {

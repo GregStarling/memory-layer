@@ -15,6 +15,8 @@ function makeMaintenanceReport(overrides: Partial<MaintenanceReport> = {}): Main
     reverifiedKnowledgeIds: [],
     demotedKnowledgeIds: [],
     expiredCandidateIds: [],
+    expiredWorkClaimIds: [],
+    expiredHandoffIds: [],
     ...overrides,
   };
 }

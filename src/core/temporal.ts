@@ -245,9 +245,10 @@ export function foldTemporalState(
   const playbooks = new Map<string, Playbook>();
   const sessionStates = new Map<string, SessionStateProjection>();
 
-  for (const event of [...events].sort(
-    (a, b) => a.created_at - b.created_at || compareTemporalIds(a.event_id, b.event_id),
-  )) {
+  // Ordering contract (Phase 2.3): fold in event_id ASC order alone. event_id
+  // is the append-only causal write order; created_at is display metadata and
+  // may be backdated, so it must never influence fold order.
+  for (const event of [...events].sort((a, b) => compareTemporalIds(a.event_id, b.event_id))) {
     const payload = event.payload ?? {};
     const after = payload.after as Record<string, unknown> | undefined;
     const before = payload.before as Record<string, unknown> | undefined;
@@ -286,7 +287,18 @@ export function foldTemporalState(
         }
         break;
       case 'playbook':
-        if (after) playbooks.set(event.entity_id, after as unknown as Playbook);
+        // D1: both the initial `playbook.created` snapshot and the
+        // `playbook.updated` after-snapshot emitted by insertPlaybookRevision
+        // carry the full playbook, so a replayed playbook's revision_count and
+        // updated_at track the live values. Default revision_count for
+        // forward-compat with pre-Phase-2 logs whose snapshots predate it.
+        if (after) {
+          const playbook = after as unknown as Playbook;
+          playbooks.set(event.entity_id, {
+            ...playbook,
+            revision_count: playbook.revision_count ?? 0,
+          });
+        }
         break;
       case 'session_state':
         if (after) sessionStates.set(event.entity_id, after as unknown as SessionStateProjection);
@@ -525,6 +537,7 @@ export function createTemporalReplayAdapter(
         }
         return true;
       }),
+    expireStaleClaims: async () => unsupported('expireStaleClaims'),
     listWorkClaimsCrossScope: async (scope, level, options?: WorkClaimQuery) =>
       replayState.workClaims.filter((claim) => {
         if (!matchesScopeLevel(claim, scope, level)) return false;
@@ -581,6 +594,7 @@ export function createTemporalReplayAdapter(
         if (options.direction === 'outbound') return outbound;
         return inbound || outbound;
       }),
+    expireStaleHandoffs: async () => unsupported('expireStaleHandoffs'),
     upsertContextMonitor: () => unsupported('upsertContextMonitor'),
     getContextMonitor: async () => null,
     insertCompactionLog: () => unsupported('insertCompactionLog'),

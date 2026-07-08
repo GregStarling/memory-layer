@@ -14,6 +14,9 @@
 --   v12 associations + full knowledge_memory parity with SQLite
 --   v13 temporal event log + session_state_current + projection_watermarks
 --   v14 coordination visibility + work claims + handoffs
+--   v15 source_documents + knowledge_evidence.source_document_id
+--   v16 durable scope_config
+--   v20 embedding model + dimensions versioning; lazy per-dimension HNSW
 -- Postgres tracks applied versions in schema_version.
 
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -405,18 +408,45 @@ CREATE TABLE IF NOT EXISTS knowledge_embeddings (
   collaboration_id TEXT NOT NULL DEFAULT '',
   scope_id TEXT NOT NULL,
   embedding vector,
+  model TEXT NOT NULL DEFAULT 'unknown',
+  dimensions INTEGER,
   created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER)
 );
 
 CREATE INDEX IF NOT EXISTS idx_ke_scope ON knowledge_embeddings (tenant_id, system_id, workspace_id, collaboration_id, scope_id);
+
+-- v20 (Phase 2.4): embedding model + dimension versioning.
+-- The vector column stays UNTYPED. Similarity queries filter
+-- `WHERE dimensions = <query dims>` (and model when known) in SQL BEFORE any
+-- distance operator runs, so vectors of a different dimensionality are never
+-- fed to `<=>` — this eliminates the "different vector dimensions" runtime
+-- error class entirely.
+ALTER TABLE knowledge_embeddings ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE knowledge_embeddings ADD COLUMN IF NOT EXISTS dimensions INTEGER;
+-- Backfill dimensions for pre-v20 rows from the stored vector length where the
+-- vector is present. vector_dims() is a pgvector function; guarded so a DB
+-- without the extension (or with all-NULL embeddings) still applies cleanly.
 DO $$
 BEGIN
-  CREATE INDEX IF NOT EXISTS idx_ke_embedding_hnsw
-    ON knowledge_embeddings
-    USING hnsw (embedding vector_cosine_ops);
+  UPDATE knowledge_embeddings
+    SET dimensions = vector_dims(embedding)
+    WHERE dimensions IS NULL AND embedding IS NOT NULL;
 EXCEPTION WHEN OTHERS THEN
-  RAISE NOTICE 'HNSW index skipped (vector column has no fixed dimensions): %', SQLERRM;
+  RAISE NOTICE 'embedding dimensions backfill skipped: %', SQLERRM;
 END $$;
+CREATE INDEX IF NOT EXISTS idx_ke_dimensions ON knowledge_embeddings (dimensions);
+
+-- HNSW indexes are created LAZILY, one partial index per distinct dimension,
+-- at storeEmbedding time in the adapter (see createPostgresEmbeddingAdapter):
+--
+--   CREATE INDEX IF NOT EXISTS emb_hnsw_<N>
+--     ON knowledge_embeddings USING hnsw ((embedding::vector(N)) vector_cosine_ops)
+--     WHERE dimensions = N;
+--
+-- A single dimensionless HNSW index is impossible (pgvector requires a fixed
+-- typed dimension for hnsw), which is why the old always-swallowed DO $$ block
+-- (commit 67ef502) never actually built an index. Per-dimension partial indexes
+-- replace it; each is a real, planner-usable index scoped to the matching rows.
 
 -- Full-text search on turns
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS search_vector TSVECTOR;
@@ -719,5 +749,5 @@ ALTER TABLE associations ADD COLUMN IF NOT EXISTS visibility_class TEXT NOT NULL
 -- Record all applied schema versions so upgrades are visible and auditable.
 -- ON CONFLICT DO NOTHING keeps this idempotent across repeated applies.
 INSERT INTO schema_version (version) VALUES
-  (1), (9), (10), (11), (12), (13), (14), (15), (16)
+  (1), (9), (10), (11), (12), (13), (14), (15), (16), (20)
 ON CONFLICT DO NOTHING;

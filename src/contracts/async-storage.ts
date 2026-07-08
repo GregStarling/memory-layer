@@ -206,6 +206,16 @@ export interface AsyncStorageAdapter {
     level: ScopeLevel,
     options?: WorkClaimQuery,
   ): Promise<WorkClaim[]>;
+  /**
+   * Transition every active claim in `scope` whose lease has expired
+   * (`expires_at <= now`) to `expired`, writing the expiry and emitting exactly
+   * one `work_claim.expired` event per claim (Phase 2.5 "reaper").
+   *
+   * Read paths compute *effective* status without writing; this is the durable
+   * expiry write path called from the maintenance pipeline. Transactional.
+   * Returns the ids of the claims that were expired by this call.
+   */
+  expireStaleClaims(scope: MemoryScope, now: number): Promise<number[]>;
   createHandoff(input: NewHandoffInput): Promise<HandoffRecord>;
   getHandoffById(handoffId: number): Promise<HandoffRecord | null>;
   acceptHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null>;
@@ -217,6 +227,17 @@ export interface AsyncStorageAdapter {
     level: ScopeLevel,
     options?: HandoffQuery,
   ): Promise<HandoffRecord[]>;
+  /**
+   * Transition every pending handoff in `scope` whose lease has expired
+   * (`expires_at != null && expires_at <= now`) to `expired`, writing the expiry
+   * and emitting exactly one `handoff.expired` event per handoff (Phase 2.5
+   * "reaper", handoff analogue of {@link expireStaleClaims}).
+   *
+   * Read paths compute *effective* status without writing; this is the durable
+   * expiry write path called from the maintenance pipeline. Transactional.
+   * Returns the ids of the handoffs that were expired by this call.
+   */
+  expireStaleHandoffs(scope: MemoryScope, now: number): Promise<number[]>;
 
   upsertContextMonitor(input: ContextMonitorUpsert): Promise<ContextMonitor>;
   getContextMonitor(scope: MemoryScope): Promise<ContextMonitor | null>;
