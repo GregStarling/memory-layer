@@ -105,6 +105,7 @@ import { assessContext } from './monitor.js';
 import { runMaintenance, type MaintenanceReport } from './maintenance.js';
 import { emitMemoryEvent } from './telemetry.js';
 import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
+import { isBaseVisible } from '../adapters/shared/index.js';
 import { estimateTokens, type TokenEstimator } from './tokens.js';
 import {
   createCircuitBreaker,
@@ -1454,7 +1455,15 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         semanticOnlyIds.map((id) => asyncAdapter.getKnowledgeMemoryById(id)),
       );
       for (const km of fetched) {
-        if (km) fetchedKnowledgeMap.set(km.id, km);
+        // F4/P6 defensive gate: semantic-only hits are hydrated via the UNSCOPED
+        // getKnowledgeMemoryById, which bypasses the cross-scope visibility WHERE
+        // clause the adapters apply in findSimilarCrossScope. Re-apply the base
+        // visibility predicate here so a private fact from another scope can never
+        // surface through the semantic dimension even if the embedding index leaks
+        // its id. Same-scope hits pass trivially (item scope === query scope).
+        if (km && isBaseVisible(km.visibility_class, km, config.scope)) {
+          fetchedKnowledgeMap.set(km.id, km);
+        }
       }
     }
 

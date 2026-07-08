@@ -33,6 +33,42 @@ function scopeParamsForLevel(scope: MemoryScope, level: ScopeLevel): string[] {
 }
 
 /**
+ * F4 base-visibility predicate for the SEMANTIC cross-scope read, mirroring
+ * `shared/visibility.isBaseVisible` and the SQL form in the SQLite adapter's
+ * `visibilityWhereForScope`. Without it, `findSimilarCrossScope` widens by
+ * scope-level only and leaks a `private`/`shared_collaboration` fact's id (and,
+ * once the manager hydrates it, its fact text) to another scope via semantic
+ * search. ANDed with the scope-level clause, it admits a row only if the reader
+ * is permitted to see it given `km.visibility_class`. Same-tenant is already
+ * guaranteed by the scope-level clause (every widening level binds
+ * `km.tenant_id = ?`). NULL / unrecognized visibility_class → treated as
+ * `private` (the shared helper's default branch). Params are all strings, in
+ * the same order the clause references them.
+ */
+function visibilityWhereForScope(scope: MemoryScope): { clause: string; params: string[] } {
+  const n = normalizeScope(scope);
+  const clause =
+    `(km.visibility_class = 'tenant'` +
+    ` OR (km.visibility_class = 'workspace' AND km.workspace_id = ?)` +
+    ` OR (km.visibility_class = 'shared_collaboration' AND km.workspace_id = ?` +
+    ` AND km.collaboration_id <> '' AND km.collaboration_id = ?)` +
+    ` OR ((km.visibility_class IS NULL OR km.visibility_class NOT IN ('tenant', 'workspace', 'shared_collaboration'))` +
+    ` AND km.system_id = ? AND km.workspace_id = ? AND km.collaboration_id = ? AND km.scope_id = ?))`;
+  return {
+    clause,
+    params: [
+      n.workspace_id,
+      n.workspace_id,
+      n.collaboration_id,
+      n.system_id,
+      n.workspace_id,
+      n.collaboration_id,
+      n.scope_id,
+    ],
+  };
+}
+
+/**
  * Build the SQL fragment + params that exclude vectors whose stored metadata
  * does NOT match the active-provider filter (Phase 2.4). Mismatched vectors are
  * removed IN SQL — before any cosine comparison — so a vector from a different
@@ -222,14 +258,18 @@ export function createSQLiteEmbeddingAdapter(
       options,
     ): SimilarEmbeddingResult[] {
       const filter = buildFilterClause(options?.filter);
+      // F4: base-visibility gate so private/shared_collaboration facts do not
+      // leak across scope via semantic search (mirrors the lexical cross-scope fix).
+      const visibility = visibilityWhereForScope(scope);
       const rows = db
         .prepare(
           `SELECT ke.knowledge_memory_id, ke.vector
            FROM knowledge_embeddings ke
            JOIN knowledge_memory km ON km.id = ke.knowledge_memory_id
-           WHERE ${scopeWhereForLevel(scope, level)} AND km.superseded_by_id IS NULL AND km.retired_at IS NULL${filter.clause}`,
+           WHERE ${scopeWhereForLevel(scope, level)} AND km.superseded_by_id IS NULL AND km.retired_at IS NULL
+             AND ${visibility.clause}${filter.clause}`,
         )
-        .all(...scopeParamsForLevel(scope, level), ...filter.params) as Array<{
+        .all(...scopeParamsForLevel(scope, level), ...visibility.params, ...filter.params) as Array<{
         knowledge_memory_id: number;
         vector: Buffer;
       }>;

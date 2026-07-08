@@ -17,6 +17,10 @@
 --   v15 source_documents + knowledge_evidence.source_document_id
 --   v16 durable scope_config
 --   v20 embedding model + dimensions versioning; lazy per-dimension HNSW
+--   v21 context governance tables (contracts/invariants/escalation) — Phase 3.8;
+--       source_documents.tenant_id DEFAULT dropped — Phase 3.9
+--       (knowledge_memory.visibility_class has existed since v12; Phase 3.6 now
+--        persists + filters on it in the adapter — no schema change needed)
 -- Postgres tracks applied versions in schema_version.
 
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -746,8 +750,83 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_scope_config_key
 ALTER TABLE knowledge_evidence ADD COLUMN IF NOT EXISTS source_document_id INTEGER REFERENCES source_documents(id) ON DELETE SET NULL;
 ALTER TABLE associations ADD COLUMN IF NOT EXISTS visibility_class TEXT NOT NULL DEFAULT 'private';
 
+-- v21 (Phase 3.9 / P9): tighten source_documents.tenant_id — drop the DEFAULT ''
+-- so a caller can no longer silently create a document in the empty tenant and
+-- co-mingle scopes. NOT NULL is retained; the adapter always supplies a
+-- normalized tenant_id (normalizeScope), so this is defense-in-depth. Forward-
+-- only + idempotent: DROP DEFAULT is a no-op if already dropped, and existing
+-- rows are untouched. (The audit lists all source_documents scope columns; only
+-- tenant_id is tightened here to match the SQLite worker's mirror and the
+-- Kernel handoff, which name tenant_id specifically.)
+ALTER TABLE source_documents ALTER COLUMN tenant_id DROP DEFAULT;
+
+-- v21 (Phase 3.8): durable context governance on Postgres — hosted parity with
+-- the SQLite v18 shape. Without these, hosted (pg) deployments silently did not
+-- persist context contracts / invariants / escalation policies. Soft-delete
+-- (is_deleted) so getGovernanceState can reconstruct deletedContractNames /
+-- deletedInvariantIds exactly like SQLite.
+CREATE TABLE IF NOT EXISTS context_contracts (
+  id SERIAL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  system_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL DEFAULT 'default',
+  collaboration_id TEXT NOT NULL DEFAULT '',
+  scope_id TEXT NOT NULL,
+  name TEXT,
+  is_default BOOLEAN NOT NULL DEFAULT FALSE,
+  is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+  contract_json TEXT,
+  created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER),
+  updated_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER),
+  CHECK ((is_default AND name IS NULL) OR (NOT is_default AND name IS NOT NULL)),
+  CHECK ((NOT is_deleted AND contract_json IS NOT NULL) OR (is_deleted AND contract_json IS NULL))
+);
+-- One default contract per scope; one named contract per (scope, name).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ctx_contract_scope_default
+  ON context_contracts (tenant_id, system_id, workspace_id, collaboration_id, scope_id)
+  WHERE is_default;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ctx_contract_scope_name
+  ON context_contracts (tenant_id, system_id, workspace_id, collaboration_id, scope_id, name)
+  WHERE NOT is_default;
+
+CREATE TABLE IF NOT EXISTS context_invariants (
+  id SERIAL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  system_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL DEFAULT 'default',
+  collaboration_id TEXT NOT NULL DEFAULT '',
+  scope_id TEXT NOT NULL,
+  invariant_id TEXT NOT NULL,
+  title TEXT,
+  instruction TEXT,
+  severity TEXT,
+  scope_level TEXT,
+  is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER),
+  updated_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER),
+  CHECK (
+    (NOT is_deleted AND title IS NOT NULL AND instruction IS NOT NULL) OR
+    (is_deleted AND title IS NULL AND instruction IS NULL AND severity IS NULL AND scope_level IS NULL)
+  )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ctx_invariant_scope_id
+  ON context_invariants (tenant_id, system_id, workspace_id, collaboration_id, scope_id, invariant_id);
+
+CREATE TABLE IF NOT EXISTS context_escalation_policies (
+  id SERIAL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  system_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL DEFAULT 'default',
+  collaboration_id TEXT NOT NULL DEFAULT '',
+  scope_id TEXT NOT NULL,
+  policy_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER),
+  updated_at INTEGER NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::INTEGER),
+  UNIQUE (tenant_id, system_id, workspace_id, collaboration_id, scope_id)
+);
+
 -- Record all applied schema versions so upgrades are visible and auditable.
 -- ON CONFLICT DO NOTHING keeps this idempotent across repeated applies.
 INSERT INTO schema_version (version) VALUES
-  (1), (9), (10), (11), (12), (13), (14), (15), (16), (20)
+  (1), (9), (10), (11), (12), (13), (14), (15), (16), (20), (21)
 ON CONFLICT DO NOTHING;

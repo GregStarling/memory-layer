@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-export const CURRENT_SCHEMA_VERSION = 21;
+export const CURRENT_SCHEMA_VERSION = 22;
 
 /**
  * Returns true when a failed `ALTER TABLE ... ADD COLUMN` probe is benign for
@@ -554,6 +554,12 @@ export function createSQLiteSchema(database: Database.Database): void {
       tags                     TEXT    NOT NULL DEFAULT '[]',
       rationale                TEXT,
       status                   TEXT    NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'deprecated', 'archived')),
+      -- P6: playbooks is CREATEd after the coordinationAlterStatements block, so
+      -- the idempotent ALTER TABLE playbooks ADD COLUMN visibility_class above
+      -- hits "no such table" on a fresh DB and is skipped; the column must be
+      -- declared here so fresh installs carry it (upgraded DBs get it via the
+      -- ALTER, which runs once the table already exists).
+      visibility_class         TEXT    NOT NULL DEFAULT 'private',
       source_session_id        TEXT,
       source_working_memory_id INTEGER REFERENCES working_memory(id),
       revision_count           INTEGER NOT NULL DEFAULT 0,
@@ -790,7 +796,11 @@ export function createSQLiteSchema(database: Database.Database): void {
 
     CREATE TABLE IF NOT EXISTS source_documents (
       id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-      tenant_id          TEXT    NOT NULL DEFAULT '',
+      -- 3.9: tenant_id is NOT NULL without a '' default so a document can never be
+      -- silently ingested into the empty/global tenant. Callers always supply it
+      -- via normalizeScope (which rejects an empty tenant); the other scope
+      -- columns retain '' defaults as legitimate "unscoped-within-tenant" values.
+      tenant_id          TEXT    NOT NULL,
       system_id          TEXT    NOT NULL DEFAULT '',
       workspace_id       TEXT    NOT NULL DEFAULT '',
       collaboration_id   TEXT    NOT NULL DEFAULT '',
@@ -936,6 +946,26 @@ export function createSQLiteSchema(database: Database.Database): void {
       database.exec(
         'UPDATE knowledge_embeddings SET dimensions = length(vector) / 4 WHERE dimensions IS NULL',
       );
+    }
+
+    if (existingVersion < 22) {
+      // v22 (Phase 3.6 / P6): visibility_class is now persisted on knowledge
+      // inserts AND filtered on every cross-scope read. The column itself is
+      // added idempotently above (coordinationAlterStatements); this block adds
+      // the supporting composite index for the cross-scope visibility predicate
+      // (scope columns + visibility_class) and backfills any legacy row whose
+      // visibility_class is NULL to the 'private' default so the predicate treats
+      // unstamped rows as private (fail-closed).
+      database.exec(
+        "UPDATE knowledge_memory SET visibility_class = 'private' WHERE visibility_class IS NULL",
+      );
+      try {
+        database.exec(
+          'CREATE INDEX IF NOT EXISTS idx_km_visibility ON knowledge_memory(tenant_id, system_id, workspace_id, collaboration_id, scope_id, visibility_class)',
+        );
+      } catch (error) {
+        if (!isBenignIndexProbeError(error)) throw error;
+      }
     }
 
     // ── Stamp the schema version LAST ───────────────────────────────────────

@@ -723,8 +723,15 @@ describe('temporal replay helpers', () => {
       created_at: 100,
     });
 
+    // F4: cross-scope event reads apply the base visibility gate, so the replay
+    // state must be reconstructed from a scope that legitimately SEES the seeded
+    // rows. localScope owns the private local rows (visible to itself) and shares
+    // the workspace with the peer's workspace-class rows, so a workspace-level
+    // cross-scope read from localScope captures the full seeded set. The private
+    // local rows are then still correctly EXCLUDED from cross-scope reads issued
+    // by workspaceLocal (a different scope_id) below.
     const replayState = foldTemporalState(
-      await listAllMemoryEventsCrossScope(asyncAdapter, workspaceLocal, 'workspace'),
+      await listAllMemoryEventsCrossScope(asyncAdapter, localScope, 'workspace'),
     );
     const replay = createTemporalReplayAdapter(replayState, 200);
 
@@ -746,7 +753,9 @@ describe('temporal replay helpers', () => {
 
     await expect(replay.getKnowledgeMemoryById(localKnowledge.id)).resolves.toMatchObject({ id: localKnowledge.id });
     await expect(replay.getActiveKnowledgeMemory(localScope)).resolves.toHaveLength(1);
-    await expect(replay.getActiveKnowledgeCrossScope(workspaceLocal, 'workspace')).resolves.toHaveLength(2);
+    // F4: workspaceLocal (scope_id 'mine') sees only the peer's WORKSPACE-class
+    // fact; the local PRIVATE fact (scope_id 'thread-1') is correctly excluded.
+    await expect(replay.getActiveKnowledgeCrossScope(workspaceLocal, 'workspace')).resolves.toHaveLength(1);
     await expect(
       replay.getKnowledgeSince(workspaceLocal, 'workspace', workspaceKnowledge.created_at),
     ).resolves.toEqual(
@@ -763,9 +772,11 @@ describe('temporal replay helpers', () => {
 
     await expect(replay.getWorkItemById(localWorkItem.id)).resolves.toMatchObject({ id: localWorkItem.id });
     await expect(replay.getActiveWorkItems(localScope)).resolves.toHaveLength(1);
-    await expect(replay.getActiveWorkItemsCrossScope(workspaceLocal, 'workspace')).resolves.toHaveLength(2);
+    // F4: only the peer's workspace-class work item surfaces cross-scope to
+    // workspaceLocal; the local private work item is excluded.
+    await expect(replay.getActiveWorkItemsCrossScope(workspaceLocal, 'workspace')).resolves.toHaveLength(1);
     await expect(replay.getWorkItemsByTimeRange(localScope, { start_at: 0, end_at: 500 })).resolves.toHaveLength(1);
-    await expect(replay.getWorkItemsByTimeRangeCrossScope(workspaceLocal, 'workspace', { start_at: 0, end_at: 500 })).resolves.toHaveLength(2);
+    await expect(replay.getWorkItemsByTimeRangeCrossScope(workspaceLocal, 'workspace', { start_at: 0, end_at: 500 })).resolves.toHaveLength(1);
 
     await expect(replay.getActiveWorkClaim(crossScopeWorkItem.id)).resolves.toBeNull();
     await expect(
@@ -775,12 +786,15 @@ describe('temporal replay helpers', () => {
         sessionId: 'peer-session',
       }),
     ).resolves.toMatchObject([{ id: expiredClaim.id, status: 'expired' }]);
+    // F4: the released local claim is private (scope 'thread-1') and excluded
+    // from workspaceLocal's cross-scope view; only the peer's workspace-class
+    // expired claim surfaces.
     await expect(
       replay.listWorkClaimsCrossScope(workspaceLocal, 'workspace', {
         includeExpired: true,
         includeReleased: true,
       }),
-    ).resolves.toHaveLength(2);
+    ).resolves.toHaveLength(1);
 
     await expect(
       replay.listHandoffs(workspacePeer, {
@@ -796,7 +810,9 @@ describe('temporal replay helpers', () => {
 
     await expect(replay.getPlaybookById(acceptedPlaybook.id)).resolves.toMatchObject({ id: acceptedPlaybook.id });
     await expect(replay.getActivePlaybooks(localScope)).resolves.toHaveLength(1);
-    await expect(replay.getActivePlaybooksCrossScope(workspaceLocal, 'workspace')).resolves.toHaveLength(2);
+    // F4: only the peer's workspace-class playbook surfaces cross-scope; the
+    // local private playbook is excluded.
+    await expect(replay.getActivePlaybooksCrossScope(workspaceLocal, 'workspace')).resolves.toHaveLength(1);
     await expect(replay.searchPlaybooks(localScope, 'deploy playbook')).resolves.toHaveLength(1);
     await expect(replay.searchPlaybooksCrossScope(workspaceLocal, 'workspace', 'shared guide')).resolves.toHaveLength(1);
 

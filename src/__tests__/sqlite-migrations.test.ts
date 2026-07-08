@@ -105,11 +105,27 @@ describe('SQLite migrations (plan 0.3)', () => {
     db.close();
   });
 
-  it('is stamped at v21 for the embedding model/dimensions versioning (2.4)', () => {
-    const db = new Database(join(dir, 'v21.db'));
+  it('is stamped at v22 for the visibility_class persistence/filtering (Phase 3.6/P6)', () => {
+    const db = new Database(join(dir, 'v22.db'));
     createSQLiteSchema(db);
-    expect(CURRENT_SCHEMA_VERSION).toBe(21);
-    expect(schemaVersion(db)).toBe(21);
+    expect(CURRENT_SCHEMA_VERSION).toBe(22);
+    expect(schemaVersion(db)).toBe(22);
+    db.close();
+  });
+
+  it('v22 migration is a REAL migration: knowledge_memory carries visibility_class + its index', () => {
+    // Regression guard (mirrors the v21 guard below): v22 must persist and index
+    // visibility_class, not be a bare version stamp.
+    const db = new Database(join(dir, 'v22-real.db'));
+    createSQLiteSchema(db);
+    const kmColumns = (
+      db.prepare("PRAGMA table_info('knowledge_memory')").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    expect(kmColumns).toContain('visibility_class');
+    const indexes = (
+      db.prepare("PRAGMA index_list('knowledge_memory')").all() as Array<{ name: string }>
+    ).map((i) => i.name);
+    expect(indexes).toContain('idx_km_visibility');
     db.close();
   });
 
@@ -127,7 +143,7 @@ describe('SQLite migrations (plan 0.3)', () => {
     // downgrade guard then blocked reopening with 4.2.x for no real change.
     const db = new Database(join(dir, 'plain-v21.db'));
     createSQLiteSchema(db);
-    expect(schemaVersion(db)).toBe(21);
+    expect(schemaVersion(db)).toBe(CURRENT_SCHEMA_VERSION);
     const columns = embeddingColumns(db);
     expect(columns).toContain('model');
     expect(columns).toContain('dimensions');
@@ -165,7 +181,7 @@ describe('SQLite migrations (plan 0.3)', () => {
     // (12 bytes / 4 = 3), stamps v21.
     const first = new Database(path);
     createSQLiteSchema(first);
-    expect(schemaVersion(first)).toBe(21);
+    expect(schemaVersion(first)).toBe(CURRENT_SCHEMA_VERSION);
     expect(embeddingColumns(first)).toContain('model');
     const row = first
       .prepare('SELECT dimensions, model FROM knowledge_embeddings WHERE knowledge_memory_id = 1')
@@ -174,10 +190,10 @@ describe('SQLite migrations (plan 0.3)', () => {
     expect(row.model).toBe('unknown');
     first.close();
 
-    // Reopen is a no-op (idempotent): the row is untouched and version stays v21.
+    // Reopen is a no-op (idempotent): the row is untouched and version stays current.
     const second = new Database(path);
     createSQLiteSchema(second);
-    expect(schemaVersion(second)).toBe(21);
+    expect(schemaVersion(second)).toBe(CURRENT_SCHEMA_VERSION);
     const reRow = second
       .prepare('SELECT dimensions, model FROM knowledge_embeddings WHERE knowledge_memory_id = 1')
       .get() as { dimensions: number; model: string };

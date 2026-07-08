@@ -17,9 +17,11 @@
  * produce byte-identical operation sequences and assertions.
  */
 import { createInMemoryAdapter } from '../../adapters/memory/index.js';
-import { createSQLiteAdapter } from '../../adapters/sqlite/index.js';
+import { createInMemoryEmbeddingAdapter } from '../../adapters/memory/embeddings.js';
+import { createSQLiteAdapterWithEmbeddings } from '../../adapters/sqlite/index.js';
 import { wrapSyncAdapter } from '../../adapters/sync-to-async.js';
 import type { AsyncStorageAdapter } from '../../contracts/async-storage.js';
+import type { EmbeddingAdapter } from '../../contracts/embedding.js';
 import type { MemoryScope } from '../../contracts/identity.js';
 import type { StorageAdapter } from '../../contracts/storage.js';
 
@@ -34,6 +36,13 @@ export interface HarnessAdapter {
    * skip adapters where this is null.
    */
   readonly sync: StorageAdapter | null;
+  /**
+   * The embedding adapter backed by the SAME store as {@link adapter}, so
+   * semantic-search conformance (F4 cross-scope visibility) can be exercised on
+   * every backend. Its methods return MaybePromise; callers `await` them
+   * uniformly. Sync-backed adapters (memory, sqlite) resolve synchronously.
+   */
+  readonly embeddings: EmbeddingAdapter;
   /** Tear down the adapter and any backing resources. */
   close(): Promise<void>;
 }
@@ -94,15 +103,17 @@ export const LOCAL_FACTORIES: HarnessFactory[] = [
       name: 'in-memory',
       adapter: wrapSyncAdapter(sync),
       sync,
+      embeddings: createInMemoryEmbeddingAdapter(sync),
       close: async () => sync.close(),
     };
   },
   async () => {
-    const sync = createSQLiteAdapter(':memory:');
+    const sync = createSQLiteAdapterWithEmbeddings(':memory:');
     return {
       name: 'sqlite',
       adapter: wrapSyncAdapter(sync),
       sync,
+      embeddings: sync.embeddings,
       close: async () => sync.close(),
     };
   },
@@ -130,7 +141,9 @@ export async function makePostgresHarness(): Promise<HarnessAdapter> {
     throw new Error('makePostgresHarness called without POSTGRES_TEST_URL');
   }
   const pg = await loadPg();
-  const { createPostgresAdapter } = await import('../../adapters/postgres/index.js');
+  const { createPostgresAdapter, createPostgresEmbeddingAdapter } = await import(
+    '../../adapters/postgres/index.js'
+  );
   const { readFileSync } = await import('node:fs');
   const nodePath = await import('node:path');
   const { fileURLToPath } = await import('node:url');
@@ -169,6 +182,7 @@ export async function makePostgresHarness(): Promise<HarnessAdapter> {
     name: 'postgres',
     adapter: createPostgresAdapter(pool),
     sync: null,
+    embeddings: createPostgresEmbeddingAdapter(pool),
     close: async () => {
       try {
         await pool.query(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`);

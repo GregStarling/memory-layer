@@ -33,6 +33,7 @@ import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import { estimateTokens, type TokenEstimator } from './tokens.js';
 import { emitMemoryEvent } from './telemetry.js';
 import { getLineageScore, rankKnowledge } from './retrieval.js';
+import { isBaseVisible } from '../adapters/shared/index.js';
 
 export interface ContextAssemblyOptions {
   sessionId?: string;
@@ -166,43 +167,16 @@ const ASSUMPTION_PATTERN = /\b(assume|assuming|assumption|likely|probably)\b/i;
 const DECISION_PATTERN = /\b(decide|decision|choose|choice|whether|should we|need to determine)\b/i;
 const TOOL_PATTERN = /\b(?:tool|command|script|query|search|fetch|deploy|build|test|lint|run)\b/i;
 
-function matchesVisibility(
-  visibilityClass: MemoryVisibilityClass,
-  item: MemoryScope,
-  scope: MemoryScope,
-): boolean {
-  const left = normalizeScope(item);
-  const right = normalizeScope(scope);
-  if (left.tenant_id !== right.tenant_id) return false;
-  switch (visibilityClass) {
-    case 'tenant':
-      return true;
-    case 'workspace':
-      return left.workspace_id === right.workspace_id;
-    case 'shared_collaboration':
-      return (
-        left.workspace_id === right.workspace_id &&
-        left.collaboration_id.length > 0 &&
-        left.collaboration_id === right.collaboration_id
-      );
-    case 'private':
-    default:
-      return (
-        left.system_id === right.system_id &&
-        left.workspace_id === right.workspace_id &&
-        left.collaboration_id === right.collaboration_id &&
-        left.scope_id === right.scope_id
-      );
-  }
-}
-
 function isVisibilityAllowed(
   visibilityClass: MemoryVisibilityClass,
   item: MemoryScope,
   scope: MemoryScope,
   view: ContextViewPolicy,
 ): boolean {
-  if (!matchesVisibility(visibilityClass, item, scope)) {
+  // De-duped onto the single source of truth in adapters/shared/visibility.ts
+  // (P6 base access gate). The former local `matchesVisibility` copy was
+  // char-identical; keeping two copies risked the two drifting apart.
+  if (!isBaseVisible(visibilityClass, item, scope)) {
     return false;
   }
   if (view === 'local_only') {

@@ -26,6 +26,9 @@ describe('cross-scope learning', () => {
       fact_type: 'reference',
       source: 'manual',
       confidence: 'high',
+      // P6: crossing a scope boundary is now an explicit opt-in — the fact must
+      // be marked workspace-visible; a default 'private' fact stays in scopeA.
+      visibility_class: 'workspace',
     });
 
     const asyncAdapter = wrapSyncAdapter(adapter);
@@ -45,6 +48,11 @@ describe('cross-scope learning', () => {
       fact_type: 'reference',
       source: 'manual',
       confidence: 'high',
+      // P6/F4: crossing a scope boundary via SEMANTIC search is also an explicit
+      // opt-in — the fact must be workspace-visible or the base-visibility gate in
+      // findSimilarCrossScope (and the manager's defensive hydration gate) keeps a
+      // default 'private' fact inside scopeA.
+      visibility_class: 'workspace',
     });
     adapter.embeddings.storeEmbedding(knowledge.id, new Float32Array([1, 0]));
 
@@ -85,6 +93,10 @@ describe('cross-scope learning', () => {
       fact_type: 'reference',
       source: 'manual',
       confidence: 'high',
+      // P6: shared across a collaboration only when explicitly marked as such;
+      // the base visibility gate then admits it only inside the matching
+      // (non-empty) collaboration_id ('factory-1').
+      visibility_class: 'shared_collaboration',
     });
 
     const asyncAdapter = wrapSyncAdapter(adapter);

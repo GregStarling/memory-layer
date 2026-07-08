@@ -341,6 +341,14 @@ export interface NewKnowledgeMemory extends MemoryScope {
   valid_until?: number | null;
   rationale?: string | null;
   tags?: string[];
+  /**
+   * Optional caller-supplied creation timestamp (epoch seconds), completing P5
+   * for knowledge. When omitted, adapters stamp the current time. MUST be a
+   * finite integer within int4 range on Postgres (the created_at column is
+   * INTEGER); adapters route it through resolveCreatedAt. `last_accessed_at`
+   * follows `created_at` on insert.
+   */
+  created_at?: number;
 }
 
 export interface KnowledgeMemoryAudit extends NormalizedMemoryScope {
@@ -567,6 +575,14 @@ export interface SearchOptions {
 
 export interface SearchResult<T> {
   item: T;
+  /**
+   * Relevance rank, normalized to (0,1], higher = better, on EVERY adapter
+   * (Phase 3.2 P2). SQLite maps `bm25()` (negative-is-better) and Postgres maps
+   * `ts_rank` through the shared normalizers; the in-memory adapter uses the
+   * shared `scoreLexical`. Absolute values and multi-term RANKING may differ
+   * across engines (documented accepted divergence); the scale, direction, and
+   * single-token exact-match result SET are the binding contract.
+   */
   rank: number;
 }
 

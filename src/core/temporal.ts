@@ -10,7 +10,6 @@ import type {
 } from '../contracts/coordination.js';
 import {
   matchesScope,
-  matchesScopeLevel,
   normalizeScope,
   type MemoryScope,
   type ScopeLevel,
@@ -59,6 +58,7 @@ import type {
   WorkingMemory,
 } from '../contracts/types.js';
 import { ValidationError } from '../contracts/errors.js';
+import { crossScopeVisiblePredicate, scoreLexical } from '../adapters/shared/index.js';
 
 export interface ReplayedTemporalState {
   turns: Turn[];
@@ -102,23 +102,12 @@ function unsupported(name: string): never {
   throw new Error(`Temporal replay adapter does not support ${name}`);
 }
 
-function tokenize(text: string): string[] {
-  return text
-    .toLowerCase()
-    .split(/[^a-z0-9]+/g)
-    .filter((token) => token.length > 0);
-}
-
+// Rank contract (SearchResult.rank ∈ (0,1], higher = better): delegate to the
+// shared lexical scorer. The former local formula could reach 1.25 (coverage +
+// a 0.25 phrase bonus added on top), violating the (0,1] ceiling for replay
+// search results; scoreLexical folds the phrase bonus INTO the (0,1] range.
 function scoreText(query: string, text: string): number {
-  const queryTokens = new Set(tokenize(query));
-  const textTokens = new Set(tokenize(text));
-  if (queryTokens.size === 0 || textTokens.size === 0) return 0;
-  let matches = 0;
-  for (const token of queryTokens) {
-    if (textTokens.has(token)) matches += 1;
-  }
-  if (matches === 0) return 0;
-  return matches / queryTokens.size + (text.toLowerCase().includes(query.toLowerCase()) ? 0.25 : 0);
+  return scoreLexical(query, text);
 }
 
 function inRange(createdAt: number, range: TimeRange): boolean {
@@ -450,14 +439,17 @@ export function createTemporalReplayAdapter(
     getActiveKnowledgeCrossScope: async (scope, level) =>
       replayState.knowledge.filter(
         (item) =>
-          matchesScopeLevel(item, scope, level) &&
+          // P6/F4: replay cross-scope reads must apply the base visibility gate,
+          // not just scope-level widening, or a private fact from scope A leaks
+          // into a scope-B replay read (events carry the full fact text).
+          crossScopeVisiblePredicate(item, scope, level) &&
           item.superseded_by_id === null &&
           item.retired_at === null,
       ),
     getKnowledgeSince: async (scope, level, since) =>
       replayState.knowledge.filter(
         (item) =>
-          matchesScopeLevel(item, scope, level) &&
+          crossScopeVisiblePredicate(item, scope, level) &&
           item.created_at >= since &&
           item.superseded_by_id === null &&
           item.retired_at === null,
@@ -477,7 +469,9 @@ export function createTemporalReplayAdapter(
         .slice(0, options?.limit ?? 10),
     searchKnowledgeCrossScope: async (scope, level, query, options) =>
       activeSearchKnowledge(
-        replayState.knowledge.filter((item) => matchesScopeLevel(item, scope, level)),
+        replayState.knowledge.filter((item) =>
+          crossScopeVisiblePredicate(item, scope, level),
+        ),
         options,
       )
         .map((item) => ({ item, rank: scoreText(query, item.fact) }))
@@ -498,7 +492,7 @@ export function createTemporalReplayAdapter(
       replayState.workItems.filter((item) => matchesScope(item, scope) && item.status !== 'done'),
     getActiveWorkItemsCrossScope: async (scope, level) =>
       replayState.workItems.filter(
-        (item) => matchesScopeLevel(item, scope, level) && item.status !== 'done',
+        (item) => crossScopeVisiblePredicate(item, scope, level) && item.status !== 'done',
       ),
     getWorkItemsByTimeRange: async (scope, range) =>
       replayState.workItems.filter(
@@ -506,7 +500,7 @@ export function createTemporalReplayAdapter(
       ),
     getWorkItemsByTimeRangeCrossScope: async (scope, level, range) =>
       replayState.workItems.filter(
-        (item) => matchesScopeLevel(item, scope, level) && inRange(item.created_at, range),
+        (item) => crossScopeVisiblePredicate(item, scope, level) && inRange(item.created_at, range),
       ),
     updateWorkItemStatus: () => unsupported('updateWorkItemStatus'),
     updateWorkItem: async () => unsupported('updateWorkItem'),
@@ -540,7 +534,7 @@ export function createTemporalReplayAdapter(
     expireStaleClaims: async () => unsupported('expireStaleClaims'),
     listWorkClaimsCrossScope: async (scope, level, options?: WorkClaimQuery) =>
       replayState.workClaims.filter((claim) => {
-        if (!matchesScopeLevel(claim, scope, level)) return false;
+        if (!crossScopeVisiblePredicate(claim, scope, level)) return false;
         if (!options?.includeExpired && claim.status === 'expired') return false;
         if (!options?.includeReleased && claim.status === 'released') return false;
         if (options?.sessionId && claim.session_id !== options.sessionId) return false;
@@ -580,7 +574,7 @@ export function createTemporalReplayAdapter(
       }),
     listHandoffsCrossScope: async (scope, level, options) =>
       replayState.handoffs.filter((handoff) => {
-        if (!matchesScopeLevel(handoff, scope, level)) return false;
+        if (!crossScopeVisiblePredicate(handoff, scope, level)) return false;
         if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
         if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
         if (!options?.actor) return true;
@@ -609,7 +603,7 @@ export function createTemporalReplayAdapter(
     getActivePlaybooksCrossScope: async (scope, level) =>
       replayState.playbooks.filter(
         (item) =>
-          matchesScopeLevel(item, scope, level) &&
+          crossScopeVisiblePredicate(item, scope, level) &&
           (item.status === 'draft' || item.status === 'active'),
       ),
     searchPlaybooks: async (scope, query, options) =>
@@ -630,7 +624,7 @@ export function createTemporalReplayAdapter(
       replayState.playbooks
         .filter(
           (item) =>
-            matchesScopeLevel(item, scope, level) &&
+            crossScopeVisiblePredicate(item, scope, level) &&
             (options?.activeOnly === false || (item.status !== 'archived' && item.status !== 'deprecated')),
         )
         .map((item) => ({

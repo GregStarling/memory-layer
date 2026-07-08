@@ -40,10 +40,13 @@ describe('in-memory adapter', () => {
     expect(results[0]?.item.content).toContain('sqlite');
   });
 
-  it('supports cross-scope knowledge search', () => {
+  it('supports cross-scope knowledge search for workspace-visible facts', () => {
     const workspaceScope = scope({ workspace_id: 'shared', scope_id: 'a' });
+    // P6: a workspace-visible fact surfaces to another scope in the same
+    // workspace at workspace widening.
     adapter.insertKnowledgeMemory({
       ...workspaceScope,
+      visibility_class: 'workspace',
       fact: 'Use shared workspace memory',
       fact_type: 'reference',
       source: 'manual',
@@ -56,6 +59,27 @@ describe('in-memory adapter', () => {
       'shared memory',
     );
     expect(results).toHaveLength(1);
+  });
+
+  it('does not leak a private fact across scopes at any widening level (P6)', () => {
+    const scopeA = scope({ workspace_id: 'shared', scope_id: 'a' });
+    // Default visibility_class is 'private'.
+    adapter.insertKnowledgeMemory({
+      ...scopeA,
+      fact: 'Private local memory',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+    });
+    const scopeB = scope({ workspace_id: 'shared', scope_id: 'b' });
+
+    // Absent from every cross-scope read path from another scope.
+    expect(adapter.searchKnowledgeCrossScope(scopeB, 'workspace', 'private memory')).toHaveLength(0);
+    expect(adapter.searchKnowledgeCrossScope(scopeB, 'tenant', 'private memory')).toHaveLength(0);
+    expect(adapter.getActiveKnowledgeCrossScope(scopeB, 'workspace')).toHaveLength(0);
+    expect(adapter.getKnowledgeSince(scopeB, 'tenant', 0)).toHaveLength(0);
+    // Still visible to its own scope via the same cross-scope call.
+    expect(adapter.getActiveKnowledgeCrossScope(scopeA, 'workspace')).toHaveLength(1);
   });
 
   it('tracks work items and context monitors', () => {

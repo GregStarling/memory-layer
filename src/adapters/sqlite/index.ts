@@ -80,6 +80,14 @@ import { estimateTokens } from '../../core/tokens.js';
 import { emitMemoryEvent, type TelemetryOptions } from '../../core/telemetry.js';
 import { matchesKnowledgeSearchOptions } from '../../core/retrieval.js';
 import {
+  resolveSearchOptions,
+  resolvePaginationOptions,
+  toSafeFtsQuery,
+  scoreLexical,
+  normalizeBm25Rank,
+} from '../shared/search.js';
+import { isBaseVisible } from '../shared/visibility.js';
+import {
   assertActorRef,
   assertArchiveInput,
   assertMemoryVisibilityClass,
@@ -210,58 +218,151 @@ function sessionWhere(sessionId?: string, column = 'session_id'): { clause: stri
 type RankedTurnRow = Turn & { raw_rank: number | null };
 type RankedKnowledgeRow = KnowledgeMemoryRow & { raw_rank: number | null };
 
-function normalizeRank(rawRank: number | null): number {
-  const safe = Number.isFinite(rawRank) ? Math.max(0, Number(rawRank)) : 0;
-  return 1 / (1 + safe);
-}
-
-function tokenizeSearch(text: string): string[] {
-  return text
-    .toLowerCase()
-    .split(/[^a-z0-9]+/g)
-    .filter((token) => token.length > 0);
-}
-
-function scoreSearchText(query: string, text: string): number {
-  const queryTokens = new Set(tokenizeSearch(query));
-  const textTokens = new Set(tokenizeSearch(text));
-  if (queryTokens.size === 0 || textTokens.size === 0) return 0;
-  let matches = 0;
-  for (const token of queryTokens) {
-    if (textTokens.has(token)) matches += 1;
-  }
-  if (matches === 0) return 0;
-  return matches / queryTokens.size + (text.toLowerCase().includes(query.toLowerCase()) ? 0.25 : 0);
-}
-
-function toSafeFtsQuery(query: string): string {
-  return query
-    .toLowerCase()
-    .split(/[^a-z0-9]+/g)
-    .filter((token) => token.length > 0)
-    .join(' ');
-}
-
-function resolveSearchOptions(options?: SearchOptions): Required<SearchOptions> {
+/**
+ * SQL-side visibility predicate mirroring `shared/visibility.isBaseVisible`
+ * (P6). Produces a boolean WHERE expression + bound params (all strings) that,
+ * when ANDed with a scope-level widening clause, admits a row only if the
+ * reader's `queryScope` is permitted to see it given the row's
+ * `visibility_class`. Same-tenant is already guaranteed by the scope-level
+ * clause (every widening level binds `tenant_id = ?`), so this predicate only
+ * constrains system/workspace/collaboration/scope. `visibility_class` is NOT
+ * NULL DEFAULT 'private', but a NULL or unrecognized value is treated as
+ * `private` to match the shared helper's default branch. `column` optionally
+ * qualifies the column names (e.g. a table alias/prefix).
+ */
+function visibilityWhereForScope(
+  scope: Parameters<typeof normalizeScope>[0],
+  prefix = '',
+): { clause: string; params: string[] } {
+  const n = normalizeScope(scope);
+  const q = prefix ? `${prefix}.` : '';
+  const clause =
+    `(${q}visibility_class = 'tenant'` +
+    ` OR (${q}visibility_class = 'workspace' AND ${q}workspace_id = ?)` +
+    ` OR (${q}visibility_class = 'shared_collaboration' AND ${q}workspace_id = ?` +
+    ` AND ${q}collaboration_id <> '' AND ${q}collaboration_id = ?)` +
+    ` OR ((${q}visibility_class IS NULL OR ${q}visibility_class NOT IN ('tenant', 'workspace', 'shared_collaboration'))` +
+    ` AND ${q}system_id = ? AND ${q}workspace_id = ? AND ${q}collaboration_id = ? AND ${q}scope_id = ?))`;
   return {
-    limit: options?.limit ?? 10,
-    activeOnly: options?.activeOnly ?? true,
-    includeProvisional: options?.includeProvisional ?? false,
-    includeDisputed: options?.includeDisputed ?? false,
-    minimumTrustScore: options?.minimumTrustScore ?? 0,
-    knowledgeStates: options?.knowledgeStates ?? [],
-    knowledgeClasses: options?.knowledgeClasses ?? [],
-    tags: options?.tags ?? [],
-    preferLocalTrusted: options?.preferLocalTrusted ?? false,
-    preferLineageMemory: options?.preferLineageMemory ?? false,
+    clause,
+    params: [
+      n.workspace_id,
+      n.workspace_id,
+      n.collaboration_id,
+      n.system_id,
+      n.workspace_id,
+      n.collaboration_id,
+      n.scope_id,
+    ],
   };
 }
 
-function resolvePaginationOptions(options?: PaginationOptions): Required<PaginationOptions> {
+/**
+ * F4 event-log variant of {@link visibilityWhereForScope}. Memory events have no
+ * `visibility_class` COLUMN — they carry the full entity snapshot in
+ * `payload.after` (or `payload.before` for deletions), which includes the fact
+ * text. So the cross-scope event read must derive the visibility class from the
+ * payload and gate on it, or a `private` fact's `knowledge.created` event would
+ * leak its fact text to another scope. Mirrors
+ * `shared/visibility.eventVisibilityClass`: coalesce
+ * `payload.after.visibility_class` → `payload.before.visibility_class` →
+ * `'private'` (most restrictive default), then apply the same scope predicate as
+ * `visibilityWhereForScope` against the event row's real scope columns. Same 7
+ * string params in the same order as `visibilityWhereForScope`.
+ */
+function eventVisibilityWhereForScope(
+  scope: Parameters<typeof normalizeScope>[0],
+): { clause: string; params: string[] } {
+  const n = normalizeScope(scope);
+  const vc =
+    "coalesce(json_extract(payload, '$.after.visibility_class')," +
+    " json_extract(payload, '$.before.visibility_class'), 'private')";
+  const clause =
+    `(${vc} = 'tenant'` +
+    ` OR (${vc} = 'workspace' AND workspace_id = ?)` +
+    ` OR (${vc} = 'shared_collaboration' AND workspace_id = ?` +
+    ` AND collaboration_id <> '' AND collaboration_id = ?)` +
+    ` OR (${vc} NOT IN ('tenant', 'workspace', 'shared_collaboration')` +
+    ` AND system_id = ? AND workspace_id = ? AND collaboration_id = ? AND scope_id = ?))`;
   return {
-    limit: options?.limit ?? 25,
-    offset: options?.offset ?? 0,
-    cursor: options?.cursor ?? 0,
+    clause,
+    params: [
+      n.workspace_id,
+      n.workspace_id,
+      n.collaboration_id,
+      n.system_id,
+      n.workspace_id,
+      n.collaboration_id,
+      n.scope_id,
+    ],
+  };
+}
+
+/**
+ * F1 any-term (OR-of-terms) FTS5 MATCH builder. `toSafeFtsQuery` sanitizes user
+ * text into space-joined literal terms, which FTS5 interprets as implicit AND
+ * (a row must contain EVERY term). The manager decision standardizes multi-term
+ * KNOWLEDGE/turn search on any-term (OR) semantics across all three adapters to
+ * match the in-memory `scoreLexical` reference (rank > 0 on ≥1 term match). We
+ * keep `toSafeFtsQuery`'s sanitization + empty-token guard, then re-join the
+ * literal terms with the FTS5 `OR` operator. Returns '' when no usable tokens
+ * remain (callers short-circuit before MATCH). Playbook search intentionally
+ * still uses `toSafeFtsQuery` (implicit AND) to match the memory adapter's
+ * `tokens.every(...)` playbook semantics.
+ */
+function toAnyTermFtsQuery(query: string): string {
+  const safe = toSafeFtsQuery(query);
+  if (safe.length === 0) return '';
+  return safe.split(' ').join(' OR ');
+}
+
+/**
+ * SQL fragment + params implementing `matchesKnowledgeSearchOptions` (P4) so the
+ * trust/state/class/tag predicates run in the WHERE clause — before LIMIT —
+ * rather than as a post-filter that could starve high-trust matches beyond the
+ * first LIMIT lexical hits. Semantics are identical to the shared JS helper:
+ * provisional/disputed excluded unless opted in, minimum trust score,
+ * state/class membership, and tag containment (json_each EXISTS). `column`
+ * optionally qualifies the column names.
+ */
+function knowledgeSearchOptionsWhere(
+  options: Required<SearchOptions>,
+  prefix = 'knowledge_memory',
+): { clause: string; params: unknown[] } {
+  const q = `${prefix}.`;
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  if (!options.includeProvisional) {
+    clauses.push(`${q}knowledge_state <> 'provisional'`);
+  }
+  if (!options.includeDisputed) {
+    clauses.push(`${q}knowledge_state <> 'disputed'`);
+  }
+  if (options.minimumTrustScore > 0) {
+    clauses.push(`${q}trust_score >= ?`);
+    params.push(options.minimumTrustScore);
+  }
+  if (options.knowledgeStates.length > 0) {
+    clauses.push(`${q}knowledge_state IN (${options.knowledgeStates.map(() => '?').join(', ')})`);
+    params.push(...options.knowledgeStates);
+  }
+  if (options.knowledgeClasses.length > 0) {
+    clauses.push(`${q}knowledge_class IN (${options.knowledgeClasses.map(() => '?').join(', ')})`);
+    params.push(...options.knowledgeClasses);
+  }
+  if (options.tags.length > 0) {
+    // Tag containment: at least one requested tag is present in the JSON tags
+    // array. json_each iterates the array; EXISTS keeps the predicate in SQL.
+    clauses.push(
+      `EXISTS (SELECT 1 FROM json_each(${q}tags) WHERE json_each.value IN (${options.tags
+        .map(() => '?')
+        .join(', ')}))`,
+    );
+    params.push(...options.tags);
+  }
+  return {
+    clause: clauses.length > 0 ? ` AND ${clauses.join(' AND ')}` : '',
+    params,
   };
 }
 
@@ -542,8 +643,22 @@ function createAdapterFromDatabase(
     query?: MemoryEventQuery,
   ): TimelineResult {
     const resolved = resolveEventQuery(query);
-    const clauses = [scopeWhereForLevel(scope, level), 'created_at >= ?', 'created_at <= ?'];
-    const params: unknown[] = [...scopeParamsForLevel(scope, level), resolved.startAt, resolved.endAt];
+    // F4: cross-scope event reads must gate on the event's DERIVED visibility
+    // class (from payload.after/before), or a private fact's knowledge.created
+    // event leaks its full fact text (payload.after) to another scope.
+    const visibility = eventVisibilityWhereForScope(scope);
+    const clauses = [
+      scopeWhereForLevel(scope, level),
+      'created_at >= ?',
+      'created_at <= ?',
+      visibility.clause,
+    ];
+    const params: unknown[] = [
+      ...scopeParamsForLevel(scope, level),
+      resolved.startAt,
+      resolved.endAt,
+      ...visibility.params,
+    ];
     if (resolved.cursor != null && compareTemporalIds(resolved.cursor, '0') > 0) {
       clauses.push('event_id > ?');
       params.push(resolved.cursor);
@@ -924,7 +1039,9 @@ function createAdapterFromDatabase(
 
   function insertValidatedKnowledgeMemory(input: NewKnowledgeMemory): KnowledgeMemory {
     const scope = validateNewKnowledgeMemory(input);
-    const createdAt = nowSeconds();
+    // P5/F5: honor a caller-supplied created_at (imports, time-travel, replay);
+    // stamp now only when omitted. last_accessed_at follows created_at on insert.
+    const createdAt = input.created_at ?? nowSeconds();
     return atomic(() => {
     const result = db
       .prepare(
@@ -937,8 +1054,8 @@ function createAdapterFromDatabase(
            source_system_id, source_scope_id, source_collaboration_id, source_working_memory_id,
            source_turn_ids, successful_use_count, failed_use_count, disputed_at, dispute_reason,
            contradiction_score, superseded_at, retired_at, valid_from, valid_until, rationale, tags,
-           created_at, last_accessed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           visibility_class, created_at, last_accessed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         scope.tenant_id,
@@ -984,6 +1101,7 @@ function createAdapterFromDatabase(
         input.valid_until ?? null,
         input.rationale ?? null,
         JSON.stringify(input.tags ?? []),
+        input.visibility_class ?? 'private',
         createdAt,
         createdAt,
       );
@@ -1188,7 +1306,7 @@ function createAdapterFromDatabase(
         .prepare(
           `SELECT * FROM turns
            WHERE ${SCOPE_WHERE}${time.clause}
-           ORDER BY created_at ASC`,
+           ORDER BY created_at ASC, id ASC`,
         )
         .all(...scopeValues(scope), ...time.params) as Turn[];
       return rows.map(rowToTurn);
@@ -1197,37 +1315,41 @@ function createAdapterFromDatabase(
     searchTurns(scope, query, options): SearchResult<Turn>[] {
       const startedAt = Date.now();
       const resolved = resolveSearchOptions(options);
-      const safeQuery = toSafeFtsQuery(query);
-      const executeSearch = (ftsQuery: string): RankedTurnRow[] =>
-        db.prepare(
+      // P1: sanitize user text into literal FTS5 terms BEFORE the MATCH. Passing
+      // the raw query risked a stray operator char (a bare quote, '*', a column
+      // filter) throwing SQLITE_ERROR; sanitizing first makes the MATCH total and
+      // aligns the exact-term result set with the other adapters. Operator syntax
+      // is intentionally not honored here (opt-in only). F1: any-term (OR) so a
+      // multi-term query returns rows matching ANY term (matches memory's
+      // scoreLexical), not only rows containing every term (implicit AND).
+      const safeQuery = toAnyTermFtsQuery(query);
+      if (safeQuery.length === 0) {
+        emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
+          entity: 'turns',
+          query,
+          resultCount: 0,
+        });
+        return [];
+      }
+      try {
+        const rows = db.prepare(
           `SELECT turns.*, bm25(turns_fts) AS raw_rank
            FROM turns_fts
            JOIN turns ON turns_fts.rowid = turns.id
            WHERE turns_fts MATCH ?
              AND ${SCOPE_WHERE}
              AND (? = 0 OR turns.archived_at IS NULL)
-           ORDER BY bm25(turns_fts)
+           ORDER BY bm25(turns_fts), turns.id ASC
            LIMIT ?`,
         ).all(
-          ftsQuery,
+          safeQuery,
           ...scopeValues(scope),
           resolved.activeOnly ? 1 : 0,
           resolved.limit,
         ) as RankedTurnRow[];
-      try {
-        let rows: RankedTurnRow[];
-        try {
-          rows = executeSearch(query);
-        } catch (error) {
-          if (safeQuery.length === 0 || safeQuery === query) throw error;
-          rows = executeSearch(safeQuery);
-        }
-        if (rows.length === 0 && safeQuery.length > 0 && safeQuery !== query && !/["']/.test(query)) {
-          rows = executeSearch(safeQuery);
-        }
         const results = rows.map((row) => ({
           item: rowToTurn(row),
-          rank: normalizeRank(row.raw_rank),
+          rank: normalizeBm25Rank(row.raw_rank),
         }));
         emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
           entity: 'turns',
@@ -1344,7 +1466,7 @@ function createAdapterFromDatabase(
     getWorkingMemoryBySession(sessionId: string, scope): WorkingMemory[] {
       const query = `SELECT * FROM working_memory
            WHERE session_id = ? AND ${SCOPE_WHERE}
-           ORDER BY id ASC`;
+           ORDER BY created_at ASC, id ASC`;
       const rows = db
         .prepare(query)
         .all(sessionId, ...scopeValues(scope)) as WorkingMemoryRow[];
@@ -1386,7 +1508,7 @@ function createAdapterFromDatabase(
         .prepare(
           `SELECT * FROM working_memory
            WHERE ${SCOPE_WHERE}${time.clause}
-           ORDER BY created_at ASC`,
+           ORDER BY created_at ASC, id ASC`,
         )
         .all(...scopeValues(scope), ...time.params) as WorkingMemoryRow[];
       return rows.map(rowToWorkingMemory);
@@ -1691,17 +1813,26 @@ function createAdapterFromDatabase(
     },
 
     getActiveKnowledgeCrossScope(scope, level): KnowledgeMemory[] {
+      // P6: base visibility gate so a private fact in another scope never surfaces.
+      const visibility = visibilityWhereForScope(scope);
       const rows = db
         .prepare(
+          // F6(d): canonical cross-scope ordering created_at ASC, id ASC (was
+          // last_accessed_at DESC) so all three adapters agree (memory sorts by
+          // byCreatedAtThenId). id ASC is the stable tie-break because created_at
+          // may be caller-supplied and non-monotonic vs insertion order.
           `SELECT * FROM knowledge_memory
            WHERE ${scopeWhereForLevel(scope, level)} AND superseded_by_id IS NULL AND retired_at IS NULL
-           ORDER BY last_accessed_at DESC`,
+             AND ${visibility.clause}
+           ORDER BY created_at ASC, id ASC`,
         )
-        .all(...scopeParamsForLevel(scope, level)) as KnowledgeMemoryRow[];
+        .all(...scopeParamsForLevel(scope, level), ...visibility.params) as KnowledgeMemoryRow[];
       return rows.map(rowToKnowledgeMemory);
     },
 
     getKnowledgeSince(scope, level, since): KnowledgeMemory[] {
+      // P6: base visibility gate on the cross-scope temporal read path.
+      const visibility = visibilityWhereForScope(scope);
       const rows = db
         .prepare(
           `SELECT * FROM knowledge_memory
@@ -1709,9 +1840,10 @@ function createAdapterFromDatabase(
              AND created_at >= ?
              AND superseded_by_id IS NULL
              AND retired_at IS NULL
+             AND ${visibility.clause}
            ORDER BY created_at ASC, id ASC`,
         )
-        .all(...scopeParamsForLevel(scope, level), since) as KnowledgeMemoryRow[];
+        .all(...scopeParamsForLevel(scope, level), since, ...visibility.params) as KnowledgeMemoryRow[];
       return rows.map(rowToKnowledgeMemory);
     },
 
@@ -1721,7 +1853,7 @@ function createAdapterFromDatabase(
         .prepare(
           `SELECT * FROM knowledge_memory
            WHERE ${SCOPE_WHERE}${time.clause}
-           ORDER BY created_at ASC`,
+           ORDER BY created_at ASC, id ASC`,
         )
         .all(...scopeValues(scope), ...time.params) as KnowledgeMemoryRow[];
       return rows.map(rowToKnowledgeMemory);
@@ -1730,59 +1862,58 @@ function createAdapterFromDatabase(
     searchKnowledge(scope, query, options): SearchResult<KnowledgeMemory>[] {
       const startedAt = Date.now();
       const resolved = resolveSearchOptions(options);
+      // P1: sanitize to literal FTS5 terms BEFORE the MATCH (never pass raw text).
+      // F1: any-term (OR) multi-term semantics (matches memory's scoreLexical).
+      const safeQuery = toAnyTermFtsQuery(query);
+      // P4: trust/state/class/tag predicates run in the WHERE clause (before LIMIT)
+      // so a high-trust match beyond the first LIMIT lexical hits is not starved.
+      const filter = knowledgeSearchOptionsWhere(resolved);
+      // Shared full-scan JS fallback (matches the in-memory adapter's algorithm)
+      // for recall when FTS finds nothing; filters applied identically in JS.
+      const jsFallback = (): SearchResult<KnowledgeMemory>[] => {
+        const fallbackRows = db
+          .prepare(
+            `SELECT knowledge_memory.*
+             FROM knowledge_memory
+             WHERE ${SCOPE_WHERE}
+               AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))`,
+          )
+          .all(...scopeValues(scope), resolved.activeOnly ? 1 : 0) as KnowledgeMemoryRow[];
+        return fallbackRows
+          .map((row) => {
+            const item = rowToKnowledgeMemory(row);
+            return { item, rank: scoreLexical(query, item.fact) };
+          })
+          .filter((result) => result.rank > 0 && matchesKnowledgeSearchOptions(result.item, resolved))
+          .sort((a, b) => b.rank - a.rank || b.item.last_accessed_at - a.item.last_accessed_at)
+          .slice(0, resolved.limit);
+      };
       try {
-        const statement = db.prepare(
-          `SELECT knowledge_memory.*, bm25(knowledge_memory_fts) AS raw_rank
-           FROM knowledge_memory_fts
-           JOIN knowledge_memory ON knowledge_memory_fts.rowid = knowledge_memory.id
-           WHERE knowledge_memory_fts MATCH ?
-             AND ${SCOPE_WHERE}
-             AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))
-           ORDER BY bm25(knowledge_memory_fts)
-           LIMIT ?`,
-        );
-        let rows = statement.all(
-          query,
-          ...scopeValues(scope),
-          resolved.activeOnly ? 1 : 0,
-          resolved.limit,
-        ) as RankedKnowledgeRow[];
-        const safeQuery = toSafeFtsQuery(query);
-        if (rows.length === 0 && safeQuery.length > 0 && safeQuery !== query && !/["']/.test(query)) {
-          rows = statement.all(
+        let results: SearchResult<KnowledgeMemory>[] = [];
+        if (safeQuery.length > 0) {
+          const rows = db.prepare(
+            `SELECT knowledge_memory.*, bm25(knowledge_memory_fts) AS raw_rank
+             FROM knowledge_memory_fts
+             JOIN knowledge_memory ON knowledge_memory_fts.rowid = knowledge_memory.id
+             WHERE knowledge_memory_fts MATCH ?
+               AND ${SCOPE_WHERE}
+               AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))${filter.clause}
+             ORDER BY bm25(knowledge_memory_fts), knowledge_memory.id ASC
+             LIMIT ?`,
+          ).all(
             safeQuery,
             ...scopeValues(scope),
             resolved.activeOnly ? 1 : 0,
+            ...filter.params,
             resolved.limit,
           ) as RankedKnowledgeRow[];
-        }
-        let results = rows
-          .map((row) => ({
+          results = rows.map((row) => ({
             item: rowToKnowledgeMemory(row),
-            rank: normalizeRank(row.raw_rank),
-          }))
-          .filter((result) => matchesKnowledgeSearchOptions(result.item, resolved))
-          .slice(0, resolved.limit);
-        if (results.length === 0 && !/["']/.test(query)) {
-          const fallbackRows = db
-            .prepare(
-              `SELECT knowledge_memory.*
-               FROM knowledge_memory
-               WHERE ${SCOPE_WHERE}
-                 AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))`,
-            )
-            .all(...scopeValues(scope), resolved.activeOnly ? 1 : 0) as KnowledgeMemoryRow[];
-          results = fallbackRows
-            .map((row) => {
-              const item = rowToKnowledgeMemory(row);
-              return {
-                item,
-                rank: scoreSearchText(query, item.fact),
-              };
-            })
-            .filter((result) => result.rank > 0 && matchesKnowledgeSearchOptions(result.item, resolved))
-            .sort((a, b) => b.rank - a.rank || b.item.last_accessed_at - a.item.last_accessed_at)
-            .slice(0, resolved.limit);
+            rank: normalizeBm25Rank(row.raw_rank),
+          }));
+        }
+        if (results.length === 0) {
+          results = jsFallback();
         }
         emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
           entity: 'knowledge',
@@ -1791,100 +1922,78 @@ function createAdapterFromDatabase(
         });
         return results;
       } catch {
-        if (!/["']/.test(query)) {
-          const fallbackRows = db
-            .prepare(
-              `SELECT knowledge_memory.*
-               FROM knowledge_memory
-               WHERE ${SCOPE_WHERE}
-                 AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))`,
-            )
-            .all(...scopeValues(scope), resolved.activeOnly ? 1 : 0) as KnowledgeMemoryRow[];
-          const fallbackResults = fallbackRows
-            .map((row) => {
-              const item = rowToKnowledgeMemory(row);
-              return {
-                item,
-                rank: scoreSearchText(query, item.fact),
-              };
-            })
-            .filter((result) => result.rank > 0 && matchesKnowledgeSearchOptions(result.item, resolved))
-            .sort((a, b) => b.rank - a.rank || b.item.last_accessed_at - a.item.last_accessed_at)
-            .slice(0, resolved.limit);
-          emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
-            entity: 'knowledge',
-            query,
-            resultCount: fallbackResults.length,
-            fallbackQuery: true,
-          });
-          return fallbackResults;
-        }
+        const fallbackResults = jsFallback();
         emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
           entity: 'knowledge',
           query,
-          resultCount: 0,
-          invalidQuery: true,
+          resultCount: fallbackResults.length,
+          fallbackQuery: true,
         });
-        return [];
+        return fallbackResults;
       }
     },
 
     searchKnowledgeCrossScope(scope, level, query, options): SearchResult<KnowledgeMemory>[] {
       const startedAt = Date.now();
       const resolved = resolveSearchOptions(options);
+      // P1 sanitize-first, P4 filters-in-WHERE, P6 base visibility gate in WHERE.
+      // F1: any-term (OR) multi-term semantics (matches memory's scoreLexical).
+      const safeQuery = toAnyTermFtsQuery(query);
+      const filter = knowledgeSearchOptionsWhere(resolved);
+      const visibility = visibilityWhereForScope(scope);
+      // JS full-scan fallback (mirrors the in-memory cross-scope search): scope
+      // widening + base visibility gate + option filters, ranked by scoreLexical.
+      const jsFallback = (): SearchResult<KnowledgeMemory>[] => {
+        const fallbackRows = db
+          .prepare(
+            `SELECT knowledge_memory.*
+             FROM knowledge_memory
+             WHERE ${scopeWhereForLevel(scope, level)}
+               AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))`,
+          )
+          .all(...scopeParamsForLevel(scope, level), resolved.activeOnly ? 1 : 0) as KnowledgeMemoryRow[];
+        return fallbackRows
+          .map((row) => {
+            const item = rowToKnowledgeMemory(row);
+            return { item, rank: scoreLexical(query, item.fact) };
+          })
+          .filter(
+            (result) =>
+              result.rank > 0 &&
+              isBaseVisible(result.item.visibility_class, result.item, scope) &&
+              matchesKnowledgeSearchOptions(result.item, resolved),
+          )
+          .sort((a, b) => b.rank - a.rank || b.item.last_accessed_at - a.item.last_accessed_at)
+          .slice(0, resolved.limit);
+      };
       try {
-        const statement = db.prepare(
-          `SELECT knowledge_memory.*, bm25(knowledge_memory_fts) AS raw_rank
-           FROM knowledge_memory_fts
-           JOIN knowledge_memory ON knowledge_memory_fts.rowid = knowledge_memory.id
-           WHERE knowledge_memory_fts MATCH ?
-             AND ${scopeWhereForLevel(scope, level)}
-             AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))
-           ORDER BY bm25(knowledge_memory_fts)
-           LIMIT ?`,
-        );
-        let rows = statement.all(
-          query,
-          ...scopeParamsForLevel(scope, level),
-          resolved.activeOnly ? 1 : 0,
-          resolved.limit,
-        ) as RankedKnowledgeRow[];
-        const safeQuery = toSafeFtsQuery(query);
-        if (rows.length === 0 && safeQuery.length > 0 && safeQuery !== query && !/["']/.test(query)) {
-          rows = statement.all(
+        let results: SearchResult<KnowledgeMemory>[] = [];
+        if (safeQuery.length > 0) {
+          const rows = db.prepare(
+            `SELECT knowledge_memory.*, bm25(knowledge_memory_fts) AS raw_rank
+             FROM knowledge_memory_fts
+             JOIN knowledge_memory ON knowledge_memory_fts.rowid = knowledge_memory.id
+             WHERE knowledge_memory_fts MATCH ?
+               AND ${scopeWhereForLevel(scope, level)}
+               AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))${filter.clause}
+               AND ${visibility.clause}
+             ORDER BY bm25(knowledge_memory_fts), knowledge_memory.id ASC
+             LIMIT ?`,
+          ).all(
             safeQuery,
             ...scopeParamsForLevel(scope, level),
             resolved.activeOnly ? 1 : 0,
+            ...filter.params,
+            ...visibility.params,
             resolved.limit,
           ) as RankedKnowledgeRow[];
-        }
-        let results = rows
-          .map((row) => ({
+          results = rows.map((row) => ({
             item: rowToKnowledgeMemory(row),
-            rank: normalizeRank(row.raw_rank),
-          }))
-          .filter((result) => matchesKnowledgeSearchOptions(result.item, resolved))
-          .slice(0, resolved.limit);
-        if (results.length === 0 && !/["']/.test(query)) {
-          const fallbackRows = db
-            .prepare(
-              `SELECT knowledge_memory.*
-               FROM knowledge_memory
-               WHERE ${scopeWhereForLevel(scope, level)}
-                 AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))`,
-            )
-            .all(...scopeParamsForLevel(scope, level), resolved.activeOnly ? 1 : 0) as KnowledgeMemoryRow[];
-          results = fallbackRows
-            .map((row) => {
-              const item = rowToKnowledgeMemory(row);
-              return {
-                item,
-                rank: scoreSearchText(query, item.fact),
-              };
-            })
-            .filter((result) => result.rank > 0 && matchesKnowledgeSearchOptions(result.item, resolved))
-            .sort((a, b) => b.rank - a.rank || b.item.last_accessed_at - a.item.last_accessed_at)
-            .slice(0, resolved.limit);
+            rank: normalizeBm25Rank(row.raw_rank),
+          }));
+        }
+        if (results.length === 0) {
+          results = jsFallback();
         }
         emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
           entity: 'knowledge',
@@ -1894,43 +2003,15 @@ function createAdapterFromDatabase(
         });
         return results;
       } catch {
-        if (!/["']/.test(query)) {
-          const fallbackRows = db
-            .prepare(
-              `SELECT knowledge_memory.*
-               FROM knowledge_memory
-               WHERE ${scopeWhereForLevel(scope, level)}
-                 AND (? = 0 OR (knowledge_memory.superseded_by_id IS NULL AND knowledge_memory.retired_at IS NULL))`,
-            )
-            .all(...scopeParamsForLevel(scope, level), resolved.activeOnly ? 1 : 0) as KnowledgeMemoryRow[];
-          const fallbackResults = fallbackRows
-            .map((row) => {
-              const item = rowToKnowledgeMemory(row);
-              return {
-                item,
-                rank: scoreSearchText(query, item.fact),
-              };
-            })
-            .filter((result) => result.rank > 0 && matchesKnowledgeSearchOptions(result.item, resolved))
-            .sort((a, b) => b.rank - a.rank || b.item.last_accessed_at - a.item.last_accessed_at)
-            .slice(0, resolved.limit);
-          emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
-            entity: 'knowledge',
-            query,
-            resultCount: fallbackResults.length,
-            scopeLevel: level,
-            fallbackQuery: true,
-          });
-          return fallbackResults;
-        }
+        const fallbackResults = jsFallback();
         emitMemoryEvent('search', scope, telemetry, Date.now() - startedAt, {
           entity: 'knowledge',
           query,
-          resultCount: 0,
-          invalidQuery: true,
+          resultCount: fallbackResults.length,
           scopeLevel: level,
+          fallbackQuery: true,
         });
-        return [];
+        return fallbackResults;
       }
     },
 
@@ -2078,11 +2159,12 @@ function createAdapterFromDatabase(
     },
 
     getActiveWorkItems(scope): WorkItem[] {
+      // Ordering contract (P3): created_at ASC, then id ASC.
       const rows = db
         .prepare(
           `SELECT * FROM work_items
            WHERE ${SCOPE_WHERE} AND status != 'done'
-           ORDER BY updated_at DESC`,
+           ORDER BY created_at ASC, id ASC`,
         )
         .all(...scopeValues(scope)) as WorkItem[];
       return rows.map(rowToWorkItem);
@@ -2098,13 +2180,16 @@ function createAdapterFromDatabase(
     },
 
     getActiveWorkItemsCrossScope(scope, level): WorkItem[] {
+      // Ordering contract (P3): created_at ASC, id ASC. P6: base visibility gate.
+      const visibility = visibilityWhereForScope(scope);
       const rows = db
         .prepare(
           `SELECT * FROM work_items
            WHERE ${scopeWhereForLevel(scope, level)} AND status != 'done'
-           ORDER BY updated_at DESC`,
+             AND ${visibility.clause}
+           ORDER BY created_at ASC, id ASC`,
         )
-        .all(...scopeParamsForLevel(scope, level)) as WorkItem[];
+        .all(...scopeParamsForLevel(scope, level), ...visibility.params) as WorkItem[];
       return rows.map(rowToWorkItem);
     },
 
@@ -2114,21 +2199,24 @@ function createAdapterFromDatabase(
         .prepare(
           `SELECT * FROM work_items
            WHERE ${SCOPE_WHERE}${time.clause}
-           ORDER BY created_at ASC`,
+           ORDER BY created_at ASC, id ASC`,
         )
         .all(...scopeValues(scope), ...time.params) as WorkItem[];
       return rows.map(rowToWorkItem);
     },
 
     getWorkItemsByTimeRangeCrossScope(scope, level, range): WorkItem[] {
+      // Ordering contract (P3): created_at ASC, id ASC. P6: base visibility gate.
       const time = timeRangeWhere(range, 'created_at');
+      const visibility = visibilityWhereForScope(scope);
       const rows = db
         .prepare(
           `SELECT * FROM work_items
            WHERE ${scopeWhereForLevel(scope, level)}${time.clause}
-           ORDER BY created_at ASC`,
+             AND ${visibility.clause}
+           ORDER BY created_at ASC, id ASC`,
         )
-        .all(...scopeParamsForLevel(scope, level), ...time.params) as WorkItem[];
+        .all(...scopeParamsForLevel(scope, level), ...time.params, ...visibility.params) as WorkItem[];
       return rows.map(rowToWorkItem);
     },
 
@@ -2587,6 +2675,8 @@ function createAdapterFromDatabase(
       return rows
         .map((row) => effectiveClaim(mapWorkClaim(row), now))
         .filter((claim) => {
+          // P6: base visibility gate on the cross-scope claim read path.
+          if (!isBaseVisible(claim.visibility_class, claim, scope)) return false;
           if (!options?.includeExpired && claim.status === 'expired') return false;
           if (!options?.includeReleased && claim.status === 'released') return false;
           if (options?.sessionId && claim.session_id !== options.sessionId) return false;
@@ -2952,6 +3042,8 @@ function createAdapterFromDatabase(
         .prepare(`SELECT * FROM handoff_records WHERE ${scopeWhereForLevel(scope, level)} ORDER BY created_at DESC`)
         .all(...scopeParamsForLevel(scope, level)) as Array<Record<string, unknown>>;
       return rows.map((row) => effectiveHandoff(mapHandoff(row), now)).filter((handoff) => {
+        // P6: base visibility gate on the cross-scope handoff read path.
+        if (!isBaseVisible(handoff.visibility_class, handoff, scope)) return false;
         if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
         if (options?.statuses && !options.statuses.includes(handoff.status)) return false;
         if (!options?.actor) return true;
@@ -3239,8 +3331,8 @@ function createAdapterFromDatabase(
         .prepare(
           `INSERT INTO playbooks
             (tenant_id, system_id, workspace_id, collaboration_id, scope_id, title, description, instructions,
-             references_json, templates, scripts, assets, tags, rationale, status, source_session_id, source_working_memory_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             references_json, templates, scripts, assets, tags, rationale, status, visibility_class, source_session_id, source_working_memory_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           scope.tenant_id, scope.system_id, scope.workspace_id, scope.collaboration_id, scope.scope_id,
@@ -3248,6 +3340,7 @@ function createAdapterFromDatabase(
           serializeStringArray(input.references ?? []), serializeStringArray(input.templates ?? []),
           serializeStringArray(input.scripts ?? []), serializeStringArray(input.assets ?? []),
           serializeStringArray(input.tags ?? []), input.rationale ?? null, input.status ?? 'draft',
+          input.visibility_class ?? 'private',
           input.source_session_id ?? null, input.source_working_memory_id ?? null,
           input.created_at ?? now, now,
         );
@@ -3280,18 +3373,24 @@ function createAdapterFromDatabase(
       return rows.map(rowToPlaybook);
     },
     getActivePlaybooksCrossScope(scope, level): Playbook[] {
+      // P6: base visibility gate on the cross-scope playbook read path.
+      const visibility = visibilityWhereForScope(scope);
       const rows = db
         .prepare(
+          // F6(d): canonical cross-scope ordering created_at ASC, id ASC (was
+          // id DESC) so all three adapters agree (memory sorts by byCreatedAtThenId).
           `SELECT * FROM playbooks
            WHERE ${scopeWhereForLevel(scope, level)} AND status IN ('draft', 'active')
-           ORDER BY id DESC`,
+             AND ${visibility.clause}
+           ORDER BY created_at ASC, id ASC`,
         )
-        .all(...scopeParamsForLevel(scope, level)) as PlaybookRow[];
+        .all(...scopeParamsForLevel(scope, level), ...visibility.params) as PlaybookRow[];
       return rows.map(rowToPlaybook);
     },
     searchPlaybooks(scope, query, options): SearchResult<Playbook>[] {
       const limit = options?.limit ?? 20;
       const activeOnly = options?.activeOnly ?? true;
+      // P1: sanitize to literal FTS5 terms BEFORE the MATCH.
       const safeQuery = toSafeFtsQuery(query);
       if (!safeQuery) return [];
       const statusFilter = activeOnly
@@ -3300,14 +3399,21 @@ function createAdapterFromDatabase(
       try {
         const rows = db
           .prepare(
-            `SELECT p.* FROM playbooks p
-             INNER JOIN playbooks_fts f ON f.rowid = p.id
-             WHERE p.${SCOPE_WHERE} ${statusFilter}
-             AND playbooks_fts MATCH ?
-             ORDER BY rank LIMIT ?`,
+            `SELECT p.*, bm25(playbooks_fts) AS raw_rank
+             FROM playbooks_fts
+             JOIN playbooks p ON playbooks_fts.rowid = p.id
+             WHERE playbooks_fts MATCH ?
+               AND ${SCOPE_WHERE} ${statusFilter}
+             ORDER BY bm25(playbooks_fts), p.id ASC
+             LIMIT ?`,
           )
-          .all(...scopeValues(scope), safeQuery, limit) as PlaybookRow[];
-        return rows.map((row, index) => ({ item: rowToPlaybook(row), rank: index }));
+          .all(safeQuery, ...scopeValues(scope), limit) as Array<
+          PlaybookRow & { raw_rank: number | null }
+        >;
+        // P2: rank is a real (0,1] bm25-normalized score, higher=better (was the
+        // array index, which violated the (0,1] + higher=better contract and made
+        // the top hit rank 0). Rows are already bm25 ASC (best first), id ASC.
+        return rows.map((row) => ({ item: rowToPlaybook(row), rank: normalizeBm25Rank(row.raw_rank) }));
       } catch {
         return [];
       }
@@ -3320,17 +3426,27 @@ function createAdapterFromDatabase(
       const statusFilter = activeOnly
         ? `AND p.status NOT IN ('archived', 'deprecated')`
         : '';
+      // P6: base visibility gate on the cross-scope playbook search path.
+      const visibility = visibilityWhereForScope(scope, 'p');
       try {
         const rows = db
           .prepare(
-            `SELECT p.* FROM playbooks p
-             INNER JOIN playbooks_fts f ON f.rowid = p.id
-             WHERE ${scopeWhereForLevelWithPrefix(scope, level, 'p')} ${statusFilter}
-             AND playbooks_fts MATCH ?
-             ORDER BY rank LIMIT ?`,
+            `SELECT p.*, bm25(playbooks_fts) AS raw_rank
+             FROM playbooks_fts
+             JOIN playbooks p ON playbooks_fts.rowid = p.id
+             WHERE playbooks_fts MATCH ?
+               AND ${scopeWhereForLevelWithPrefix(scope, level, 'p')} ${statusFilter}
+               AND ${visibility.clause}
+             ORDER BY bm25(playbooks_fts), p.id ASC
+             LIMIT ?`,
           )
-          .all(...scopeParamsForLevel(scope, level), safeQuery, limit) as PlaybookRow[];
-        return rows.map((row, index) => ({ item: rowToPlaybook(row), rank: index }));
+          .all(
+            safeQuery,
+            ...scopeParamsForLevel(scope, level),
+            ...visibility.params,
+            limit,
+          ) as Array<PlaybookRow & { raw_rank: number | null }>;
+        return rows.map((row) => ({ item: rowToPlaybook(row), rank: normalizeBm25Rank(row.raw_rank) }));
       } catch {
         return [];
       }

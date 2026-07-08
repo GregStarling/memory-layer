@@ -102,6 +102,17 @@ export function getLineageScore(currentScopeId: string, candidateScopeId: string
   return shared / Math.max(currentParts.length, candidateParts.length);
 }
 
+/**
+ * Blend the retrieval signals into a single ranking score.
+ *
+ * `lexicalScore` and `semanticScore` are expected in [0,1], higher = better, so
+ * the weighted blend is comparable across storage backends (Phase 3.2 P2). The
+ * lexical dimension is fed from `SearchResult.rank`, which every adapter now
+ * normalizes to (0,1] via the shared rank normalizers / `scoreLexical`; before
+ * Phase 3 the SQLite adapter clamped every lexical hit to a constant 1.0, which
+ * made this dimension carry no ranking signal. No rescaling is applied here — the
+ * (0,1] contract is upheld at the adapter boundary.
+ */
 export function rankKnowledge(input: {
   knowledge: KnowledgeMemory;
   lexicalScore: number;

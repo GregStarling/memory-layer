@@ -1,62 +1,32 @@
-<p align="center">
-  <h1 align="center">memory-layer</h1>
-  <p align="center">
-    A cognitive memory architecture for AI systems.<br/>
-    Interactions become summaries. Summaries become knowledge. Knowledge becomes context.<br/>
-    Two lines to start. Enough architecture to scale.
-  </p>
-</p>
+# ai-memory-layer
 
-<p align="center">
-  <a href="#why-it-stands-out">Why</a> &nbsp;&bull;&nbsp;
-  <a href="#quick-start">Quick Start</a> &nbsp;&bull;&nbsp;
-  <a href="#how-it-works">How It Works</a> &nbsp;&bull;&nbsp;
-  <a href="#integrations">Integrations</a> &nbsp;&bull;&nbsp;
-  <a href="#temporal-intelligence">Temporal</a> &nbsp;&bull;&nbsp;
-  <a href="#multi-agent-coordination">Coordination</a> &nbsp;&bull;&nbsp;
-  <a href="#knowledge-intelligence">Knowledge Intelligence</a> &nbsp;&bull;&nbsp;
-  <a href="#context-governance">Governance</a> &nbsp;&bull;&nbsp;
-  <a href="#api-reference">API</a>
-</p>
+Version 4.1.0
 
----
+Backend-agnostic cognitive memory for AI systems.
 
-Every AI system built today has the same blind spot: it forgets everything between sessions. Context vanishes. Preferences disappear. Mistakes repeat.
+Memory Layer gives an AI system durable, evolving memory across sessions: raw conversations compress into summaries, summaries crystallize into trust-scored knowledge, and the most relevant memory is assembled into a token-budgeted context window on every call. It handles compaction, extraction, evidence grounding, contradiction detection, hybrid retrieval, multi-tenant scoping, temporal replay, coordination, governance, and lifecycle management.
 
-**memory-layer** is a complete cognitive memory architecture. Conversations compress into summaries, summaries crystallize into trust-scored knowledge, and the most relevant memory is assembled into a token-budgeted context window on every call. It handles compaction, extraction, evidence grounding, contradiction detection, hybrid retrieval, multi-tenant scoping, temporal replay, governance, and lifecycle management so you don't build any of it.
+**Mental model**: Interactions become summaries. Summaries become knowledge. Knowledge becomes context.
 
-```typescript
-import { createMemory } from 'ai-memory-layer';
+Memory Layer is narrow on purpose — it is NOT Heart (what the system believes, values, and refuses) and NOT Voice (how the writing sounds at the surface). Memory is what the system remembers happened. See the [architecture docs](docs/) for the full three-layer split.
 
-const memory = createMemory();
-```
-
-That's a working memory system. No API keys. No infrastructure. No configuration.
-
----
-
-## Why It Stands Out
-
-- **Starts as a package, not an infrastructure project.** `createMemory()` works offline out of the box, then grows into SQLite, PostgreSQL, HTTP, or MCP without changing the core mental model.
-- **Treats memory as evolving state, not just search results.** Turns compact into summaries, summaries promote into evidence-backed knowledge, and context assembly respects trust, scope, and token budget.
-- **Keeps history, not just the latest projection.** Replay, diffs, streaming, and snapshots let you ask what changed and what the system knew at a specific time.
-- **Built for real agent operations.** Multi-scope routing, work claims, handoffs, playbooks, profiles, association graphs, and context governance are first-class.
-- **Knowledge improves itself.** Reflection detects patterns, clustering finds communities, linting catches quality issues, and derivation generates playbooks and rules from experience.
-
-## When To Use It
-
-Use `memory-layer` when your agent needs durable preferences and decisions across sessions, temporal replay and auditability, multi-agent coordination, or a memory abstraction that can start embedded and later move behind HTTP or MCP.
-
-It is probably overkill when you only need vector search over a document corpus, a single chat transcript with no persistence, or no trust lifecycles or coordination.
-
----
+**Version 4.0.0** — Phase 5 ships the temporal event log with point-in-time replay and diffs, multi-agent coordination (work items, claims, handoffs), SQLite migration hardening (forward-only v13→v14), and a 100/100 codebase score. See [CHANGELOG.md](CHANGELOG.md) for the full release notes.
 
 ## Quick Start
 
-### Install
+### Prerequisites
 
 ```bash
 npm install ai-memory-layer
+```
+
+No API keys required. Uses a pure-JS extractive summarizer, heuristic fact extractor, and local embedding fallback out of the box.
+
+Optional dependencies for persistence and higher-quality memory formation:
+
+```bash
+npm install better-sqlite3    # SQLite adapter (recommended for production)
+npm install pg                # PostgreSQL adapter (multi-writer scaling)
 ```
 
 ### Zero-Config (in-memory, fully offline)
@@ -75,13 +45,7 @@ const ctx = await memory.getContext('typescript config');
 // ctx.relevantKnowledge -> [{ fact: "Use TypeScript strict mode", knowledge_class: "constraint", ... }]
 ```
 
-No API keys required. Uses a pure-JS extractive summarizer, heuristic fact extractor, and local embedding fallback out of the box.
-
 ### Persistent (SQLite)
-
-```bash
-npm install better-sqlite3
-```
 
 ```typescript
 const memory = createMemory({
@@ -108,67 +72,19 @@ const memory = createMemory({
 
 When `OPENAI_API_KEY` or `VOYAGE_API_KEY` is present, `createMemory()` upgrades the embedding tier automatically. Provider summarization and extraction produce higher-fidelity memory formation.
 
----
-
-## How It Works
-
-```
-User Input --> Turn Storage --> Compaction --> Working Memory
-                                    |
-                              Extraction --> Knowledge Memory
-                                    |               |
-                              Association --> Knowledge Graph
-                                    |
-                              Retrieval --> Prompt-Ready Context
-```
-
-### Three-Tier Memory Architecture
-
-Memory flows through three tiers, each optimized for a different time horizon:
-
-| Tier | What It Stores | Lifecycle | Analogy |
-|------|---------------|-----------|---------|
-| **Short-term** (Turns) | Raw conversation exchanges | Until compacted | Working memory |
-| **Medium-term** (Working Memory) | Summaries with entities and topic tags | Days to weeks | Episodic memory |
-| **Long-term** (Knowledge) | Extracted facts with trust scores, evidence chains, and association graphs | Weeks to years | Semantic memory |
-
-Turns accumulate until the compaction monitor fires. The summarizer compresses them into working memory. The extractor identifies durable facts and promotes them through a trust lifecycle before they become long-term knowledge.
-
-### Knowledge Trust Lifecycle
-
-Extracted facts aren't blindly trusted. Every fact earns its place through evidence:
-
-```
-candidate --> provisional --> trusted
-                  |               |
-                  +-- disputed    +-- superseded --> retired
-```
-
-Promotion requires grounding in source turns, corroboration across sessions, or explicit user statements. Contradictions are detected automatically. Every decision is audited via the evidence chain and knowledge audit log.
-
-Facts are classified by type (`preference`, `constraint`, `entity`, `decision`, `reference`) and by knowledge class (`identity`, `preference`, `constraint`, `procedure`, `strategy`, `project_fact`, `anti_pattern`). Classification drives retrieval ranking, maintenance retention, and profile assembly.
-
-### Hybrid Retrieval
-
-`getContext()` scores every candidate fact across eight dimensions: lexical relevance, semantic similarity, recency, trust score, class importance, evidence density, scope affinity, and diversity. Selected knowledge seeds a single-hop association expansion, then the result is token-trimmed to budget and returned as a structured `MemoryContext` ready for prompt injection.
-
----
-
-## Integrations
-
-### Before/After Hooks (recommended)
+### Runtime Wrapper for Generation Lifecycle
 
 ```typescript
+import { createMemoryRuntime } from 'ai-memory-layer';
+
 const runtime = createMemoryRuntime(manager);
 
+// Hook-based
 const { prompt, messages } = await runtime.beforeModelCall(userInput);
 const result = await model.generate(prompt);
 await runtime.afterModelCall({ userInput, assistantOutput: result });
-```
 
-### Single-Line Wrapper
-
-```typescript
+// Or single-line wrapper
 const { result } = await runtime.wrapModelCall(
   (prepared) => model.generate(prepared.prompt),
   userInput,
@@ -198,26 +114,47 @@ const langchainMemory = createLangChainMemoryBridge(manager);
 const handler = wrapWithMemory((messages) => callModel(messages), manager);
 ```
 
-### MCP Server
+## How It Works
 
-```typescript
-const mcp = createMemoryMcpAdapter(runtime);
-// Or run standalone:
+```
+User Input --> Turn Storage --> Compaction --> Working Memory
+                                    |
+                              Extraction --> Knowledge Memory
+                                    |               |
+                              Association --> Knowledge Graph
+                                    |
+                              Retrieval --> Prompt-Ready Context
 ```
 
-```bash
-npx memory-layer serve --transport mcp --db ./memory.db
+### Three-Tier Memory Architecture
+
+Memory flows through three tiers, each optimized for a different time horizon:
+
+| Tier | Content | Lifecycle | Analogy |
+|------|---------|-----------|---------|
+| **Short-term** (Turns) | Raw conversation exchanges | Until compacted | Working memory |
+| **Medium-term** (Working Memory) | Summaries with entities and topic tags | Days to weeks | Episodic memory |
+| **Long-term** (Knowledge) | Extracted facts with trust scores, evidence chains, and association graphs | Weeks to years | Semantic memory |
+
+Turns accumulate until the compaction monitor fires. The summarizer compresses them into working memory. The extractor identifies durable facts and promotes them through a trust lifecycle before they become long-term knowledge.
+
+### Knowledge Trust Lifecycle
+
+Extracted facts aren't blindly trusted. Every fact earns its place through evidence:
+
+```
+candidate --> provisional --> trusted
+                  |               |
+                  +-- disputed    +-- superseded --> retired
 ```
 
-### HTTP Service
+Promotion requires grounding in source turns, corroboration across sessions, or explicit user statements. Contradictions are detected automatically. Every decision is audited via the evidence chain and knowledge audit log.
 
-```bash
-npx memory-layer serve --transport http --db ./memory.db --port 3100
-```
+Facts are classified by type (`preference`, `constraint`, `entity`, `decision`, `reference`) and by knowledge class (`identity`, `preference`, `constraint`, `procedure`, `strategy`, `project_fact`, `anti_pattern`, `episodic_fact`). Classification drives retrieval ranking, maintenance retention, and profile assembly.
 
-Full REST API documented in [`openapi.yaml`](openapi.yaml), with multi-tenant routing, SSE event streaming, bearer auth, and admin key separation.
+### Hybrid Retrieval
 
----
+`getContext()` scores every candidate fact across eight dimensions: lexical relevance, semantic similarity, recency, trust score, class importance, evidence density, scope affinity, and diversity. Selected knowledge seeds a single-hop association expansion, then the result is token-trimmed to budget and returned as a structured `MemoryContext` ready for prompt injection.
 
 ## Surfaces
 
@@ -229,8 +166,6 @@ Full REST API documented in [`openapi.yaml`](openapi.yaml), with multi-tenant ro
 | **CLI** | Inspection, debugging, admin | `npx memory-layer inspect` |
 | **Python client** | Python agents consuming the HTTP API | `pip install ai-memory-layer-client` |
 
----
-
 ## Multi-Tenancy & Scoping
 
 Every record belongs to a five-tuple scope that enables isolation and selective sharing:
@@ -238,88 +173,54 @@ Every record belongs to a five-tuple scope that enables isolation and selective 
 ```typescript
 const memory = createMemory({
   scope: {
-    tenant_id: 'acme-corp',            // Organization boundary
-    system_id: 'code-assistant',       // Which agent or system
-    workspace_id: 'backend-repo',      // Shared project context
-    collaboration_id: 'incident-7',    // Cross-system collaboration boundary
-    scope_id: 'task-refactor-auth',    // This specific task or thread
+    tenant_id: 'acme-corp',
+    system_id: 'code-assistant',
+    workspace_id: 'backend-repo',
+    collaboration_id: 'incident-7',
+    scope_id: 'task-refactor-auth',
   },
-  crossScopeLevel: 'workspace',       // Read workspace-wide knowledge
+  crossScopeLevel: 'workspace',
 });
 ```
 
-Each agent gets its own `scope_id`. Agents in the same `workspace_id` can share knowledge via cross-scope retrieval. The `system_id` distinguishes different agent types, while `tenant_id` provides the outermost organizational boundary. By default, an agent only sees its own scope — widening requires explicit `crossScopeLevel` configuration or a context contract.
+Each agent gets its own `scope_id`. Agents in the same `workspace_id` share knowledge via cross-scope retrieval. Retrieval levels: `scope` → `workspace` → `system` → `tenant`. Each level widens the knowledge pool while preserving ranking preference for local, high-trust facts.
 
-### Cross-Scope Retrieval
-
-```typescript
-const results = await memory.searchCrossScope('rate limiting', 'workspace');
-
-let cursor = await memory.resolveChangeStreamCursor();
-const page = await memory.listKnowledgeChanges({ cursor, scopeLevel: 'workspace' });
-cursor = page.nextCursor;
-```
-
-Retrieval levels: `scope` -> `workspace` -> `system` -> `tenant`. Each level widens the knowledge pool while preserving ranking preference for local, high-trust facts.
-
-### Visibility Classes
-
-Items carry a visibility class (`private`, `shared_collaboration`, `workspace`, `tenant`) controlling what surfaces under each view policy: `local_only`, `local_plus_shared_collaboration`, `workspace_shared`, and `operator_supervisor`.
-
----
+Items carry a visibility class (`private`, `shared_collaboration`, `workspace`, `tenant`) controlling what surfaces under each view policy.
 
 ## Temporal Intelligence
 
 An append-only event log records every state change with before/after payloads.
 
-### Point-in-Time Replay
-
 ```typescript
+// Point-in-time replay
 const context = await memory.getContextAt(asOfTimestamp, 'deployment status');
 const state = await memory.getStateAt(asOfTimestamp);
-```
 
-### Temporal Diffs
-
-```typescript
+// Temporal diffs
 const diff = await memory.diffState(fromTimestamp, toTimestamp);
-// diff.summary.byEntityKind -> { knowledge_memory: 3, work_item: 1 }
-```
 
-### Change Streaming
-
-```typescript
+// Change streaming
 for await (const event of memory.streamChanges({ signal: controller.signal })) {
   console.log(event.event_type, event.entity_kind, event.entity_id);
 }
 ```
 
-### Consistent Snapshots
-
-Snapshots pin a watermark event id before assembling context, ensuring a consistent cut of the event log.
-
----
+Snapshots pin a watermark event ID before assembling context, ensuring a consistent cut of the event log.
 
 ## Multi-Agent Coordination
 
-### Work Items & Claims
-
 ```typescript
+// Work items & claims
 const item = await memory.trackWorkItem('Deploy canary to us-east-1', 'objective', 'open');
-
 const claim = await memory.claimWorkItem({
   workItemId: item.id,
   actor: { actor_kind: 'agent', actor_id: 'deployer', system_id: null, display_name: 'Deploy Bot', metadata: null },
   leaseSeconds: 600,
 });
-
 await memory.renewWorkClaim(claim.id, claim.actor, 300);
 await memory.releaseWorkClaim(claim.id, claim.actor, 'deployment complete');
-```
 
-### Handoffs
-
-```typescript
+// Handoffs
 const handoff = await memory.handoffWorkItem({
   workItemId: item.id,
   fromActor: deployBot,
@@ -327,128 +228,59 @@ const handoff = await memory.handoffWorkItem({
   summary: 'Canary deployed. Monitor for 30min then promote.',
 });
 await memory.acceptHandoff(handoff.id, monitorBot);
-```
 
-### Episodic & Cognitive Retrieval
-
-```typescript
+// Episodic & cognitive retrieval
 const episodes = await memory.searchEpisodes({ query: 'deployment failures', limit: 5 });
-const recap = await memory.summarizeEpisode('session-xyz', { detailLevel: 'detailed' });
 const reflection = await memory.reflect({ query: 'What patterns emerge from our deployments?' });
-const cognitive = await memory.searchCognitive({ query: 'rate limiting', limit: 10 });
-```
 
-### Playbooks
-
-```typescript
+// Playbooks
 const playbook = await memory.createPlaybook({
   title: 'Canary Deployment Runbook',
   description: 'Step-by-step canary deployment with rollback gates',
   instructions: '1. Deploy to canary. 2. Monitor error rate. 3. ...',
   tags: ['deployment', 'canary'],
 });
-// Playbooks surface automatically in getContext() when relevant
 ```
-
-### Profiles & Association Graphs
-
-```typescript
-const profile = await memory.getProfile({ view: 'user' });
-const graph = await memory.traverseAssociations('knowledge', factId, { maxDepth: 2, maxNodes: 20 });
-```
-
----
 
 ## Knowledge Intelligence
 
 Beyond storage and retrieval, memory-layer actively analyzes, improves, and curates the knowledge it holds.
 
-### Reflection & Derivation
-
 ```typescript
-// Detect patterns across the knowledge base
+// Reflection — detect patterns across the knowledge base
 const reflection = await memory.reflect({ query: 'What recurring issues appear in deployments?' });
 
-// Generate playbook candidates, coding rules, and anti-patterns from patterns
+// Derivation — generate playbook candidates, rules, and anti-patterns from patterns
 const derived = await memory.derive({ reflection });
-```
 
-### Graph Analysis & Clustering
-
-```typescript
-// Community detection in the knowledge association graph
-const clusters = computeClusters(associations, knowledge);
-
-// Full topology report: density, bridges, centrality, critical facts
+// Graph analysis — community detection, topology, bridges, centrality
 const report = await memory.getGraphReport({ sections: ['topology', 'bridges', 'critical'] });
-```
 
-### Core Memory
-
-```typescript
-// Extract the essential knowledge subset that should always appear in context
-const core = await getCoreMemory(adapter, scope, { overflowStrategy: 'truncate' });
-```
-
-### Knowledge Linting
-
-```typescript
-// Quality analysis: orphans, trust skew, evidence concentration, contradiction clusters, stale provisionals
+// Knowledge linting — orphans, trust skew, evidence concentration, contradictions, stale provisionals
 const lint = await lintKnowledge(adapter, scope);
-// lint.issues -> [{ type: 'orphan_knowledge', severity: 'warning', ... }, ...]
-```
 
-### Aliases & Entity Resolution
-
-```typescript
+// Aliases & entity resolution
 const candidates = discoverAliasCandidates(knowledge);
-const resolved = resolveAliases(knowledge, aliasMap);
-```
 
-### Ontology Validation
+// Core memory — essential knowledge subset that should always appear in context
+const core = await getCoreMemory(adapter, scope, { overflowStrategy: 'truncate' });
 
-```typescript
-const violations = checkOntologyViolations(facts, ontology);
-const validation = validateExtractedFacts(extracted);
-```
-
-### Curation Workflow
-
-```typescript
+// Curation — pending promotions, conflicts, and retirement candidates
 const summary = await memory.getCurationSummary();
-// summary.actions -> [{ type: 'promotion', knowledgeId: 42, source: 'maintenance', ... }]
-```
 
-### Document Ingestion
-
-```typescript
-// Refresh knowledge from source documents with content-hash deduplication
+// Document ingestion — refresh knowledge from source documents with content-hash deduplication
 const result = memory.refreshDocuments([
   { title: 'API Guidelines', contentHash: 'abc123', content: '...' },
 ]);
-```
 
-### Bundle Import/Export
-
-```typescript
+// Export/import
 const bundle = memory.exportBundle('backup-2024', { includeTurns: true });
-const result = memory.importBundle(bundle, { conflictStrategy: 'keep_existing' });
-```
-
-### Markdown Export
-
-```typescript
 const md = await memory.exportAsMarkdown({ groupBy: 'class', includeEvidence: true });
-// md.markdown -> human-readable knowledge dump
 ```
-
----
 
 ## Context Governance
 
-Use context contracts when different agents should see different slices of the same memory graph. Governance state is durable — contracts, invariants, and escalation policies persist to SQLite and survive restarts.
-
-### Contracts & Invariants at Config Time
+Context contracts let different agents see different slices of the same memory graph. Governance state is durable — contracts, invariants, and escalation policies persist to SQLite and survive restarts.
 
 ```typescript
 const memory = createMemory({
@@ -485,9 +317,7 @@ const executorCtx = await memory.getContext('apply rollback', { contract: 'execu
 
 Contracts bundle visibility, scope widening, knowledge class filters, trust thresholds, and token budgets into reusable lenses. Invariants are injected separately from ranked retrieval and prioritized by severity during token trimming.
 
-### Runtime Management
-
-Governance can also be managed at runtime instead of baking it into constructor config:
+Governance can also be managed at runtime:
 
 ```typescript
 await memory.putContextContract('executor', {
@@ -508,40 +338,9 @@ await memory.setContextEscalationPolicy({
   maxTokenBudget: 5000,
   maxView: 'workspace_shared',
 });
-
-// Read current state
-const governance = await memory.getContextGovernance();
-
-// Clean up
-await memory.deleteContextContract('executor');
-await memory.deleteContextInvariant('english-only');
 ```
 
-### Escalation Requests
-
-When an agent is blocked, it can request a broader contract:
-
-```typescript
-const expansion = await memory.requestContextExpansion(
-  {
-    reason: 'missing_workspace_context',
-    note: 'Need the shared rollback procedure.',
-    contract: { view: 'workspace_shared', crossScopeLevel: 'workspace' },
-  },
-  { currentContract: 'executor' },
-);
-// expansion.decision: 'approved' | 'requires_approval' | 'denied'
-// expansion.changeKinds, expansion.warnings, expansion.rationale
-```
-
-### Transport Endpoints
-
-- **HTTP**: `GET /v1/context/config`, `PUT/DELETE` for `/v1/context/config/default-contract`, `/contracts/:name`, `/invariants/:id`, `/escalation-policy`. POST `/v1/context/request` for escalation. Admin key required for mutations.
-- **MCP**: `memory_get_context_config`, `memory_put_context_contract`, `memory_delete_context_contract`, `memory_put_context_invariant`, `memory_delete_context_invariant`, `memory_set_context_escalation_policy`, `memory_request_context`
-
-Assembled contexts expose `appliedContract`, `warnings`, and `degradedContext` so callers can tell when governance filtered the context or when token pressure forced material out.
-
----
+When an agent is blocked, it can request a broader context. The escalation policy decides whether to approve, deny, or flag for human review.
 
 ## Configuration
 
@@ -571,125 +370,43 @@ Assembled contexts expose `appliedContract`, `warnings`, and `degradedContext` s
 | **Local semantic** | Composite heuristic | Lexical + local TF-IDF embeddings | Nothing |
 | **Provider-backed** | Claude/OpenAI LLM | Lexical + provider embeddings | API key |
 
-### Tunable Policies
+Four policy objects (`MonitorPolicy`, `ExtractionPolicy`, `ContextPolicy`, `MaintenancePolicy`) give fine-grained control over compaction thresholds, extraction behavior, context scoring weights, and maintenance lifecycles. Presets configure sensible defaults; override individual fields when needed.
 
-Four policy objects give fine-grained control over compaction thresholds, extraction behavior, context scoring weights, and maintenance lifecycles. See the `MonitorPolicy`, `ExtractionPolicy`, `ContextPolicy`, and `MaintenancePolicy` types for the full surface. Presets configure sensible defaults; override individual fields when you need to.
+## Storage Backends
 
----
+| Backend | Best For | Install | Search |
+|---------|---------|---------|--------|
+| **In-memory** | Tests, prototypes | Built-in | Exact match |
+| **SQLite** | Single-process production | `npm install better-sqlite3` | FTS5 + local embeddings |
+| **PostgreSQL** | Multi-writer, hosted | `npm install pg` | tsvector + pgvector ANN |
 
-## API Reference
+SQLite is the zero-friction production path. PostgreSQL + pgvector is the scaling path with ANN indexing for high-volume semantic retrieval.
 
-<details>
-<summary><strong>MemoryManager</strong> — full surface</summary>
-
-```typescript
-interface MemoryManager {
-  // Store
-  processTurn(role, content, actor?): Promise<Turn>
-  processExchange(userContent, assistantContent, actors?): Promise<{ userTurn; assistantTurn; compactionResult }>
-
-  // Retrieve
-  getContext(relevanceQuery?, options?): Promise<MemoryContext>
-  getContextAt(asOf, relevanceQuery?, options?): Promise<MemoryContext>
-  getSessionBootstrap(relevanceQuery?, options?): Promise<SessionBootstrap>
-  getSessionBootstrapAt(asOf, relevanceQuery?, options?): Promise<SessionBootstrap>
-  captureSnapshot(relevanceQuery?, options?): Promise<SnapshotData>
-  search(query, options?): Promise<{ turns, knowledge }>
-  searchCrossScope(query, level, options?): Promise<{ knowledge }>
-  listKnowledgeChanges(options?): Promise<{ changes, nextCursor }>
-  recall(timeRange): Promise<{ turns, workingMemory, knowledge, workItems }>
-
-  // Governance
-  requestContextExpansion(request, options?): Promise<ContextRequestResolution>
-  getContextGovernance(): Promise<ContextGovernanceSnapshot>
-  setDefaultContextContract(contract): Promise<ContextContract | null>
-  putContextContract(name, contract): Promise<ContextContract>
-  deleteContextContract(name): Promise<boolean>
-  putContextInvariant(invariant): Promise<ContextInvariant>
-  deleteContextInvariant(id): Promise<boolean>
-  getContextEscalationPolicy(): Promise<ContextEscalationPolicy>
-  setContextEscalationPolicy(policy): Promise<ContextEscalationPolicy>
-
-  // Temporal
-  getStateAt(asOf, options?): Promise<TemporalStateSnapshot>
-  getTimeline(options?): Promise<TimelineResult>
-  diffState(from, to, options?): Promise<TemporalStateDiff>
-  listMemoryEvents(options?): Promise<TimelineResult>
-  streamChanges(options?): AsyncIterable<MemoryEventRecord>
-  resolveChangeStreamCursor(cursor?): Promise<string>
-
-  // Knowledge
-  learnFact(fact, factType, confidence?): Promise<KnowledgeMemory>
-  inspectKnowledge(id): Promise<{ knowledge, evidence, audits }>
-  listKnowledge(options?): Promise<PaginatedResult<KnowledgeMemory>>
-  reverifyKnowledge(id): Promise<TrustAssessment>
-
-  // Coordination
-  trackWorkItem(title, kind?, status?, detail?): Promise<WorkItem>
-  updateWorkItem(id, patch): Promise<WorkItem | null>
-  claimWorkItem(input): Promise<WorkClaim>
-  renewWorkClaim(claimId, actor, leaseSeconds?): Promise<WorkClaim | null>
-  releaseWorkClaim(claimId, actor, reason?): Promise<WorkClaim | null>
-  listWorkClaims(options?): Promise<WorkClaim[]>
-  handoffWorkItem(input): Promise<HandoffRecord>
-  acceptHandoff(id, actor): Promise<HandoffRecord | null>
-
-  // Episodic & Cognitive
-  searchEpisodes(options): Promise<EpisodeSummary[]>
-  summarizeEpisode(sessionId, options?): Promise<EpisodeSummary>
-  reflect(options): Promise<ReflectResult>
-  searchCognitive(options): Promise<CognitiveSearchResult>
-
-  // Knowledge Intelligence
-  getGraphReport(options?): Promise<GraphReport>
-  derive(options): Promise<DerivedOutput[]>
-  getCoreMemory(options?): Promise<CoreMemoryBundle>
-  getCurationSummary(input?, options?): Promise<CurationSummary>
-  exportAsMarkdown(options?): Promise<MarkdownExportResult>
-
-  // Playbooks
-  createPlaybook(input): Promise<Playbook>
-  searchPlaybooks(query): Promise<SearchResult<Playbook>[]>
-  revisePlaybook(id, instructions, reason): Promise<{ playbook, revision }>
-
-  // Profiles & Associations
-  getProfile(options?): Promise<Profile>
-  traverseAssociations(kind, id, options?): Promise<AssociationGraph>
-  addAssociation(input): Promise<Association>
-  removeAssociation(id): Promise<void>
-
-  // Bundles & Documents
-  exportBundle(name, options?): ExportBundleResult
-  importBundle(bundle, options): ImportBundleResult
-  refreshDocuments(documents): RefreshResult
-
-  // System
-  forceCompact(): Promise<CompactionResult | null>
-  runMaintenance(policy?): Promise<MaintenanceReport>
-  getRuntimeDiagnostics(): Promise<DiagnosticsReport>
-  close(): Promise<void>
-}
-```
-</details>
-
-<details>
-<summary><strong>MemoryRuntime</strong> — model-call integration hooks</summary>
+## Observability
 
 ```typescript
-interface MemoryRuntime {
-  manager: MemoryManager;
-  startSession(relevanceQuery?): Promise<{ bootstrap, bootstrapPrompt }>
-  resumeSession(relevanceQuery?): Promise<{ bootstrap, bootstrapPrompt }>
-  beforeModelCall(input): Promise<{ bootstrap, context, bootstrapPrompt, prompt, messages }>
-  afterModelCall(input): Promise<{ exchange, trackedWorkItems }>
-  wrapModelCall(modelFn, input, actors?): Promise<{ result, runtime, exchange, trackedWorkItems }>
-  refreshSnapshot(): Promise<SessionSnapshot | null>
-  getSnapshot(): SessionSnapshot | null
-}
-```
-</details>
+// Event hooks
+const memory = createMemory({
+  onEvent: (event) => {
+    // event.type: 'compaction' | 'extraction' | 'promotion' | 'retrieval' |
+    //   'search' | 'maintenance' | 'capability' | 'knowledge_change' | 'context_assembly'
+    console.log(`[${event.type}] scope=${event.scope.scope_id} duration=${event.durationMs}ms`);
+  },
+});
 
----
+// Typed event emitter
+const emitter = createMemoryEventEmitter();
+emitter.on('compaction', (e) => metrics.track('compaction', e.durationMs));
+emitter.on('extraction', (e) => metrics.track('facts_extracted', e.meta.factCount));
+
+// PII redaction
+const memory = createMemory({
+  redactText: ({ kind, text }) =>
+    text.replace(/\b\d{3}-\d{2}-\d{4}\b/g, '[REDACTED-SSN]'),
+});
+```
+
+Summarizer, extractor, and embedding subsystems each have independent circuit breakers. When a provider goes down, the system degrades gracefully and emits `degraded_mode` events.
 
 ## Python Client
 
@@ -710,52 +427,45 @@ result = runtime.run_turn("What constraints apply?", lambda prepared: call_model
 
 Async support via `AsyncMemoryClient` and `AsyncMemoryRuntimeClient`. Full HTTP API surface parity.
 
----
+## Local Development
 
-## Observability
+```bash
+# Install dependencies
+npm install
 
-### Event Hooks
+# Run the full test suite
+npm test
 
-```typescript
-const memory = createMemory({
-  onEvent: (event) => {
-    // event.type: 'compaction' | 'extraction' | 'promotion' | 'retrieval' |
-    //   'search' | 'maintenance' | 'capability' | 'knowledge_change' | 'context_assembly'
-    console.log(`[${event.type}] scope=${event.scope.scope_id} duration=${event.durationMs}ms`);
-  },
-});
+# Run tests with coverage report
+npm run test:coverage
+
+# Type-check without emitting
+npm run typecheck
+
+# PostgreSQL integration tests (requires POSTGRES_TEST_URL)
+npm run test:postgres
+
+# Quality evaluation gates
+npm run eval:retrieval
+npm run eval:gate
+npm run eval:memory-quality
+
+# Full pre-publish release check
+npm run release:check
+
+# Build the package
+npm run build
 ```
 
-### Typed Event Emitter
+## Design Principles
 
-```typescript
-const emitter = createMemoryEventEmitter();
-emitter.on('compaction', (e) => metrics.track('compaction', e.durationMs));
-emitter.on('extraction', (e) => metrics.track('facts_extracted', e.meta.factCount));
-emitter.on('knowledge_change', (e) => audit.log(e.meta.action, e.meta.knowledgeId));
-```
-
-### PII Redaction
-
-```typescript
-const memory = createMemory({
-  redactText: ({ kind, text }) =>
-    text.replace(/\b\d{3}-\d{2}-\d{4}\b/g, '[REDACTED-SSN]'),
-});
-```
-
-### Circuit Breakers
-
-Summarizer, extractor, and embedding subsystems each have independent circuit breakers. When a provider goes down, the system degrades gracefully and telemetry emits `degraded_mode` events.
-
----
-
-## Storage Backends
-
-| Backend | Best For | Install | Search |
-|---------|---------|---------|--------|
-| **In-memory** | Tests, prototypes | Built-in | Exact match |
-| **SQLite** | Single-process production | `npm install better-sqlite3` | FTS5 + local embeddings |
-| **PostgreSQL** | Multi-writer, hosted | `npm install pg` | tsvector + pgvector ANN |
-
-SQLite is the zero-friction production path. PostgreSQL + pgvector is the scaling path with ANN indexing for high-volume semantic retrieval.
+- **Package first** — works offline and in-process out of the box, grows into SQLite, PostgreSQL, HTTP, and MCP without changing the core mental model
+- **Memory is evolving state, not search results** — turns compact into summaries, summaries promote into evidence-backed knowledge, and context assembly respects trust, scope, and token budget
+- **Evidence-driven trust** — every fact earns trust through grounding in source turns, corroboration across sessions, or explicit user statements
+- **Token accountability** — all context assembly respects token budgets with explicit trimming traces
+- **Full temporal lineage** — append-only event log enables replay, diffs, streaming, and point-in-time queries
+- **Scope isolation** — five-tuple scopes enable multi-tenant safety with selective sharing
+- **Governance as code** — contracts, invariants, and escalation policies are durable, versioned configuration
+- **Knowledge self-improvement** — reflection, clustering, linting, and derivation continuously strengthen the knowledge graph
+- **Coordination-first** — work items, claims, handoffs, and profiles are first-class for multi-agent orchestration
+- **Memory is not heart** — heart is what the system believes and values; memory is what it remembers happened

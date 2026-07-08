@@ -138,6 +138,9 @@ describe('policy defaults and overrides', () => {
       source: 'manual',
       confidence: 'high',
       trust_score: 0.9,
+      // P6: workspace-visible so it can surface to the child scope; the test
+      // exercises the lineage-score threshold, not the visibility gate.
+      visibility_class: 'workspace',
     });
 
     const included = await buildMemoryContext(asyncAdapter, childScope, {

@@ -60,6 +60,8 @@ describe('cross-scope trust', () => {
     const parentScope = makeScope({ workspace_id: 'shared', scope_id: 'project/root' });
     const siblingScope = makeScope({ workspace_id: 'shared', scope_id: 'project/other' });
 
+    // P6: both facts are shared across the workspace (explicit opt-in); a
+    // default 'private' fact would never surface to the child scope cross-scope.
     adapter.insertKnowledgeMemory({
       ...parentScope,
       fact: 'Parent deploy checklist must be reviewed.',
@@ -69,6 +71,7 @@ describe('cross-scope trust', () => {
       source: 'manual',
       confidence: 'high',
       trust_score: 0.9,
+      visibility_class: 'workspace',
     });
     adapter.insertKnowledgeMemory({
       ...siblingScope,
@@ -79,6 +82,7 @@ describe('cross-scope trust', () => {
       source: 'manual',
       confidence: 'high',
       trust_score: 0.9,
+      visibility_class: 'workspace',
     });
 
     const manager = createMemoryManager({

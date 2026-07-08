@@ -77,12 +77,42 @@ import type {
   PersistedGovernanceState,
 } from './context-contract.js';
 
+/**
+ * Storage contract implemented identically by the in-memory, SQLite, and
+ * Postgres adapters. Cross-cutting behavioral contracts (Phase 3 parity):
+ *
+ * - **Result ordering (P3).** Every list/range read has ONE canonical ordering,
+ *   declared per-method below and identical across all three adapters. The
+ *   default for the methods that previously diverged is `created_at ASC, then
+ *   id ASC` (`id` is the stable tie-break because `created_at` may be
+ *   caller-supplied and thus non-monotonic). Search methods order by `rank`
+ *   DESC then the method's documented tie-break.
+ *
+ * - **Search rank (P2).** `SearchResult.rank` is in (0,1], higher = better, on
+ *   every adapter (see {@link SearchResult}).
+ *
+ * - **Cross-scope visibility (P6).** Every `*CrossScope` read (and the
+ *   cross-scope temporal reads `getKnowledgeSince`) applies the base
+ *   visibility gate `shared/visibility.isBaseVisible(visibility_class, item,
+ *   queryScope)` in addition to scope-level widening: an item surfaces only if
+ *   it is within the requested breadth AND its visibility_class permits the
+ *   reader. A `private` record never surfaces outside its own scope; a
+ *   `shared_collaboration` record only within its collaboration_id; a
+ *   `workspace` record only within its workspace; a `tenant` record anywhere in
+ *   the tenant. This holds independent of any context `view`.
+ *
+ * - **Field parity (P5) / triple-sync (P8).** Every field of a contract input is
+ *   persisted (including caller-supplied `created_at`), and any signature change
+ *   here must be mirrored in async-storage.ts, sync-to-async.ts, and the
+ *   temporal replay adapter.
+ */
 export interface StorageAdapter {
   insertTurn(input: NewTurn): Turn;
   insertTurns(inputs: NewTurn[]): Turn[];
   getTurnById(id: number): Turn | null;
   getActiveTurns(scope: MemoryScope, sessionId?: string): Turn[];
   getActiveTurnsPaginated(scope: MemoryScope, options?: PaginationOptions): PaginatedResult<Turn>;
+  /** Ordered `created_at` ASC, then `id` ASC (P3). */
   getTurnsByTimeRange(scope: MemoryScope, range: TimeRange): Turn[];
   searchTurns(scope: MemoryScope, query: string, options?: SearchOptions): SearchResult<Turn>[];
   archiveTurn(id: number, archivedAt: number, compactionLogId: number): void;
@@ -96,9 +126,11 @@ export interface StorageAdapter {
   insertWorkingMemory(input: NewWorkingMemory): WorkingMemory;
   getWorkingMemoryById(id: number): WorkingMemory | null;
   getExistingWorkingMemoryIds?(ids: number[]): number[];
+  /** Ordered `created_at` ASC, then `id` ASC (P3). */
   getWorkingMemoryBySession(sessionId: string, scope: MemoryScope): WorkingMemory[];
   getActiveWorkingMemory(scope: MemoryScope, sessionId?: string): WorkingMemory[];
   getLatestWorkingMemory(scope: MemoryScope, sessionId?: string): WorkingMemory | null;
+  /** Ordered `created_at` ASC, then `id` ASC (P3). */
   getWorkingMemoryByTimeRange(scope: MemoryScope, range: TimeRange): WorkingMemory[];
   expireWorkingMemory(id: number): void;
   markWorkingMemoryPromoted(id: number, knowledgeMemoryId: number): void;
@@ -125,8 +157,11 @@ export interface StorageAdapter {
     scope: MemoryScope,
     options?: PaginationOptions,
   ): PaginatedResult<KnowledgeMemory>;
+  /** Ordered `created_at` ASC, then `id` ASC (P3, F6(d) pinned); base visibility gate (P6). */
   getActiveKnowledgeCrossScope(scope: MemoryScope, level: ScopeLevel): KnowledgeMemory[];
+  /** Ordered `created_at` ASC, then `id` ASC (P3, F6(d) pinned); base visibility gate (P6). */
   getKnowledgeSince(scope: MemoryScope, level: ScopeLevel, since: number): KnowledgeMemory[];
+  /** Ordered `created_at` ASC, then `id` ASC (P3). */
   getKnowledgeByTimeRange(scope: MemoryScope, range: TimeRange): KnowledgeMemory[];
   searchKnowledge(
     scope: MemoryScope,
@@ -174,9 +209,13 @@ export interface StorageAdapter {
   insertWorkItem(input: NewWorkItem): WorkItem;
   getWorkItemById(id: number): WorkItem | null;
   getExistingWorkItemIds?(ids: number[]): number[];
+  /** Ordered `created_at` ASC, then `id` ASC (P3). */
   getActiveWorkItems(scope: MemoryScope): WorkItem[];
+  /** Ordered `created_at` ASC, then `id` ASC (P3); base visibility gate (P6). */
   getActiveWorkItemsCrossScope(scope: MemoryScope, level: ScopeLevel): WorkItem[];
+  /** Ordered `created_at` ASC, then `id` ASC (P3). */
   getWorkItemsByTimeRange(scope: MemoryScope, range: TimeRange): WorkItem[];
+  /** Ordered `created_at` ASC, then `id` ASC (P3); base visibility gate (P6). */
   getWorkItemsByTimeRangeCrossScope(
     scope: MemoryScope,
     level: ScopeLevel,
@@ -252,6 +291,7 @@ export interface StorageAdapter {
   getPlaybookById(id: number): Playbook | null;
   getExistingPlaybookIds?(ids: number[]): number[];
   getActivePlaybooks(scope: MemoryScope): Playbook[];
+  /** Ordered `created_at` ASC, then `id` ASC (P3, F6(d) pinned); base visibility gate (P6). */
   getActivePlaybooksCrossScope(scope: MemoryScope, level: ScopeLevel): Playbook[];
   searchPlaybooks(scope: MemoryScope, query: string, options?: SearchOptions): SearchResult<Playbook>[];
   searchPlaybooksCrossScope(

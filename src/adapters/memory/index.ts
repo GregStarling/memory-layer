@@ -94,6 +94,13 @@ import type {
   PersistedGovernanceState,
 } from '../../contracts/context-contract.js';
 import { createInMemoryEmbeddingAdapter } from './embeddings.js';
+import {
+  resolvePaginationOptions,
+  resolveSearchOptions,
+  scoreLexical,
+} from '../shared/search.js';
+import { isBaseVisible, eventVisibilityClass } from '../shared/visibility.js';
+import { byCreatedAtThenId } from '../shared/ordering.js';
 
 const SCHEMA_VERSION = 1;
 
@@ -147,49 +154,6 @@ function inRange(createdAt: number, range: TimeRange): boolean {
   return true;
 }
 
-function tokenize(text: string): string[] {
-  return text
-    .toLowerCase()
-    .split(/[^a-z0-9]+/g)
-    .filter((token) => token.length > 0);
-}
-
-function scoreText(query: string, text: string): number {
-  const queryTokens = new Set(tokenize(query));
-  const textTokens = new Set(tokenize(text));
-  if (queryTokens.size === 0 || textTokens.size === 0) return 0;
-  let matches = 0;
-  for (const token of queryTokens) {
-    if (textTokens.has(token)) matches += 1;
-  }
-  if (matches === 0) return 0;
-  const containsWhole = text.toLowerCase().includes(query.toLowerCase()) ? 0.25 : 0;
-  return matches / queryTokens.size + containsWhole;
-}
-
-function resolveSearchOptions(options?: SearchOptions): Required<SearchOptions> {
-  return {
-    limit: options?.limit ?? 10,
-    activeOnly: options?.activeOnly ?? true,
-    includeProvisional: options?.includeProvisional ?? false,
-    includeDisputed: options?.includeDisputed ?? false,
-    minimumTrustScore: options?.minimumTrustScore ?? 0,
-    knowledgeStates: options?.knowledgeStates ?? [],
-    knowledgeClasses: options?.knowledgeClasses ?? [],
-    tags: options?.tags ?? [],
-    preferLocalTrusted: options?.preferLocalTrusted ?? false,
-    preferLineageMemory: options?.preferLineageMemory ?? false,
-  };
-}
-
-function resolvePaginationOptions(options?: PaginationOptions): Required<PaginationOptions> {
-  return {
-    limit: options?.limit ?? 25,
-    offset: options?.offset ?? 0,
-    cursor: options?.cursor ?? 0,
-  };
-}
-
 function paginateItems<T extends { id: number }>(
   items: T[],
   options?: PaginationOptions,
@@ -210,6 +174,38 @@ function paginateItems<T extends { id: number }>(
 
 function cloneValue<T>(value: T): T {
   return structuredClone(value);
+}
+
+/**
+ * Weighted lexical relevance for playbook search, normalized to (0,1], higher =
+ * better (Phase 3.2 P2). Replaces the previous rank = array-index bug (which
+ * violated both "higher = better" and the (0,1] scale). Title matches dominate,
+ * then description, then instructions; a small combined-text term guarantees a
+ * strictly-positive rank for any playbook the caller's token filter admitted.
+ *
+ * The admission filter (searchPlaybooks) is SUBSTRING-based
+ * (`text.includes(token)`), while scoreLexical scores on EXACT tokens. A
+ * playbook admitted only by a substring hit (query "deploy" ⊂ "deployment")
+ * would otherwise score exactly 0 from scoreLexical, violating the (0,1] rank
+ * contract for an admitted row. Floor the weighted score above 0 so every
+ * admitted playbook carries a strictly-positive rank; the floor is far below any
+ * real exact-token score, so it never reorders genuine matches.
+ */
+const PLAYBOOK_MATCH_FLOOR = 1e-9;
+function rankPlaybook(
+  query: string,
+  playbook: { title: string; description: string; instructions: string },
+): number {
+  const combined = scoreLexical(
+    query,
+    `${playbook.title} ${playbook.description} ${playbook.instructions}`,
+  );
+  const weighted =
+    scoreLexical(query, playbook.title) * 0.5 +
+    scoreLexical(query, playbook.description) * 0.2 +
+    scoreLexical(query, playbook.instructions) * 0.15 +
+    combined * 0.15;
+  return Math.max(weighted, PLAYBOOK_MATCH_FLOOR);
 }
 
 function scopeConfigKey(scope: MemoryScope, key: string): string {
@@ -489,7 +485,10 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     },
 
     getTurnsByTimeRange(scope, range) {
-      return state.turns.filter((turn) => matchesScope(turn, scope) && inRange(turn.created_at, range));
+      // Ordering contract (P3): created_at ASC, then id ASC.
+      return state.turns
+        .filter((turn) => matchesScope(turn, scope) && inRange(turn.created_at, range))
+        .sort(byCreatedAtThenId);
     },
 
     searchTurns(scope, query, options) {
@@ -499,7 +498,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         .filter((turn) => matchesScope(turn, scope) && (!resolved.activeOnly || turn.archived_at === null))
         .map((turn) => ({
           item: turn,
-          rank: scoreText(query, turn.content),
+          rank: scoreLexical(query, turn.content),
         }))
         .filter((result) => result.rank > 0)
         .sort((a, b) => b.rank - a.rank || b.item.created_at - a.item.created_at)
@@ -593,7 +592,10 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     },
 
     getWorkingMemoryBySession(sessionId, scope) {
-      return state.workingMemory.filter((item) => item.session_id === sessionId && matchesScope(item, scope));
+      // Ordering contract (P3): created_at ASC, then id ASC.
+      return state.workingMemory
+        .filter((item) => item.session_id === sessionId && matchesScope(item, scope))
+        .sort(byCreatedAtThenId);
     },
 
     getActiveWorkingMemory(scope, sessionId) {
@@ -612,9 +614,10 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     },
 
     getWorkingMemoryByTimeRange(scope, range) {
-      return state.workingMemory.filter(
-        (item) => matchesScope(item, scope) && inRange(item.created_at, range),
-      );
+      // Ordering contract (P3): created_at ASC, then id ASC.
+      return state.workingMemory
+        .filter((item) => matchesScope(item, scope) && inRange(item.created_at, range))
+        .sort(byCreatedAtThenId);
     },
 
     expireWorkingMemory(id) {
@@ -664,7 +667,9 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
 
     insertKnowledgeMemory(input: NewKnowledgeMemory): KnowledgeMemory {
       const scope = validateNewKnowledgeMemory(input);
-      const createdAt = nowSeconds();
+      // P5: honor caller-supplied created_at (imports / time-travel); default to
+      // now. last_accessed_at follows created_at on insert.
+      const createdAt = input.created_at ?? nowSeconds();
       const record: KnowledgeMemory = {
         ...scope,
         id: ids.knowledgeMemory++,
@@ -913,28 +918,40 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     },
 
     getActiveKnowledgeCrossScope(scope, level) {
-      return state.knowledgeMemory.filter(
-        (item) =>
-          matchesScopeLevel(item, scope, level) &&
-          item.superseded_by_id === null &&
-          item.retired_at === null,
-      );
+      // P6: cross-scope reads apply the base visibility gate so a private fact in
+      // another scope never surfaces here, independent of any context view.
+      // F6(d): pinned ordering created_at ASC, then id ASC (was insertion order).
+      return state.knowledgeMemory
+        .filter(
+          (item) =>
+            matchesScopeLevel(item, scope, level) &&
+            isBaseVisible(item.visibility_class, item, scope) &&
+            item.superseded_by_id === null &&
+            item.retired_at === null,
+        )
+        .sort(byCreatedAtThenId);
     },
 
     getKnowledgeSince(scope, level, since) {
-      return state.knowledgeMemory.filter(
-        (item) =>
-          matchesScopeLevel(item, scope, level) &&
-          item.created_at >= since &&
-          item.superseded_by_id === null &&
-          item.retired_at === null,
-      );
+      // P6: base visibility gate on the cross-scope temporal read path.
+      // F6(d): pinned ordering created_at ASC, then id ASC (was insertion order).
+      return state.knowledgeMemory
+        .filter(
+          (item) =>
+            matchesScopeLevel(item, scope, level) &&
+            isBaseVisible(item.visibility_class, item, scope) &&
+            item.created_at >= since &&
+            item.superseded_by_id === null &&
+            item.retired_at === null,
+        )
+        .sort(byCreatedAtThenId);
     },
 
     getKnowledgeByTimeRange(scope, range) {
-      return state.knowledgeMemory.filter(
-        (item) => matchesScope(item, scope) && inRange(item.created_at, range),
-      );
+      // Ordering contract (P3): created_at ASC, then id ASC.
+      return state.knowledgeMemory
+        .filter((item) => matchesScope(item, scope) && inRange(item.created_at, range))
+        .sort(byCreatedAtThenId);
     },
 
     searchKnowledge(scope, query, options) {
@@ -950,7 +967,7 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         .filter((item) => matchesKnowledgeSearchOptions(item, resolved))
         .map((item) => ({
           item,
-          rank: scoreText(query, item.fact),
+          rank: scoreLexical(query, item.fact),
         }))
         .filter((result) => result.rank > 0)
         .sort((a, b) => b.rank - a.rank || b.item.last_accessed_at - a.item.last_accessed_at)
@@ -970,13 +987,15 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         .filter(
           (item) =>
             matchesScopeLevel(item, scope, level) &&
+            // P6: base visibility gate on the cross-scope lexical search path.
+            isBaseVisible(item.visibility_class, item, scope) &&
             (!resolved.activeOnly ||
               (item.superseded_by_id === null && item.retired_at === null)),
         )
         .filter((item) => matchesKnowledgeSearchOptions(item, resolved))
         .map((item) => ({
           item,
-          rank: scoreText(query, item.fact),
+          rank: scoreLexical(query, item.fact),
         }))
         .filter((result) => result.rank > 0)
         .sort((a, b) => b.rank - a.rank || b.item.last_accessed_at - a.item.last_accessed_at)
@@ -1189,27 +1208,41 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     },
 
     getActiveWorkItems(scope) {
-      return state.workItems.filter(
-        (item) => matchesScope(item, scope) && item.status !== 'done',
-      );
+      // Ordering contract (P3): created_at ASC, then id ASC.
+      return state.workItems
+        .filter((item) => matchesScope(item, scope) && item.status !== 'done')
+        .sort(byCreatedAtThenId);
     },
 
     getActiveWorkItemsCrossScope(scope, level) {
-      return state.workItems.filter(
-        (item) => matchesScopeLevel(item, scope, level) && item.status !== 'done',
-      );
+      // Ordering contract (P3) + P6 base visibility gate.
+      return state.workItems
+        .filter(
+          (item) =>
+            matchesScopeLevel(item, scope, level) &&
+            isBaseVisible(item.visibility_class, item, scope) &&
+            item.status !== 'done',
+        )
+        .sort(byCreatedAtThenId);
     },
 
     getWorkItemsByTimeRange(scope, range) {
-      return state.workItems.filter(
-        (item) => matchesScope(item, scope) && inRange(item.created_at, range),
-      );
+      // Ordering contract (P3): created_at ASC, then id ASC.
+      return state.workItems
+        .filter((item) => matchesScope(item, scope) && inRange(item.created_at, range))
+        .sort(byCreatedAtThenId);
     },
 
     getWorkItemsByTimeRangeCrossScope(scope, level, range) {
-      return state.workItems.filter(
-        (item) => matchesScopeLevel(item, scope, level) && inRange(item.created_at, range),
-      );
+      // Ordering contract (P3) + P6 base visibility gate.
+      return state.workItems
+        .filter(
+          (item) =>
+            matchesScopeLevel(item, scope, level) &&
+            isBaseVisible(item.visibility_class, item, scope) &&
+            inRange(item.created_at, range),
+        )
+        .sort(byCreatedAtThenId);
     },
 
     updateWorkItemStatus(id, status) {
@@ -1513,7 +1546,12 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       // Read path: compute effective status without writing (Phase 2.5).
       const now = nowSeconds();
       return state.workClaims
-        .filter((claim) => matchesScopeLevel(claim, scope, level))
+        // P6: base visibility gate on the cross-scope claim read path.
+        .filter(
+          (claim) =>
+            matchesScopeLevel(claim, scope, level) &&
+            isBaseVisible(claim.visibility_class, claim, scope),
+        )
         .map((claim) => effectiveClaim(claim, now))
         .filter((claim) => {
           if (!options?.includeExpired && claim.status === 'expired') return false;
@@ -1807,7 +1845,12 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       // Read path (D5): compute effective status without writing (see listHandoffs).
       const now = nowSeconds();
       return state.handoffs
-        .filter((handoff) => matchesScopeLevel(handoff, scope, level))
+        // P6: base visibility gate on the cross-scope handoff read path.
+        .filter(
+          (handoff) =>
+            matchesScopeLevel(handoff, scope, level) &&
+            isBaseVisible(handoff.visibility_class, handoff, scope),
+        )
         .map((handoff) => effectiveHandoff(handoff, now))
         .filter((handoff) => {
           if (options?.sessionId && handoff.session_id !== options.sessionId) return false;
@@ -1971,9 +2014,16 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       );
     },
     getActivePlaybooksCrossScope(scope: MemoryScope, level: ScopeLevel): Playbook[] {
-      return state.playbooks.filter(
-        (p) => matchesScopeLevel(p, scope, level) && (p.status === 'draft' || p.status === 'active'),
-      );
+      // P6: base visibility gate on the cross-scope playbook read path.
+      // F6(d): pinned ordering created_at ASC, then id ASC (was insertion order).
+      return state.playbooks
+        .filter(
+          (p) =>
+            matchesScopeLevel(p, scope, level) &&
+            isBaseVisible(p.visibility_class, p, scope) &&
+            (p.status === 'draft' || p.status === 'active'),
+        )
+        .sort(byCreatedAtThenId);
     },
     searchPlaybooks(scope: MemoryScope, query: string, options?: SearchOptions): SearchResult<Playbook>[] {
       const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
@@ -1987,8 +2037,11 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
           const text = `${p.title} ${p.description} ${p.instructions}`.toLowerCase();
           return tokens.every((token) => text.includes(token));
         })
-        .slice(0, limit)
-        .map((item, index) => ({ item, rank: index }));
+        .map((item) => ({ item, rank: rankPlaybook(query, item) }))
+        // P2: rank is a real (0,1] relevance score (was the array index); order by
+        // rank DESC (higher=better), id ASC as the stable tie-break.
+        .sort((a, b) => b.rank - a.rank || a.item.id - b.item.id)
+        .slice(0, limit);
     },
     searchPlaybooksCrossScope(
       scope: MemoryScope,
@@ -2002,13 +2055,16 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
       const activeOnly = options?.activeOnly ?? true;
       return state.playbooks
         .filter((p) => {
+          // P6: base visibility gate on the cross-scope playbook search path.
           if (!matchesScopeLevel(p, scope, level)) return false;
+          if (!isBaseVisible(p.visibility_class, p, scope)) return false;
           if (activeOnly && (p.status === 'archived' || p.status === 'deprecated')) return false;
           const text = `${p.title} ${p.description} ${p.instructions}`.toLowerCase();
           return tokens.every((token) => text.includes(token));
         })
-        .slice(0, limit)
-        .map((item, index) => ({ item, rank: index }));
+        .map((item) => ({ item, rank: rankPlaybook(query, item) }))
+        .sort((a, b) => b.rank - a.rank || a.item.id - b.item.id)
+        .slice(0, limit);
     },
     updatePlaybook(id, patch): Playbook | null {
       const playbook = state.playbooks.find((p) => p.id === id);
@@ -2246,7 +2302,15 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
     listMemoryEventsCrossScope(scope, level, query) {
       return paginateEvents(
         state.memoryEvents.filter(
-          (item) => matchesScopeLevel(item, scope, level) && matchesEventQuery(item, query),
+          (item) =>
+            matchesScopeLevel(item, scope, level) &&
+            // F4/P6: events embed the full entity snapshot (incl. fact text) in
+            // payload.after, so a cross-scope event read MUST apply the base
+            // visibility gate or a private fact from another scope leaks its
+            // contents. Visibility is derived from the snapshot's
+            // visibility_class (default 'private' when absent).
+            isBaseVisible(eventVisibilityClass(item.payload), item, scope) &&
+            matchesEventQuery(item, query),
         ),
         query,
       );

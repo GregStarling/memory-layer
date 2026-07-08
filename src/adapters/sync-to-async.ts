@@ -186,18 +186,33 @@ export function wrapSyncAdapter(adapter: StorageAdapter): AsyncStorageAdapter {
     upsertTemporalWatermark: (input) =>
       Promise.resolve(adapter.upsertTemporalWatermark(input)),
 
-    async transaction<T>(fn: () => Promise<T>): Promise<T> {
-      // Since all underlying operations are synchronous and JavaScript is
-      // single-threaded, the await chains in fn() resolve as microtasks
-      // within the same event-loop tick. No external I/O or user code can
-      // interleave, providing effective atomicity.
-      //
-      // Note: this does NOT provide rollback semantics. If fn() rejects
-      // after some operations have completed, those operations will have
-      // already been applied to the sync adapter. For true transactional
-      // rollback with a sync adapter, use the adapter's own transaction()
-      // method directly.
-      return fn();
+    async transaction<T>(fn: () => Promise<T> | T): Promise<T> {
+      // Delegate to the native synchronous adapter's transaction so a failing
+      // body rolls back (Phase 3.7). The sniff is internal to the wrapper —
+      // core no longer reaches for getNativeSyncAdapter to do this. `async` so a
+      // native synchronous rollback-throw surfaces as a rejected promise.
+      const native = getNativeSyncAdapter(wrapped);
+      if (native && typeof native.transaction === 'function') {
+        // A SYNCHRONOUS body is wrapped in the native transaction: in-memory
+        // restores its snapshot on throw; SQLite issues BEGIN/ROLLBACK. This is
+        // the path that yields real rollback.
+        //
+        // An ASYNC (promise-returning) body cannot be made atomic by a
+        // synchronous engine: better-sqlite3 rejects a promise-returning
+        // transaction function outright (verified empirically), and a
+        // synchronous BEGIN/COMMIT cannot span a body whose post-await writes
+        // run in a LATER microtask — running it inside the native transaction
+        // and retrying would double-apply those writes. So async bodies run
+        // directly (as before). Callers needing atomic multi-write on a sync
+        // backend must pass a synchronous body (which is delegated here), the
+        // pattern core/orchestrator.ts already uses for its atomic flows.
+        const isAsyncFn =
+          (fn as { constructor?: { name?: string } }).constructor?.name === 'AsyncFunction';
+        if (!isAsyncFn) {
+          return Promise.resolve(native.transaction(fn as () => T));
+        }
+      }
+      return Promise.resolve(fn());
     },
 
     insertSourceDocument: (input) => Promise.resolve(adapter.insertSourceDocument(input)),

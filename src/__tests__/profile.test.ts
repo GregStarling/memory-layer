@@ -138,6 +138,9 @@ describe('profile materializer', () => {
         source: 'user_stated',
         confidence: 'high',
         trust_score: 0.9,
+        // P6: shared across the workspace so it surfaces to the operator
+        // (system-level) view from another scope_id; default 'private' would not.
+        visibility_class: 'workspace',
       });
 
       const profile = await getProfile(asyncAdapter, s, { view: 'operator' });
@@ -156,6 +159,9 @@ describe('profile materializer', () => {
         source: 'user_stated',
         confidence: 'high',
         trust_score: 0.8,
+        // P6: workspace-visible so it surfaces to the workspace-level view from
+        // another scope_id; a default 'private' fact would stay in its scope.
+        visibility_class: 'workspace',
       });
 
       const profile = await getProfile(asyncAdapter, s, { view: 'workspace' });

@@ -88,7 +88,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "test:postgres": "vitest run src/__tests__/postgres-integration.test.ts",
+    "test:postgres": "vitest run src/__tests__/postgres-integration.test.ts src/__tests__/adapter-conformance.test.ts src/__tests__/postgres-phase3-parity.test.ts",
     "lint": "tsc --noEmit",
     "benchmark:search": "npm run build && node benchmarks/search-benchmark.mjs",
     "benchmark:semantic": "npm run build && node benchmarks/semantic-benchmark.mjs",

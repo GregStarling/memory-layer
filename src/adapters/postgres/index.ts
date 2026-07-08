@@ -71,8 +71,25 @@ import type {
   WorkItem,
   WorkingMemory,
 } from '../../contracts/types.js';
-import { matchesKnowledgeSearchOptions } from '../../core/retrieval.js';
 import { estimateTokens } from '../../core/tokens.js';
+import type {
+  ContextContract,
+  ContextInvariant,
+  ContextEscalationPolicy,
+  PersistedGovernanceState,
+} from '../../contracts/context-contract.js';
+// Phase 3.1: shared adapter kernel — single source of truth for search-option
+// resolution, pagination defaults, lexical tokenization, ts_rank normalization,
+// and the cross-scope base-visibility predicate. Replaces the local copies that
+// previously drifted (the pg adapter was missing resolveSearchOptions entirely,
+// the Phase 0.4 root cause).
+import {
+  resolveSearchOptions,
+  resolvePaginationOptions,
+  tokenizeSearch,
+  normalizeTsRank,
+  isBaseVisible,
+} from '../shared/index.js';
 
 export interface PostgresAdapterOptions {
   logger?: Logger;
@@ -131,6 +148,20 @@ function wideScopeParams(scope: MemoryScope, level: ScopeLevel): unknown[] {
 
 function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+/**
+ * Resolve a caller-supplied created_at (Phase 3.5 / P5) to an INTEGER epoch-
+ * seconds value safe to bind to an INTEGER column, falling back to now() when
+ * absent or non-finite. NEVER returns a float or ±Infinity: Postgres rejects a
+ * float/Infinity bound to an INTEGER column with 22P02, a class of bug that is
+ * invisible on SQLite (which stores it silently). Honoring created_at is what
+ * makes time-range queries and imports preserve the original timestamp instead
+ * of rewriting it to now().
+ */
+function resolveCreatedAt(createdAt: number | null | undefined): number {
+  if (createdAt == null || !Number.isFinite(createdAt)) return nowSeconds();
+  return Math.floor(createdAt);
 }
 
 function mapSourceDocumentRow(row: Record<string, unknown>): SourceDocument {
@@ -236,32 +267,147 @@ function parseVectorValue(value: unknown): EmbeddingVector | null {
   return null;
 }
 
-// Phase 0.4: resolve search-option defaults locally so Postgres matches the
-// SQLite/memory semantics (notably activeOnly defaults to true; treating
-// undefined as false silently returned superseded/retired records).
-// Kept in exact sync with resolveSearchOptions in src/adapters/sqlite/index.ts.
-// TODO(Phase 3.1): extract to a shared adapter kernel module instead of duplicating.
-function resolveSearchOptions(options?: SearchOptions): Required<SearchOptions> {
-  return {
-    limit: options?.limit ?? 10,
-    activeOnly: options?.activeOnly ?? true,
-    includeProvisional: options?.includeProvisional ?? false,
-    includeDisputed: options?.includeDisputed ?? false,
-    minimumTrustScore: options?.minimumTrustScore ?? 0,
-    knowledgeStates: options?.knowledgeStates ?? [],
-    knowledgeClasses: options?.knowledgeClasses ?? [],
-    tags: options?.tags ?? [],
-    preferLocalTrusted: options?.preferLocalTrusted ?? false,
-    preferLineageMemory: options?.preferLineageMemory ?? false,
-  };
+// Phase 3.1: resolveSearchOptions / resolvePaginationOptions now come from
+// ../shared (imported above). The local copies (and their Phase-0.4 sync
+// comment / TODO(3.1)) are deleted so the defaults cannot drift again.
+
+/**
+ * Build the OR-composed `to_tsquery` input for a free-text search (Phase 3.2 /
+ * P1). Every user token becomes a literal lexeme joined with the tsquery OR
+ * operator ` | `, so a match requires ANY term — the same set semantics as the
+ * shared JS `scoreLexical` (matches > 0) and SQLite FTS. This is what makes the
+ * single-token exact-match result-SET invariant hold across all three adapters.
+ * `plainto_tsquery`/`websearch_to_tsquery` default to AND-of-terms, which would
+ * diverge from memory/sqlite on multi-term queries.
+ *
+ * Tokens come from the shared tokenizer (alphanumeric only), so the returned
+ * string is always a safe `to_tsquery` argument — no operator injection is
+ * possible. An empty query yields '' which `to_tsquery('english','')` parses to
+ * an empty tsquery that matches no rows (matching memory's zero-token → no-hit).
+ *
+ * ACCEPTED DIVERGENCE (documented, per P1): the `english` config stems and drops
+ * stopwords; sqlite/memory do not. Multi-term relevance ranking (ts_rank vs
+ * bm25 vs scoreLexical) also differs. Neither breaks the exact-term result-set
+ * invariant the conformance suite enforces.
+ */
+function toOrTsQuery(query: string): string {
+  return tokenizeSearch(query).join(' | ');
 }
 
-function resolvePaginationOptions(options?: PaginationOptions): Required<PaginationOptions> {
-  return {
-    limit: options?.limit ?? 25,
-    offset: options?.offset ?? 0,
-    cursor: options?.cursor ?? 0,
-  };
+/**
+ * Append the trust/state/class/tag predicates to `params` and return the SQL
+ * fragment to splice into a search WHERE clause BEFORE the LIMIT (Phase 3.3 /
+ * P4). Mirrors {@link matchesKnowledgeSearchOptions} exactly so high-trust
+ * matches beyond the first LIMIT rows are not starved by post-LIMIT JS
+ * filtering. Mirrors `matchesKnowledgeSearchOptions` in core/retrieval.ts
+ * exactly. Every predicate binds to a TEXT / TEXT[] / REAL column — no INTEGER
+ * column is touched here, so there is no float-into-INTEGER bind hazard.
+ * `tags` uses the jsonb `?|` (any-of) operator to match the `.some()` ANY-of
+ * semantics of the shared JS filter (a `@>` array would be AND-of-tags).
+ */
+function knowledgeSearchFilterClauses(
+  resolved: Required<SearchOptions>,
+  params: unknown[],
+  prefix = '',
+): string {
+  const p = prefix ? `${prefix}.` : '';
+  const clauses: string[] = [];
+  if (!resolved.includeProvisional) clauses.push(`${p}knowledge_state <> 'provisional'`);
+  if (!resolved.includeDisputed) clauses.push(`${p}knowledge_state <> 'disputed'`);
+  if (resolved.minimumTrustScore > 0) {
+    params.push(resolved.minimumTrustScore);
+    clauses.push(`${p}trust_score >= $${params.length}`);
+  }
+  if (resolved.knowledgeStates.length > 0) {
+    params.push(resolved.knowledgeStates);
+    clauses.push(`${p}knowledge_state = ANY($${params.length}::text[])`);
+  }
+  if (resolved.knowledgeClasses.length > 0) {
+    params.push(resolved.knowledgeClasses);
+    clauses.push(`${p}knowledge_class = ANY($${params.length}::text[])`);
+  }
+  if (resolved.tags.length > 0) {
+    params.push(resolved.tags);
+    clauses.push(`${p}tags ?| $${params.length}::text[]`);
+  }
+  return clauses.length > 0 ? ` AND ${clauses.join(' AND ')}` : '';
+}
+
+/**
+ * Append the reader-scope parameters and return the SQL predicate that mirrors
+ * the shared {@link isBaseVisible} access gate (Phase 3.6 / P6). Spliced into
+ * every cross-scope read's WHERE so a `private`/`shared_collaboration`/
+ * `workspace` row never surfaces to a scope not permitted to see it, at ANY
+ * widening level. Cross-tenant is already excluded by the caller's
+ * `wideScopeWhere` (tenant_id = $1 at every level). All bound values are TEXT
+ * scope columns — no INTEGER bind hazard.
+ */
+function visibilityWhere(scope: MemoryScope, params: unknown[], prefix = ''): string {
+  const p = prefix ? `${prefix}.` : '';
+  const n = normalizeScope(scope);
+  params.push(n.system_id);
+  const sys = params.length;
+  params.push(n.workspace_id);
+  const ws = params.length;
+  params.push(n.collaboration_id);
+  const collab = params.length;
+  params.push(n.scope_id);
+  const sid = params.length;
+  return (
+    `(${p}visibility_class = 'tenant'` +
+    ` OR (${p}visibility_class = 'workspace' AND ${p}workspace_id = $${ws})` +
+    ` OR (${p}visibility_class = 'shared_collaboration' AND ${p}workspace_id = $${ws}` +
+    ` AND ${p}collaboration_id <> '' AND ${p}collaboration_id = $${collab})` +
+    // 'private' is also the FAIL-OPEN-TO-OWN-SCOPE default: any value not in the
+    // three recognized wider classes (incl. an unknown/garbage class) is treated
+    // as private and visible only in its own full scope tuple — matching the
+    // isBaseVisible `case 'private': default:` branch (and sqlite/memory). Before
+    // this, an unrecognized class matched NO branch and vanished from its own
+    // scope on Postgres.
+    ` OR ((${p}visibility_class = 'private'` +
+    ` OR ${p}visibility_class NOT IN ('tenant', 'workspace', 'shared_collaboration'))` +
+    ` AND ${p}system_id = $${sys}` +
+    ` AND ${p}workspace_id = $${ws} AND ${p}collaboration_id = $${collab} AND ${p}scope_id = $${sid}))`
+  );
+}
+
+/**
+ * Event-log variant of {@link visibilityWhere} for the F4 cross-scope event
+ * gate. Memory events have NO top-level visibility_class column; they carry the
+ * full entity snapshot (incl. fact text) in `payload.after` (or `payload.before`
+ * on deletion). Derive the base class from the snapshot with the SQL coalesce
+ * form documented in shared/visibility.ts:
+ *   coalesce(payload->'after'->>'visibility_class',
+ *            payload->'before'->>'visibility_class', 'private')
+ * defaulting to the MOST RESTRICTIVE class ('private') so an event whose entity
+ * has no visibility concept never leaks cross-scope. Mirrors
+ * {@link eventVisibilityClass} + {@link isBaseVisible}. All bound values are TEXT
+ * scope columns — no INTEGER bind hazard.
+ */
+function eventVisibilityWhere(scope: MemoryScope, params: unknown[], prefix = ''): string {
+  const p = prefix ? `${prefix}.` : '';
+  const n = normalizeScope(scope);
+  const vc =
+    `coalesce(${p}payload->'after'->>'visibility_class',` +
+    ` ${p}payload->'before'->>'visibility_class', 'private')`;
+  params.push(n.system_id);
+  const sys = params.length;
+  params.push(n.workspace_id);
+  const ws = params.length;
+  params.push(n.collaboration_id);
+  const collab = params.length;
+  params.push(n.scope_id);
+  const sid = params.length;
+  return (
+    `(${vc} = 'tenant'` +
+    ` OR (${vc} = 'workspace' AND ${p}workspace_id = $${ws})` +
+    ` OR (${vc} = 'shared_collaboration' AND ${p}workspace_id = $${ws}` +
+    ` AND ${p}collaboration_id <> '' AND ${p}collaboration_id = $${collab})` +
+    ` OR ((${vc} = 'private'` +
+    ` OR ${vc} NOT IN ('tenant', 'workspace', 'shared_collaboration'))` +
+    ` AND ${p}system_id = $${sys}` +
+    ` AND ${p}workspace_id = $${ws} AND ${p}collaboration_id = $${collab} AND ${p}scope_id = $${sid}))`
+  );
 }
 
 function mapTurn(row: Record<string, unknown>): Turn {
@@ -646,6 +792,9 @@ function mapCompactionLog(row: Record<string, unknown>): CompactionLog {
     active_turn_count_after: Number(row.active_turn_count_after),
     duration_ms: Number(row.duration_ms),
     model_call_made: Boolean(row.model_call_made),
+    // Phase 3.5 / P5: error is now persisted and read back (was dropped both
+    // ways). null when the compaction ran cleanly.
+    error: row.error != null ? String(row.error) : null,
     created_at: Number(row.created_at),
   };
 }
@@ -929,7 +1078,9 @@ export function createPostgresAdapter(
   ): Promise<MemoryEventRecord> {
     await ensureTemporalCutover();
     const normalized = normalizeScope(input);
-    const createdAt = input.created_at ?? now();
+    // F5/P5: coerce caller created_at to an integer epoch (memory_event_log
+    // .created_at is INTEGER; a float/±Infinity would 22P02 on Postgres).
+    const createdAt = resolveCreatedAt(input.created_at);
     const previousWatermark = await readTemporalWatermark('temporal');
     const { rows } = await pool.query(
       `INSERT INTO memory_event_log
@@ -1005,7 +1156,8 @@ export function createPostgresAdapter(
     let nextParam = 1;
     for (const input of inputs) {
       const normalized = normalizeScope(input);
-      const createdAt = input.created_at ?? now();
+      // F5/P5: integer-coerce (memory_event_log.created_at is INTEGER).
+      const createdAt = resolveCreatedAt(input.created_at);
       values.push(
         `($${nextParam}, $${nextParam + 1}, $${nextParam + 2}, $${nextParam + 3}, $${nextParam + 4}, $${nextParam + 5}, $${nextParam + 6}, $${nextParam + 7}, $${nextParam + 8}, $${nextParam + 9}, $${nextParam + 10}::jsonb, $${nextParam + 11}, $${nextParam + 12}, $${nextParam + 13}, $${nextParam + 14}::jsonb, $${nextParam + 15}, $${nextParam + 16}, $${nextParam + 17})`,
       );
@@ -1157,13 +1309,19 @@ export function createPostgresAdapter(
       params.push(resolved.entityId);
       nextParam += 1;
     }
+    // F4: cross-scope event-log visibility gate. Events embed the full entity
+    // snapshot (incl. fact text) in payload.after/before, so a private/shared/
+    // workspace entity's event would otherwise leak cross-scope. Derive the base
+    // visibility_class from the snapshot and apply the isBaseVisible predicate.
+    clauses.push(eventVisibilityWhere(scope, params));
     params.push(resolved.limit + 1);
+    const limitParam = params.length;
     const { rows } = await pool.query(
       // Phase 2.3: event_id ASC alone (see listScopedMemoryEvents).
       `SELECT * FROM memory_event_log
        WHERE ${clauses.join(' AND ')}
        ORDER BY event_id ASC
-       LIMIT $${nextParam}`,
+       LIMIT $${limitParam}`,
       params,
     );
     const items = rows.slice(0, resolved.limit).map(mapMemoryEventRecord);
@@ -1318,7 +1476,9 @@ export function createPostgresAdapter(
       // physical connections and half-commit.
       return this.transaction(async () => {
         const n = normalizeScope(input);
-        const createdAt = now();
+        // Phase 3.5 / P5: honor caller-supplied created_at (imports, time-travel);
+        // coerced to integer seconds so the INTEGER column never sees a float.
+        const createdAt = resolveCreatedAt(input.created_at);
         const tokenEst = input.token_estimate ?? estimateTokens(input.content);
         const { rows } = await pool.query(
           `INSERT INTO turns (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, actor, role, content, priority, token_estimate, created_at)
@@ -1402,30 +1562,41 @@ export function createPostgresAdapter(
         params.push(range.end_at);
         query += ` AND created_at <= $${params.length}`;
       }
-      query += ' ORDER BY id ASC';
+      // Ordering contract (P3): created_at ASC, then id ASC (matches memory +
+      // SQLite). created_at is caller-supplied for turns, so id ASC alone would
+      // diverge from the other adapters on imported/back-dated rows.
+      query += ' ORDER BY created_at ASC, id ASC';
       const { rows } = await pool.query(query, params);
       return rows.map(mapTurn);
     },
 
     async searchTurns(scope, queryText, searchOptions) {
-      // scopeParams occupies $1..$5. queryText binds at $6 and limit at $7.
+      // scopeParams occupies $1..$5; the OR-composed tsquery binds at $6, limit
+      // at $7. P1: to_tsquery with OR-of-terms (see toOrTsQuery) so a single
+      // token matches the same rows as memory/sqlite. P2: rank normalized to
+      // (0,1] via normalizeTsRank. P3: ORDER rank DESC, created_at DESC, id ASC
+      // (matches the in-memory reference).
       const resolved = resolveSearchOptions(searchOptions);
+      // F2-class: to_tsquery('english','') errors on some PG majors. An empty /
+      // punctuation-only / non-Latin query tokenizes to '' — return [] before
+      // hitting the DB (mirrors the SQLite adapter's empty-token guard).
+      const tsQuery = toOrTsQuery(queryText);
+      if (tsQuery.length === 0) return [];
       const params = scopeParams(scope);
-      const limit = resolved.limit;
-      params.push(queryText, limit);
+      params.push(tsQuery, resolved.limit);
       const activeClause = resolved.activeOnly ? ` AND status = 'active'` : '';
       const { rows } = await pool.query(
-        `SELECT *, ts_rank(search_vector, plainto_tsquery('english', $6)) AS rank
+        `SELECT *, ts_rank(search_vector, to_tsquery('english', $6)) AS rank
          FROM turns
          WHERE ${scopeWhere()} ${activeClause}
-           AND search_vector @@ plainto_tsquery('english', $6)
-         ORDER BY rank DESC
+           AND search_vector @@ to_tsquery('english', $6)
+         ORDER BY rank DESC, created_at DESC, id ASC
          LIMIT $7`,
         params,
       );
       return rows.map((row) => ({
         item: mapTurn(row),
-        rank: Number(row.rank),
+        rank: normalizeTsRank(Number(row.rank)),
       }));
     },
 
@@ -1520,9 +1691,11 @@ export function createPostgresAdapter(
     },
 
     async getWorkingMemoryBySession(sessionId, scope) {
+      // Ordering contract (P3): created_at ASC, then id ASC (was id DESC on pg,
+      // ASC on sqlite — the audit-named divergence; aligned to memory).
       const params = [sessionId, ...scopeParams(scope)];
       const { rows } = await pool.query(
-        `SELECT * FROM working_memory WHERE session_id = $1 AND tenant_id = $2 AND system_id = $3 AND workspace_id = $4 AND collaboration_id = $5 AND scope_id = $6 ORDER BY id DESC`,
+        `SELECT * FROM working_memory WHERE session_id = $1 AND tenant_id = $2 AND system_id = $3 AND workspace_id = $4 AND collaboration_id = $5 AND scope_id = $6 ORDER BY created_at ASC, id ASC`,
         params,
       );
       return rows.map(mapWorkingMemory);
@@ -1557,7 +1730,8 @@ export function createPostgresAdapter(
         params.push(range.end_at);
         query += ` AND created_at <= $${params.length}`;
       }
-      query += ' ORDER BY id DESC';
+      // Ordering contract (P3): created_at ASC, then id ASC.
+      query += ' ORDER BY created_at ASC, id ASC';
       const { rows } = await pool.query(query, params);
       return rows.map(mapWorkingMemory);
     },
@@ -1619,10 +1793,17 @@ export function createPostgresAdapter(
       // Phase 2.1: atomic row + event.
       return this.transaction(async () => {
         const n = normalizeScope(input);
-        const createdAt = now();
+        // F5/P5: honor NewKnowledgeMemory.created_at (int-coerced), falling back
+        // to now() when omitted. Was hard-coded to now(), which rewrote imported
+        // / back-dated timestamps and broke getKnowledgeSince/time-range order.
+        const createdAt = resolveCreatedAt(input.created_at);
         const { rows } = await pool.query(
-          `INSERT INTO knowledge_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id, fact, fact_type, knowledge_state, knowledge_class, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated, source, confidence, confidence_score, grounding_strength, evidence_count, trust_score, verification_status, verification_notes, last_verified_at, next_reverification_at, last_confirmed_at, confirmation_count, source_system_id, source_scope_id, source_collaboration_id, source_working_memory_id, source_turn_ids, successful_use_count, failed_use_count, disputed_at, dispute_reason, contradiction_score, superseded_at, retired_at, valid_from, valid_until, rationale, tags, created_at, last_accessed_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $44)
+          // Phase 3.6 / P6: persist visibility_class (previously dropped on
+          // Postgres AND SQLite; only in-memory honored it). Appended as the
+          // final column ($45) so the existing $1..$44 numbering is untouched;
+          // created_at reuses $44 for last_accessed_at as before.
+          `INSERT INTO knowledge_memory (tenant_id, system_id, workspace_id, collaboration_id, scope_id, fact, fact_type, knowledge_state, knowledge_class, fact_subject, fact_attribute, fact_value, normalized_fact, slot_key, is_negated, source, confidence, confidence_score, grounding_strength, evidence_count, trust_score, verification_status, verification_notes, last_verified_at, next_reverification_at, last_confirmed_at, confirmation_count, source_system_id, source_scope_id, source_collaboration_id, source_working_memory_id, source_turn_ids, successful_use_count, failed_use_count, disputed_at, dispute_reason, contradiction_score, superseded_at, retired_at, valid_from, valid_until, rationale, tags, created_at, last_accessed_at, visibility_class)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $44, $45)
            RETURNING *`,
           [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.fact, input.fact_type,
            input.knowledge_state ?? 'trusted', input.knowledge_class ?? 'project_fact',
@@ -1642,7 +1823,7 @@ export function createPostgresAdapter(
            input.disputed_at ?? null, input.dispute_reason ?? null, input.contradiction_score ?? 0,
            input.superseded_at ?? null, input.retired_at ?? null,
            input.valid_from ?? null, input.valid_until ?? null, input.rationale ?? null,
-           JSON.stringify(input.tags ?? []), createdAt],
+           JSON.stringify(input.tags ?? []), createdAt, input.visibility_class ?? 'private'],
         );
         const knowledge = mapKnowledgeMemory(rows[0]);
         await insertMemoryEventInternal({
@@ -1673,7 +1854,8 @@ export function createPostgresAdapter(
       // Phase 2.2: candidate lifecycle is now audited. Row + event are atomic.
       return this.transaction(async () => {
         const n = normalizeScope(input);
-        const createdAt = input.created_at ?? now();
+        // F5/P5: integer-coerce (knowledge_candidate.created_at is INTEGER).
+        const createdAt = resolveCreatedAt(input.created_at);
         const { rows } = await pool.query(
           `INSERT INTO knowledge_candidate
             (tenant_id, system_id, workspace_id, collaboration_id, scope_id, working_memory_id, fact, fact_type,
@@ -1760,7 +1942,8 @@ export function createPostgresAdapter(
           input.working_memory_id ?? null, input.turn_id ?? null, input.source_type, input.support_polarity,
           input.speaker_role ?? null, input.actor ?? null, input.excerpt, input.start_offset ?? null,
           input.end_offset ?? null, input.is_explicit ?? false, input.explicitness_score ?? 0,
-          input.outcome ?? null, input.created_at ?? now(),
+          // F5/P5: integer-coerce (knowledge_evidence.created_at is INTEGER).
+          input.outcome ?? null, resolveCreatedAt(input.created_at),
         ],
       );
       return mapKnowledgeEvidenceRow(rows[0]);
@@ -1916,19 +2099,28 @@ export function createPostgresAdapter(
     },
 
     async getActiveKnowledgeCrossScope(scope, level) {
+      // P6: base visibility gate on the cross-scope active-knowledge read path.
+      // F6(d): canonical pinned ordering created_at ASC, id ASC (byCreatedAtThenId)
+      // to match the memory reference + the conformance suite. Was
+      // `last_accessed_at DESC`, which diverged and fails the pg CI ordering check.
       const params = wideScopeParams(scope, level);
+      const visClause = visibilityWhere(scope, params);
       const { rows } = await pool.query(
-        `SELECT * FROM knowledge_memory WHERE ${wideScopeWhere(scope, level)} AND superseded_by_id IS NULL AND retired_at IS NULL ORDER BY last_accessed_at DESC`,
+        `SELECT * FROM knowledge_memory WHERE ${wideScopeWhere(scope, level)} AND ${visClause} AND superseded_by_id IS NULL AND retired_at IS NULL ORDER BY created_at ASC, id ASC`,
         params,
       );
       return rows.map(mapKnowledgeMemory);
     },
 
     async getKnowledgeSince(scope, level, since) {
-      const params = [...wideScopeParams(scope, level), since];
+      // P6: base visibility gate on the cross-scope temporal read path.
+      const params = wideScopeParams(scope, level);
+      const visClause = visibilityWhere(scope, params);
+      params.push(since);
       const { rows } = await pool.query(
         `SELECT * FROM knowledge_memory
          WHERE ${wideScopeWhere(scope, level)}
+           AND ${visClause}
            AND created_at >= $${params.length}
            AND superseded_by_id IS NULL
            AND retired_at IS NULL
@@ -1949,59 +2141,80 @@ export function createPostgresAdapter(
         params.push(range.end_at);
         query += ` AND created_at <= $${params.length}`;
       }
-      query += ' ORDER BY id DESC';
+      // Ordering contract (P3): created_at ASC, then id ASC.
+      query += ' ORDER BY created_at ASC, id ASC';
       const { rows } = await pool.query(query, params);
       return rows.map(mapKnowledgeMemory);
     },
 
     async searchKnowledge(scope, queryText, searchOptions) {
-      // scopeParams occupies $1..$5. queryText binds at $6 and limit at $7.
+      // Param layout: $1..$5 scope; $6 OR-composed tsquery (reused in SELECT +
+      // WHERE); then P4 trust/state/class/tag filter params; limit last. All
+      // filters live in SQL BEFORE the LIMIT so high-trust matches beyond the
+      // first LIMIT rows are not starved (Phase 3.3). P1: to_tsquery OR-of-terms.
+      // P2: rank normalized via normalizeTsRank. P3: rank DESC, last_accessed_at
+      // DESC, id ASC (matches the in-memory reference).
       const resolved = resolveSearchOptions(searchOptions);
+      // F2-class: empty-token guard (see searchTurns) — return [] before the DB.
+      const tsQuery = toOrTsQuery(queryText);
+      if (tsQuery.length === 0) return [];
       const params = scopeParams(scope);
-      const limit = resolved.limit;
-      const activeClause = resolved.activeOnly ? ' AND superseded_by_id IS NULL AND retired_at IS NULL' : '';
-      params.push(queryText, limit);
+      params.push(tsQuery);
+      const qIdx = params.length;
+      const activeClause = resolved.activeOnly
+        ? ' AND superseded_by_id IS NULL AND retired_at IS NULL'
+        : '';
+      const filterClause = knowledgeSearchFilterClauses(resolved, params);
+      params.push(resolved.limit);
+      const limitIdx = params.length;
       const { rows } = await pool.query(
-        `SELECT *, ts_rank(search_vector, plainto_tsquery('english', $6)) AS rank
+        `SELECT *, ts_rank(search_vector, to_tsquery('english', $${qIdx})) AS rank
          FROM knowledge_memory
-         WHERE ${scopeWhere()} ${activeClause}
-           AND search_vector @@ plainto_tsquery('english', $6)
-         ORDER BY rank DESC
-         LIMIT $7`,
+         WHERE ${scopeWhere()}${activeClause}${filterClause}
+           AND search_vector @@ to_tsquery('english', $${qIdx})
+         ORDER BY rank DESC, last_accessed_at DESC, id ASC
+         LIMIT $${limitIdx}`,
         params,
       );
-      return rows
-        .map((row) => ({
-          item: mapKnowledgeMemory(row),
-          rank: Number(row.rank),
-        }))
-        .filter((result) => matchesKnowledgeSearchOptions(result.item, resolved))
-        .slice(0, limit);
+      return rows.map((row) => ({
+        item: mapKnowledgeMemory(row),
+        rank: normalizeTsRank(Number(row.rank)),
+      }));
     },
 
     async searchKnowledgeCrossScope(scope, level, queryText, searchOptions) {
+      // Param layout: wideScopeParams ($1..$L); $L+1 OR-composed tsquery; P4
+      // filter params; P6 visibility params (4: system/workspace/collab/scope);
+      // limit last. P6: the visibilityWhere predicate mirrors isBaseVisible so a
+      // private/shared_collaboration/workspace fact never surfaces cross-scope.
       const resolved = resolveSearchOptions(searchOptions);
+      // F2-class: empty-token guard (see searchTurns) — return [] before the DB.
+      const tsQuery = toOrTsQuery(queryText);
+      if (tsQuery.length === 0) return [];
       const params = wideScopeParams(scope, level);
-      const limit = resolved.limit;
-      const activeClause = resolved.activeOnly ? ' AND superseded_by_id IS NULL AND retired_at IS NULL' : '';
-      const paramOffset = params.length;
-      params.push(queryText, limit);
+      params.push(tsQuery);
+      const qIdx = params.length;
+      const activeClause = resolved.activeOnly
+        ? ' AND superseded_by_id IS NULL AND retired_at IS NULL'
+        : '';
+      const filterClause = knowledgeSearchFilterClauses(resolved, params);
+      const visClause = visibilityWhere(scope, params);
+      params.push(resolved.limit);
+      const limitIdx = params.length;
       const { rows } = await pool.query(
-        `SELECT *, ts_rank(search_vector, plainto_tsquery('english', $${paramOffset + 1})) AS rank
+        `SELECT *, ts_rank(search_vector, to_tsquery('english', $${qIdx})) AS rank
          FROM knowledge_memory
-         WHERE ${wideScopeWhere(scope, level)} ${activeClause}
-           AND search_vector @@ plainto_tsquery('english', $${paramOffset + 1})
-         ORDER BY rank DESC
-         LIMIT $${paramOffset + 2}`,
+         WHERE ${wideScopeWhere(scope, level)}${activeClause}${filterClause}
+           AND ${visClause}
+           AND search_vector @@ to_tsquery('english', $${qIdx})
+         ORDER BY rank DESC, last_accessed_at DESC, id ASC
+         LIMIT $${limitIdx}`,
         params,
       );
-      return rows
-        .map((row) => ({
-          item: mapKnowledgeMemory(row),
-          rank: Number(row.rank),
-        }))
-        .filter((result) => matchesKnowledgeSearchOptions(result.item, resolved))
-        .slice(0, limit);
+      return rows.map((row) => ({
+        item: mapKnowledgeMemory(row),
+        rank: normalizeTsRank(Number(row.rank)),
+      }));
     },
 
     async insertKnowledgeMemoryAudit(input) {
@@ -2239,13 +2452,17 @@ export function createPostgresAdapter(
       // Phase 2.1: atomic row + event.
       return this.transaction(async () => {
         const n = normalizeScope(input);
-        const createdAt = now();
+        // Phase 3.5 / P5: honor caller created_at (integer-coerced) and persist
+        // visibility_class + source_working_memory_id, all of which were dropped
+        // before (columns existed in the schema but the INSERT never set them).
+        const createdAt = resolveCreatedAt(input.created_at);
         const { rows } = await pool.query(
-          `INSERT INTO work_items (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, title, kind, status, detail, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
+          `INSERT INTO work_items (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, title, kind, status, detail, visibility_class, source_working_memory_id, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)
            RETURNING *`,
           [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.session_id,
-           input.title, input.kind ?? 'objective', input.status ?? 'open', input.detail ?? null, createdAt],
+           input.title, input.kind ?? 'objective', input.status ?? 'open', input.detail ?? null,
+           input.visibility_class ?? 'private', input.source_working_memory_id ?? null, createdAt],
         );
         const workItem = mapWorkItem(rows[0]);
         await insertMemoryEventInternal({
@@ -2264,8 +2481,9 @@ export function createPostgresAdapter(
     },
 
     async getActiveWorkItems(scope) {
+      // Ordering contract (P3): created_at ASC, then id ASC (was id DESC).
       const { rows } = await pool.query(
-        `SELECT * FROM work_items WHERE ${scopeWhere()} AND status != 'done' ORDER BY id DESC`,
+        `SELECT * FROM work_items WHERE ${scopeWhere()} AND status != 'done' ORDER BY created_at ASC, id ASC`,
         scopeParams(scope),
       );
       return rows.map(mapWorkItem);
@@ -2281,9 +2499,12 @@ export function createPostgresAdapter(
     },
 
     async getActiveWorkItemsCrossScope(scope, level) {
+      // Ordering contract (P3): created_at ASC, id ASC. P6: base visibility gate.
+      const params = wideScopeParams(scope, level);
+      const visClause = visibilityWhere(scope, params);
       const { rows } = await pool.query(
-        `SELECT * FROM work_items WHERE ${wideScopeWhere(scope, level)} AND status != 'done' ORDER BY id DESC`,
-        wideScopeParams(scope, level),
+        `SELECT * FROM work_items WHERE ${wideScopeWhere(scope, level)} AND ${visClause} AND status != 'done' ORDER BY created_at ASC, id ASC`,
+        params,
       );
       return rows.map(mapWorkItem);
     },
@@ -2299,14 +2520,17 @@ export function createPostgresAdapter(
         params.push(range.end_at);
         query += ` AND created_at <= $${params.length}`;
       }
-      query += ' ORDER BY id DESC';
+      // Ordering contract (P3): created_at ASC, then id ASC.
+      query += ' ORDER BY created_at ASC, id ASC';
       const { rows } = await pool.query(query, params);
       return rows.map(mapWorkItem);
     },
 
     async getWorkItemsByTimeRangeCrossScope(scope, level, range) {
+      // P6: base visibility gate on the cross-scope time-range read path.
       const params = wideScopeParams(scope, level);
-      let query = `SELECT * FROM work_items WHERE ${wideScopeWhere(scope, level)}`;
+      const visClause = visibilityWhere(scope, params);
+      let query = `SELECT * FROM work_items WHERE ${wideScopeWhere(scope, level)} AND ${visClause}`;
       if (range.start_at != null) {
         params.push(range.start_at);
         query += ` AND created_at >= $${params.length}`;
@@ -2315,7 +2539,8 @@ export function createPostgresAdapter(
         params.push(range.end_at);
         query += ` AND created_at <= $${params.length}`;
       }
-      query += ' ORDER BY id DESC';
+      // Ordering contract (P3): created_at ASC, then id ASC.
+      query += ' ORDER BY created_at ASC, id ASC';
       const { rows } = await pool.query(query, params);
       return rows.map(mapWorkItem);
     },
@@ -2681,10 +2906,12 @@ export function createPostgresAdapter(
       options?: WorkClaimQuery,
     ): Promise<WorkClaim[]> {
       // Phase 2.5: reads never write (see listWorkClaims).
+      // P6: base visibility gate on the cross-scope claim read path.
       const currentNow = now();
       const levelParams = wideScopeParams(scope, level);
+      const visClause = visibilityWhere(scope, levelParams);
       const { rows } = await pool.query(
-        `SELECT * FROM work_claims_current WHERE ${wideScopeWhere(scope, level)} ORDER BY claimed_at DESC`,
+        `SELECT * FROM work_claims_current WHERE ${wideScopeWhere(scope, level)} AND ${visClause} ORDER BY claimed_at DESC`,
         levelParams,
       );
       const claims = rows.map((row) => effectiveClaim(mapWorkClaim(row), currentNow));
@@ -2754,7 +2981,8 @@ export function createPostgresAdapter(
     async createHandoff(input: NewHandoffInput): Promise<HandoffRecord> {
       return this.transaction(async () => {
         const normalized = normalizeScope(input);
-        const createdAt = input.created_at ?? now();
+        // F5/P5: integer-coerce (handoff_records.created_at is INTEGER).
+        const createdAt = resolveCreatedAt(input.created_at);
         const fromParts = serializeActorMetadata(input.from_actor);
         const toParts = serializeActorMetadata(input.to_actor);
         const { rows } = await pool.query(
@@ -3005,10 +3233,12 @@ export function createPostgresAdapter(
       options?: HandoffQuery,
     ): Promise<HandoffRecord[]> {
       // D5: reads never write (see listHandoffs).
+      // P6: base visibility gate on the cross-scope handoff read path.
       const currentNow = now();
       const levelParams = wideScopeParams(scope, level);
+      const visClause = visibilityWhere(scope, levelParams);
       const { rows } = await pool.query(
-        `SELECT * FROM handoff_records WHERE ${wideScopeWhere(scope, level)} ORDER BY created_at DESC`,
+        `SELECT * FROM handoff_records WHERE ${wideScopeWhere(scope, level)} AND ${visClause} ORDER BY created_at DESC`,
         levelParams,
       );
       const handoffs = rows.map((row) => effectiveHandoff(mapHandoff(row), currentNow));
@@ -3049,15 +3279,19 @@ export function createPostgresAdapter(
 
     async insertCompactionLog(input) {
       const n = normalizeScope(input);
+      // Phase 3.5 / P5: persist error (was dropped) and honor caller created_at
+      // (integer-coerced). error is TEXT; created_at is the only INTEGER column
+      // added here and goes through resolveCreatedAt so no float can bind to it.
       const { rows } = await pool.query(
-        `INSERT INTO compaction_log (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, trigger_type, turn_id_start, turn_id_end, turns_compacted, tokens_compacted_estimate, working_memory_id, active_turn_count_before, active_turn_count_after, duration_ms, model_call_made, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        `INSERT INTO compaction_log (tenant_id, system_id, workspace_id, collaboration_id, scope_id, session_id, trigger_type, turn_id_start, turn_id_end, turns_compacted, tokens_compacted_estimate, working_memory_id, active_turn_count_before, active_turn_count_after, duration_ms, model_call_made, error, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
          RETURNING *`,
         [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id, input.session_id,
          input.trigger_type, input.turn_id_start, input.turn_id_end,
          input.turns_compacted, input.tokens_compacted_estimate, input.working_memory_id,
          input.active_turn_count_before, input.active_turn_count_after,
-         input.duration_ms, input.model_call_made, now()],
+         input.duration_ms, input.model_call_made, input.error ?? null,
+         resolveCreatedAt(input.created_at)],
       );
       return mapCompactionLog(rows[0]);
     },
@@ -3080,18 +3314,24 @@ export function createPostgresAdapter(
       // Phase 2.1: atomic row + event.
       return this.transaction(async () => {
         const n = normalizeScope(input);
-        const createdAt = input.created_at ?? now();
+        // F5/P5: integer-coerce (playbooks.created_at/updated_at are INTEGER).
+        const createdAt = resolveCreatedAt(input.created_at);
         const { rows } = await pool.query(
+          // MAJOR fix: visibility_class was DROPPED here, so every playbook was
+          // stored 'private' on Postgres regardless of the caller's class,
+          // silently defeating cross-scope playbook visibility. Persist it as the
+          // final column ($19); created_at/updated_at reuse $18 as before.
           `INSERT INTO playbooks (tenant_id, system_id, workspace_id, collaboration_id, scope_id, title, description, instructions,
-             references_json, templates, scripts, assets, tags, rationale, status, source_session_id, source_working_memory_id, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $18)
+             references_json, templates, scripts, assets, tags, rationale, status, source_session_id, source_working_memory_id, created_at, updated_at, visibility_class)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $18, $19)
            RETURNING *`,
           [n.tenant_id, n.system_id, n.workspace_id, n.collaboration_id, n.scope_id,
            input.title, input.description, input.instructions,
            JSON.stringify(input.references ?? []), JSON.stringify(input.templates ?? []),
            JSON.stringify(input.scripts ?? []), JSON.stringify(input.assets ?? []),
            JSON.stringify(input.tags ?? []), input.rationale ?? null, input.status ?? 'draft',
-           input.source_session_id ?? null, input.source_working_memory_id ?? null, createdAt],
+           input.source_session_id ?? null, input.source_working_memory_id ?? null, createdAt,
+           input.visibility_class ?? 'private'],
         );
         const playbook = mapPlaybook(rows[0]);
         await insertMemoryEventInternal({
@@ -3124,52 +3364,73 @@ export function createPostgresAdapter(
       return rows.map(mapPlaybook);
     },
     async getActivePlaybooksCrossScope(scope, level) {
+      // P6: base visibility gate on the cross-scope playbook read path.
+      // F6(d): canonical pinned ordering created_at ASC, id ASC (byCreatedAtThenId)
+      // to match the memory reference + the conformance suite. Was `id DESC`.
+      const params = wideScopeParams(scope, level);
+      const visClause = visibilityWhere(scope, params);
       const { rows } = await pool.query(
         `SELECT * FROM playbooks
-         WHERE ${wideScopeWhere(scope, level)} AND status IN ('draft', 'active')
-         ORDER BY id DESC`,
-        wideScopeParams(scope, level),
+         WHERE ${wideScopeWhere(scope, level)} AND ${visClause} AND status IN ('draft', 'active')
+         ORDER BY created_at ASC, id ASC`,
+        params,
       );
       return rows.map(mapPlaybook);
     },
     async searchPlaybooks(scope, query, options) {
+      // Playbooks match AND-of-terms (mirrors the in-memory `.every(token)`
+      // substring match) over title+description+instructions (the FTS trigger's
+      // search_vector). P2: rank normalized via normalizeTsRank — fixes the old
+      // `?? index` array-index-as-rank bug. P3: rank DESC, id ASC.
       const limit = options?.limit ?? 20;
       const activeOnly = options?.activeOnly ?? true;
-      const statusFilter = activeOnly
-        ? `AND status NOT IN ('archived', 'deprecated')`
-        : '';
+      const statusFilter = activeOnly ? ` AND status NOT IN ('archived', 'deprecated')` : '';
+      // F2-class: empty-token guard (see searchTurns). Playbooks match AND-of-
+      // terms (' & ', mirroring the memory `.every` substring reference), so an
+      // empty tokenization → '' → return [] before to_tsquery('english','').
+      const tsQuery = tokenizeSearch(query).join(' & ');
+      if (tsQuery.length === 0) return [];
+      const params: unknown[] = [...scopeParams(scope), tsQuery];
+      const qIdx = params.length;
+      params.push(limit);
+      const limitIdx = params.length;
       const { rows } = await pool.query(
-        `SELECT *, ts_rank(search_vector, plainto_tsquery('english', $6)) AS rank
-         FROM playbooks WHERE ${scopeWhere()} ${statusFilter}
-         AND search_vector @@ plainto_tsquery('english', $6)
-         ORDER BY rank DESC LIMIT $7`,
-        [...scopeParams(scope), query, limit],
+        `SELECT *, ts_rank(search_vector, to_tsquery('english', $${qIdx})) AS rank
+         FROM playbooks WHERE ${scopeWhere()}${statusFilter}
+           AND search_vector @@ to_tsquery('english', $${qIdx})
+         ORDER BY rank DESC, id ASC LIMIT $${limitIdx}`,
+        params,
       );
-      return rows.map((row: Record<string, unknown>, index: number) => ({
+      return rows.map((row) => ({
         item: mapPlaybook(row),
-        rank: Number(row.rank ?? index),
+        rank: normalizeTsRank(Number(row.rank)),
       }));
     },
     async searchPlaybooksCrossScope(scope, level, query, options) {
+      // P6: base visibility gate on the cross-scope playbook search path.
       const limit = options?.limit ?? 20;
       const activeOnly = options?.activeOnly ?? true;
-      const scopeClause = wideScopeWhere(scope, level);
-      const statusFilter = activeOnly
-        ? `AND status NOT IN ('archived', 'deprecated')`
-        : '';
-      const baseParams = wideScopeParams(scope, level);
-      const queryIndex = baseParams.length + 1;
-      const limitIndex = baseParams.length + 2;
+      const statusFilter = activeOnly ? ` AND status NOT IN ('archived', 'deprecated')` : '';
+      // F2-class: empty-token guard (see searchPlaybooks) — return [] pre-DB.
+      const tsQuery = tokenizeSearch(query).join(' & ');
+      if (tsQuery.length === 0) return [];
+      const params = wideScopeParams(scope, level);
+      params.push(tsQuery);
+      const qIdx = params.length;
+      const visClause = visibilityWhere(scope, params);
+      params.push(limit);
+      const limitIdx = params.length;
       const { rows } = await pool.query(
-        `SELECT *, ts_rank(search_vector, plainto_tsquery('english', $${queryIndex})) AS rank
-         FROM playbooks WHERE ${scopeClause} ${statusFilter}
-         AND search_vector @@ plainto_tsquery('english', $${queryIndex})
-         ORDER BY rank DESC LIMIT $${limitIndex}`,
-        [...baseParams, query, limit],
+        `SELECT *, ts_rank(search_vector, to_tsquery('english', $${qIdx})) AS rank
+         FROM playbooks WHERE ${wideScopeWhere(scope, level)}${statusFilter}
+           AND ${visClause}
+           AND search_vector @@ to_tsquery('english', $${qIdx})
+         ORDER BY rank DESC, id ASC LIMIT $${limitIdx}`,
+        params,
       );
-      return rows.map((row: Record<string, unknown>, index: number) => ({
+      return rows.map((row) => ({
         item: mapPlaybook(row),
-        rank: Number(row.rank ?? index),
+        rank: normalizeTsRank(Number(row.rank)),
       }));
     },
     async updatePlaybook(id, patch) {
@@ -3252,7 +3513,9 @@ export function createPostgresAdapter(
         if (!playbook) {
           throw new Error(`Playbook ${input.playbook_id} not found`);
         }
-        const createdAt = input.created_at ?? now();
+        // F5/P5: integer-coerce (playbook_revisions.created_at + the parent
+        // playbooks.updated_at bump below are INTEGER).
+        const createdAt = resolveCreatedAt(input.created_at);
         const { rows } = await pool.query(
           `INSERT INTO playbook_revisions (tenant_id, system_id, workspace_id, collaboration_id, scope_id, playbook_id, instructions, revision_reason, source_session_id, created_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -3329,7 +3592,8 @@ export function createPostgresAdapter(
              input.source_kind, input.source_id, input.target_kind, input.target_id,
              input.association_type, input.provenance ?? 'inferred', input.confidence ?? 0.8,
              input.auto_generated ?? false, input.visibility_class ?? 'private',
-             input.created_at ?? now()],
+             // F5/P5: integer-coerce (associations.created_at is INTEGER).
+             resolveCreatedAt(input.created_at)],
           );
           const association = mapAssociation(rows[0]);
           await insertMemoryEventInternal({
@@ -3642,6 +3906,287 @@ export function createPostgresAdapter(
       );
     },
 
+    // ────── Context governance persistence (Phase 3.8) ──────
+    // Mirrors the SQLite adapter's shape and soft-delete semantics so hosted
+    // (Postgres) deployments persist contracts/invariants/policies identically.
+    // Every mutation wraps the row write + audit event in this.transaction so
+    // they commit together (the event is an audit trail, not a temporal-replay
+    // source — governance is last-writer-wins config; authoritative state is
+    // getGovernanceState). is_default / is_deleted are BOOLEAN in pg (INTEGER
+    // 0/1 in SQLite); no INTEGER column here binds anything but now() seconds.
+
+    async getGovernanceState(scope): Promise<PersistedGovernanceState | null> {
+      const sv = scopeParams(scope);
+      const { rows: contractRows } = await pool.query(
+        `SELECT name, is_default, is_deleted, contract_json FROM context_contracts WHERE ${scopeWhere()}`,
+        sv,
+      );
+      const { rows: invariantRows } = await pool.query(
+        `SELECT invariant_id, title, instruction, severity, scope_level, is_deleted FROM context_invariants WHERE ${scopeWhere()}`,
+        sv,
+      );
+      const { rows: policyRows } = await pool.query(
+        `SELECT policy_json FROM context_escalation_policies WHERE ${scopeWhere()}`,
+        sv,
+      );
+
+      if (contractRows.length === 0 && invariantRows.length === 0 && policyRows.length === 0) {
+        return null;
+      }
+
+      let defaultContract: PersistedGovernanceState['defaultContract'] = null;
+      const namedContracts: Record<string, ContextContract> = {};
+      const deletedContractNames: string[] = [];
+      for (const row of contractRows) {
+        if (row.is_default) {
+          defaultContract = row.is_deleted
+            ? { state: 'cleared' }
+            : { state: 'set', contract: JSON.parse(String(row.contract_json)) as ContextContract };
+        } else if (row.is_deleted) {
+          if (row.name != null) deletedContractNames.push(String(row.name));
+        } else {
+          namedContracts[String(row.name)] = JSON.parse(String(row.contract_json)) as ContextContract;
+        }
+      }
+
+      const invariants: ContextInvariant[] = [];
+      const deletedInvariantIds: string[] = [];
+      for (const row of invariantRows) {
+        if (row.is_deleted) {
+          deletedInvariantIds.push(String(row.invariant_id));
+          continue;
+        }
+        invariants.push({
+          id: String(row.invariant_id),
+          title: String(row.title),
+          instruction: String(row.instruction),
+          severity: (row.severity as ContextInvariant['severity']) ?? undefined,
+          scopeLevel: (row.scope_level as ContextInvariant['scopeLevel']) ?? undefined,
+        });
+      }
+
+      return {
+        defaultContract,
+        namedContracts,
+        deletedContractNames,
+        invariants,
+        deletedInvariantIds,
+        escalationPolicy: policyRows[0]
+          ? (JSON.parse(String(policyRows[0].policy_json)) as ContextEscalationPolicy)
+          : null,
+      };
+    },
+
+    async upsertDefaultContextContract(scope, contract): Promise<void> {
+      await this.transaction(async () => {
+        const sv = scopeParams(scope);
+        const nowTs = now();
+        const isDeleted = contract == null;
+        const contractJson = contract == null ? null : JSON.stringify(contract);
+        // UPDATE-then-INSERT (mirrors SQLite) instead of ON CONFLICT on a partial
+        // index — one default row per scope (idx_ctx_contract_scope_default).
+        const { rowCount } = await pool.query(
+          `UPDATE context_contracts
+           SET name = NULL, is_default = TRUE, is_deleted = $6, contract_json = $7, updated_at = $8
+           WHERE ${scopeWhere()} AND is_default = TRUE`,
+          [...sv, isDeleted, contractJson, nowTs],
+        );
+        if (!rowCount) {
+          await pool.query(
+            `INSERT INTO context_contracts
+               (tenant_id, system_id, workspace_id, collaboration_id, scope_id, name, is_default, is_deleted, contract_json, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, NULL, TRUE, $6, $7, $8, $8)`,
+            [...sv, isDeleted, contractJson, nowTs],
+          );
+        }
+        await insertMemoryEventInternal({
+          ...normalizeScope(scope),
+          entity_kind: 'context_contract',
+          entity_id: '__default__',
+          event_type: contract == null ? 'context_contract.deleted' : 'context_contract.set',
+          payload: {
+            after: contract == null ? { state: 'cleared' } : { state: 'set', contract },
+            refs: { name: null, isDefault: true },
+          },
+          created_at: nowTs,
+        });
+      });
+    },
+
+    async upsertNamedContextContract(scope, name, contract): Promise<void> {
+      await this.transaction(async () => {
+        const sv = scopeParams(scope);
+        const nowTs = now();
+        const contractJson = JSON.stringify(contract);
+        const { rowCount } = await pool.query(
+          `UPDATE context_contracts
+           SET is_default = FALSE, is_deleted = FALSE, contract_json = $6, updated_at = $7
+           WHERE ${scopeWhere()} AND is_default = FALSE AND name = $8`,
+          [...sv, contractJson, nowTs, name],
+        );
+        if (!rowCount) {
+          await pool.query(
+            `INSERT INTO context_contracts
+               (tenant_id, system_id, workspace_id, collaboration_id, scope_id, name, is_default, is_deleted, contract_json, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, FALSE, FALSE, $7, $8, $8)`,
+            [...sv, name, contractJson, nowTs],
+          );
+        }
+        await insertMemoryEventInternal({
+          ...normalizeScope(scope),
+          entity_kind: 'context_contract',
+          entity_id: name,
+          event_type: 'context_contract.set',
+          payload: { after: contract, refs: { name, isDefault: false } },
+          created_at: nowTs,
+        });
+      });
+    },
+
+    async deleteNamedContextContract(scope, name): Promise<boolean> {
+      return this.transaction(async () => {
+        const sv = scopeParams(scope);
+        const nowTs = now();
+        const { rows: existingRows } = await pool.query(
+          `SELECT is_deleted FROM context_contracts WHERE ${scopeWhere()} AND is_default = FALSE AND name = $6`,
+          [...sv, name],
+        );
+        let existed: boolean;
+        if (existingRows[0]) {
+          await pool.query(
+            `UPDATE context_contracts
+             SET is_deleted = TRUE, contract_json = NULL, updated_at = $6
+             WHERE ${scopeWhere()} AND is_default = FALSE AND name = $7`,
+            [...sv, nowTs, name],
+          );
+          existed = existingRows[0].is_deleted === false;
+        } else {
+          await pool.query(
+            `INSERT INTO context_contracts
+               (tenant_id, system_id, workspace_id, collaboration_id, scope_id, name, is_default, is_deleted, contract_json, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, FALSE, TRUE, NULL, $7, $7)`,
+            [...sv, name, nowTs],
+          );
+          existed = false;
+        }
+        await insertMemoryEventInternal({
+          ...normalizeScope(scope),
+          entity_kind: 'context_contract',
+          entity_id: name,
+          event_type: 'context_contract.deleted',
+          payload: { refs: { name, isDefault: false, existed } },
+          created_at: nowTs,
+        });
+        return existed;
+      });
+    },
+
+    async upsertContextInvariant(scope, invariant): Promise<void> {
+      await this.transaction(async () => {
+        const sv = scopeParams(scope);
+        const nowTs = now();
+        const { rowCount } = await pool.query(
+          `UPDATE context_invariants
+           SET title = $6, instruction = $7, severity = $8, scope_level = $9, is_deleted = FALSE, updated_at = $10
+           WHERE ${scopeWhere()} AND invariant_id = $11`,
+          [
+            ...sv,
+            invariant.title,
+            invariant.instruction,
+            invariant.severity ?? null,
+            invariant.scopeLevel ?? null,
+            nowTs,
+            invariant.id,
+          ],
+        );
+        if (!rowCount) {
+          await pool.query(
+            `INSERT INTO context_invariants
+               (tenant_id, system_id, workspace_id, collaboration_id, scope_id, invariant_id, title, instruction, severity, scope_level, is_deleted, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, FALSE, $11, $11)`,
+            [
+              ...sv,
+              invariant.id,
+              invariant.title,
+              invariant.instruction,
+              invariant.severity ?? null,
+              invariant.scopeLevel ?? null,
+              nowTs,
+            ],
+          );
+        }
+        await insertMemoryEventInternal({
+          ...normalizeScope(scope),
+          entity_kind: 'context_invariant',
+          entity_id: invariant.id,
+          event_type: 'context_invariant.set',
+          payload: { after: invariant },
+          created_at: nowTs,
+        });
+      });
+    },
+
+    async deleteContextInvariant(scope, invariantId): Promise<boolean> {
+      return this.transaction(async () => {
+        const sv = scopeParams(scope);
+        const nowTs = now();
+        const { rows: existingRows } = await pool.query(
+          `SELECT is_deleted FROM context_invariants WHERE ${scopeWhere()} AND invariant_id = $6`,
+          [...sv, invariantId],
+        );
+        let existed: boolean;
+        if (existingRows[0]) {
+          await pool.query(
+            `UPDATE context_invariants
+             SET title = NULL, instruction = NULL, severity = NULL, scope_level = NULL, is_deleted = TRUE, updated_at = $6
+             WHERE ${scopeWhere()} AND invariant_id = $7`,
+            [...sv, nowTs, invariantId],
+          );
+          existed = existingRows[0].is_deleted === false;
+        } else {
+          await pool.query(
+            `INSERT INTO context_invariants
+               (tenant_id, system_id, workspace_id, collaboration_id, scope_id, invariant_id, title, instruction, severity, scope_level, is_deleted, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL, NULL, NULL, TRUE, $7, $7)`,
+            [...sv, invariantId, nowTs],
+          );
+          existed = false;
+        }
+        await insertMemoryEventInternal({
+          ...normalizeScope(scope),
+          entity_kind: 'context_invariant',
+          entity_id: invariantId,
+          event_type: 'context_invariant.deleted',
+          payload: { refs: { invariantId, existed } },
+          created_at: nowTs,
+        });
+        return existed;
+      });
+    },
+
+    async upsertContextEscalationPolicy(scope, policy): Promise<void> {
+      await this.transaction(async () => {
+        const sv = scopeParams(scope);
+        const nowTs = now();
+        await pool.query(
+          `INSERT INTO context_escalation_policies
+             (tenant_id, system_id, workspace_id, collaboration_id, scope_id, policy_json, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+           ON CONFLICT (tenant_id, system_id, workspace_id, collaboration_id, scope_id)
+           DO UPDATE SET policy_json = EXCLUDED.policy_json, updated_at = EXCLUDED.updated_at`,
+          [...sv, JSON.stringify(policy), nowTs],
+        );
+        await insertMemoryEventInternal({
+          ...normalizeScope(scope),
+          entity_kind: 'context_escalation_policy',
+          entity_id: '__policy__',
+          event_type: 'context_escalation_policy.set',
+          payload: { after: policy },
+          created_at: nowTs,
+        });
+      });
+    },
+
     async close() {
       if (options?.ownsPool !== false) {
         await rootPool.end();
@@ -3841,11 +4386,17 @@ export function createPostgresEmbeddingAdapter(
       const minSimilarityParam = params.length;
       params.push(limit);
       const limitParam = params.length;
+      // F4: base visibility gate on the SEMANTIC cross-scope read path. The
+      // embeddings table (ke) has no visibility_class — it lives on the joined
+      // knowledge_memory (km) — so mirror isBaseVisible against km. Without this a
+      // private/shared/workspace fact leaked into a cross-scope similarity search.
+      const visClause = visibilityWhere(scope, params, 'km');
       const { rows } = await pool.query(
         `SELECT ke.knowledge_memory_id, 1 - (${distExpr}) AS similarity
          FROM knowledge_embeddings ke
          JOIN knowledge_memory km ON km.id = ke.knowledge_memory_id
          WHERE ${wideScopeWhere(scope, level, 'ke')}
+           AND ${visClause}
            AND km.superseded_by_id IS NULL
            AND km.retired_at IS NULL${extraClauses.length ? '\n           AND ' + extraClauses.join('\n           AND ') : ''}
            AND 1 - (${distExpr}) >= $${minSimilarityParam}
