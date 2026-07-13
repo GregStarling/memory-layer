@@ -136,6 +136,28 @@ async function loadPg(): Promise<typeof import('pg')> {
   return pgModulePromise;
 }
 
+/**
+ * Install pgvector pinned to the `public` schema, tolerating concurrent
+ * installs. Every pg test harness creates an ephemeral schema first in its
+ * `search_path` and drops it CASCADE on teardown — a bare
+ * `CREATE EXTENSION IF NOT EXISTS vector` on such a pool installs the
+ * extension INTO the ephemeral schema, and the first teardown then drops the
+ * `vector` type out from under every other vitest worker mid-run. Pinning to
+ * `public` keeps the extension alive across all workers; the pg_extension
+ * re-check absorbs the duplicate-object race two workers can hit inside
+ * IF NOT EXISTS.
+ */
+export async function ensurePgVectorExtension(pool: {
+  query: (sql: string) => Promise<{ rows: unknown[] }>;
+}): Promise<void> {
+  try {
+    await pool.query('CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public');
+  } catch (err) {
+    const { rows } = await pool.query("SELECT 1 FROM pg_extension WHERE extname = 'vector'");
+    if (rows.length === 0) throw err;
+  }
+}
+
 export async function makePostgresHarness(): Promise<HarnessAdapter> {
   if (!POSTGRES_TEST_URL) {
     throw new Error('makePostgresHarness called without POSTGRES_TEST_URL');
@@ -168,6 +190,7 @@ export async function makePostgresHarness(): Promise<HarnessAdapter> {
   const schemaName = `ml_verify_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
   const bootstrap = new pg.Pool({ connectionString: POSTGRES_TEST_URL });
   try {
+    await ensurePgVectorExtension(bootstrap);
     await bootstrap.query(`CREATE SCHEMA "${schemaName}"`);
   } finally {
     await bootstrap.end();
@@ -175,7 +198,6 @@ export async function makePostgresHarness(): Promise<HarnessAdapter> {
   const url = new URL(POSTGRES_TEST_URL);
   url.searchParams.set('options', `-c search_path=${schemaName},public`);
   const pool = new pg.Pool({ connectionString: url.toString() });
-  await pool.query('CREATE EXTENSION IF NOT EXISTS vector');
   await pool.query(schemaSql);
 
   return {

@@ -32,6 +32,7 @@ import { fileURLToPath } from 'node:url';
 
 import { createPostgresAdapter, createPostgresEmbeddingAdapter } from '../adapters/postgres/index.js';
 import type { MemoryScope } from '../contracts/identity.js';
+import { ensurePgVectorExtension } from './helpers/verification-harness.js';
 
 const POSTGRES_TEST_URL = process.env.POSTGRES_TEST_URL;
 const describeIntegration = POSTGRES_TEST_URL ? describe : describe.skip;
@@ -107,6 +108,10 @@ describeIntegration('Postgres Phase 3 adapter parity', () => {
     const schemaName = `mlp3_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
     const bootstrapPool = new pg.Pool({ connectionString: POSTGRES_TEST_URL });
     try {
+      // Pin pgvector to public (see ensurePgVectorExtension) — installing it
+      // via the search_path'd pool put it in the ephemeral schema, and the
+      // teardown CASCADE dropped it for concurrently-running test files.
+      await ensurePgVectorExtension(bootstrapPool);
       await bootstrapPool.query(`CREATE SCHEMA "${schemaName}"`);
     } finally {
       await bootstrapPool.end();
@@ -116,7 +121,6 @@ describeIntegration('Postgres Phase 3 adapter parity', () => {
     const pool = new pg.Pool({ connectionString: baseUrl.toString() });
     poolRef = pool;
     currentSchema = schemaName;
-    await pool.query('CREATE EXTENSION IF NOT EXISTS vector');
     await pool.query(loadSchemaSql());
     return { adapter: createPostgresAdapter(pool), pool };
   }

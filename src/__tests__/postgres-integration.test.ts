@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 
 import { createPostgresAdapter, createPostgresEmbeddingAdapter } from '../adapters/postgres/index.js';
 import type { MemoryScope } from '../contracts/identity.js';
+import { ensurePgVectorExtension } from './helpers/verification-harness.js';
 
 const POSTGRES_TEST_URL = process.env.POSTGRES_TEST_URL;
 const describeIntegration = POSTGRES_TEST_URL ? describe : describe.skip;
@@ -102,6 +103,10 @@ describeIntegration('Postgres integration — schema + adapter parity', () => {
     // open the real pool with the schema in the connection-string options.
     const bootstrapPool = new pg.Pool({ connectionString: POSTGRES_TEST_URL });
     try {
+      // Pin pgvector to public (see ensurePgVectorExtension) — installing it
+      // via the search_path'd pool put it in the ephemeral schema, and the
+      // teardown CASCADE dropped it for concurrently-running test files.
+      await ensurePgVectorExtension(bootstrapPool);
       await bootstrapPool.query(`CREATE SCHEMA "${schemaName}"`);
     } finally {
       await bootstrapPool.end();
@@ -117,7 +122,6 @@ describeIntegration('Postgres integration — schema + adapter parity', () => {
     poolRef = pool;
     currentSchema = schemaName;
 
-    await pool.query('CREATE EXTENSION IF NOT EXISTS vector');
     const schemaSql = loadSchemaSql();
     if (options.applySchema ?? true) {
       await pool.query(schemaSql);
