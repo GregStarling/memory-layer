@@ -110,27 +110,42 @@ describe('sqlite embeddings', () => {
     expect(adapter.embeddings.getEmbedding(knowledge.id)).toBeNull();
   });
 
-  it('supports cross-scope semantic search when requested', () => {
+  it('supports cross-scope semantic search for shareable facts but not private ones (F4)', () => {
     const scopeA = makeScope({ scope_id: 'thread-1' });
     const scopeB = makeScope({ scope_id: 'thread-2' });
-    const knowledge = adapter.insertKnowledgeMemory({
+    // F4: a workspace-class fact is visible across scopes inside the same
+    // workspace; a private fact in scope A must NEVER surface to scope B via
+    // semantic search, even at workspace widening.
+    const shared = adapter.insertKnowledgeMemory({
       ...scopeA,
       fact: 'shared workspace fact',
       fact_type: 'reference',
       source: 'manual',
       confidence: 'high',
+      visibility_class: 'workspace',
     });
-    adapter.embeddings.storeEmbedding(knowledge.id, new Float32Array([1, 0]));
+    const secret = adapter.insertKnowledgeMemory({
+      ...scopeA,
+      fact: 'private scope-A fact',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+      // visibility_class omitted -> defaults to 'private'
+    });
+    adapter.embeddings.storeEmbedding(shared.id, new Float32Array([1, 0]));
+    adapter.embeddings.storeEmbedding(secret.id, new Float32Array([1, 0]));
 
     const results = adapter.embeddings.findSimilarCrossScope(
       scopeB,
       'workspace',
       new Float32Array([1, 0]),
     );
-    expect(results[0]?.knowledgeMemoryId).toBe(knowledge.id);
+    const ids = results.map((r) => r.knowledgeMemoryId);
+    expect(ids).toContain(shared.id);
+    expect(ids).not.toContain(secret.id);
   });
 
-  it('supports workspace-level cross-scope semantic search inside a collaboration', () => {
+  it('supports workspace-level cross-scope semantic search inside a collaboration (F4)', () => {
     const scopeA = makeScope({
       system_id: 'planner',
       workspace_id: 'factory',
@@ -143,21 +158,33 @@ describe('sqlite embeddings', () => {
       collaboration_id: 'incident-123',
       scope_id: 'thread-2',
     });
-    const knowledge = adapter.insertKnowledgeMemory({
+    const shared = adapter.insertKnowledgeMemory({
       ...scopeA,
       fact: 'Shared collaboration memory',
       fact_type: 'reference',
       source: 'manual',
       confidence: 'high',
+      visibility_class: 'shared_collaboration',
     });
-    adapter.embeddings.storeEmbedding(knowledge.id, new Float32Array([1, 0]));
+    const secret = adapter.insertKnowledgeMemory({
+      ...scopeA,
+      fact: 'Private planner-only memory',
+      fact_type: 'reference',
+      source: 'manual',
+      confidence: 'high',
+      // visibility_class omitted -> defaults to 'private'
+    });
+    adapter.embeddings.storeEmbedding(shared.id, new Float32Array([1, 0]));
+    adapter.embeddings.storeEmbedding(secret.id, new Float32Array([1, 0]));
 
     const results = adapter.embeddings.findSimilarCrossScope(
       scopeB,
       'workspace',
       new Float32Array([1, 0]),
     );
-    expect(results[0]?.knowledgeMemoryId).toBe(knowledge.id);
+    const ids = results.map((r) => r.knowledgeMemoryId);
+    expect(ids).toContain(shared.id);
+    expect(ids).not.toContain(secret.id);
   });
 
   it('excludes retired knowledge from semantic search (plan 0.6)', () => {

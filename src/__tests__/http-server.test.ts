@@ -512,6 +512,7 @@ describe('HTTP server', () => {
       body: JSON.stringify({
         fact: 'Shared deployment memory',
         factType: 'reference',
+        visibility_class: 'workspace',
       }),
     });
 
@@ -544,6 +545,7 @@ describe('HTTP server', () => {
       body: JSON.stringify({
         fact: 'Cursor-safe shared fact',
         factType: 'reference',
+        visibility_class: 'workspace',
       }),
     }).then((res) => res.json());
 
@@ -572,6 +574,7 @@ describe('HTTP server', () => {
       body: JSON.stringify({
         fact: 'Second cursor-safe shared fact',
         factType: 'reference',
+        visibility_class: 'workspace',
       }),
     });
 
@@ -597,6 +600,7 @@ describe('HTTP server', () => {
       body: JSON.stringify({
         fact: 'Deployment rollback requires cache flush',
         factType: 'reference',
+        visibility_class: 'shared_collaboration',
       }),
     });
 

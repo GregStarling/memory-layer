@@ -12,7 +12,8 @@
         "scope_id": "research-run"
       },
       "fact": "Shared rollback checklist lives in Postgres-backed workspace memory.",
-      "factType": "decision"
+      "factType": "decision",
+      "visibility_class": "shared_collaboration"
     },
     {
       "scope": {
@@ -23,7 +24,8 @@
         "scope_id": "build-run"
       },
       "fact": "Builder is waiting on the shared rollback checklist before deploys.",
-      "factType": "constraint"
+      "factType": "constraint",
+      "visibility_class": "shared_collaboration"
     }
   ],
   "searchScope": {

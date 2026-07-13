@@ -49,7 +49,7 @@ describe('knowledge sync', () => {
     managers.push(writer, reader);
 
     const since = new Date();
-    await writer.learnFact('Shared deploy checklist lives here.', 'reference', 'high');
+    await writer.learnFact('Shared deploy checklist lives here.', 'reference', 'high', undefined, { visibilityClass: 'shared_collaboration' });
 
     const changes = await reader.pollForChanges(since, { scopeLevel: 'workspace' });
     expect(changes.some((item) => item.fact.includes('deploy checklist'))).toBe(true);
@@ -95,7 +95,7 @@ describe('knowledge sync', () => {
       batches.push(knowledge.map((item) => item.fact));
     });
     sync.startPolling();
-    await writer.learnFact('Use the shared rollout checklist.', 'reference', 'high');
+    await writer.learnFact('Use the shared rollout checklist.', 'reference', 'high', undefined, { visibilityClass: 'shared_collaboration' });
     await wait(30);
     sync.stopPolling();
 
@@ -132,7 +132,7 @@ describe('knowledge sync', () => {
     managers.push(writer, reader);
 
     const startCursor = await reader.resolveChangeStreamCursor();
-    const created = await writer.learnFact('Shared runbook lives here.', 'reference', 'high');
+    const created = await writer.learnFact('Shared runbook lives here.', 'reference', 'high', undefined, { visibilityClass: 'shared_collaboration' });
 
     const createdPage = await reader.listKnowledgeChanges({
       cursor: startCursor,

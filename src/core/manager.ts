@@ -377,7 +377,13 @@ export interface MemoryManager {
   }): Promise<KnowledgeChangeResult>;
   pollForChanges(since: Date, options?: { scopeLevel?: ScopeLevel }): Promise<KnowledgeMemory[]>;
   forceCompact(): Promise<CompactionResult | null>;
-  learnFact(fact: string, factType: FactType, confidence?: FactConfidence, rationale?: string | null): Promise<KnowledgeMemory>;
+  learnFact(
+    fact: string,
+    factType: FactType,
+    confidence?: FactConfidence,
+    rationale?: string | null,
+    options?: { visibilityClass?: KnowledgeMemory['visibility_class'] },
+  ): Promise<KnowledgeMemory>;
   trackWorkItem(
     title: string,
     kind?: WorkItem['kind'],
@@ -2546,9 +2552,10 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       );
     },
 
-    async learnFact(fact, factType, confidence = 'high', rationale) {
+    async learnFact(fact, factType, confidence = 'high', rationale, options) {
       const knowledge = await asyncAdapter.insertKnowledgeMemory({
         ...config.scope,
+        visibility_class: options?.visibilityClass ?? 'private',
         fact: config.redactText ? config.redactText({ kind: 'fact', text: fact }) : fact,
         fact_type: factType,
         knowledge_class: manualKnowledgeClassForFactType(factType),

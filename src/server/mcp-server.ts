@@ -411,6 +411,11 @@ const TOOLS: McpTool[] = [
           enum: ['high', 'medium', 'low'],
           description: 'Confidence level (default: high)',
         },
+        visibility_class: {
+          type: 'string',
+          enum: ['private', 'shared_collaboration', 'workspace', 'tenant'],
+          description: 'Cross-scope visibility (default: private)',
+        },
       },
       required: ['fact', 'factType'],
     },
@@ -1658,6 +1663,17 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
             (args.confidence == null
               ? 'high'
               : requireEnum(args.confidence, ['high', 'medium', 'low'], 'confidence')) as FactConfidence,
+            undefined,
+            {
+              visibilityClass:
+                args.visibility_class == null
+                  ? undefined
+                  : requireEnum(
+                      args.visibility_class,
+                      MEMORY_VISIBILITY_CLASSES,
+                      'visibility_class',
+                    ),
+            },
           );
           return jsonResult({ stored: true, knowledgeId: fact.id });
         }

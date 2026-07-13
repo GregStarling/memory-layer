@@ -159,14 +159,25 @@ export async function runLongHorizonEvals(_options = {}) {
 
     await localMemory.learnFact('Task A constraint: stay local-first.', 'constraint', 'high');
     await siblingMemory.learnFact('Task B secret: deploy to us-east staging.', 'reference', 'high');
+    // Sharing across scopes now requires an explicit visibility class (F4 gates
+    // private facts even at workspace widening), so the inheritable fact is
+    // deliberately published at workspace visibility while the secret stays private.
+    await siblingMemory.learnFact(
+      'Task B shared runbook: us-east staging deploys use the shared checklist.',
+      'reference',
+      'high',
+      undefined,
+      { visibilityClass: 'workspace' },
+    );
     const defaultContext = await localMemory.getContext('deployment staging local-first');
     const siblingLeakedIntoDefault = defaultContext.relevantKnowledge.some((item) =>
       item.fact.includes('us-east staging'),
     );
     const workspaceResults = await localMemory.searchCrossScope('us-east staging', 'workspace');
-    const explicitWorkspaceInheritance = knowledgeFacts(workspaceResults).some((fact) =>
-      fact.includes('us-east staging'),
-    );
+    const workspaceFacts = knowledgeFacts(workspaceResults);
+    const explicitWorkspaceInheritance =
+      workspaceFacts.some((fact) => fact.includes('shared checklist')) &&
+      !workspaceFacts.some((fact) => fact.includes('Task B secret'));
 
     const { staleProjectFact, provisionalFact } = await withFrozenNow('2024-01-01T00:00:00Z', async () => {
       await maintenanceMemory.learnFact('Critical constraint: stay local-first.', 'constraint', 'high');

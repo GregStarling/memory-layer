@@ -369,6 +369,7 @@ describe('MCP server handler', () => {
     await handler.callTool('memory_learn_fact', {
       fact: 'Shared workspace memory',
       factType: 'reference',
+      visibility_class: 'workspace',
       scope: {
         tenant_id: 'acme',
         system_id: 'assistant',
@@ -604,6 +605,7 @@ describe('MCP server handler', () => {
     await handler.callTool('memory_learn_fact', {
       fact: 'Rollback playbook lives with the release captain',
       factType: 'reference',
+      visibility_class: 'shared_collaboration',
       scope: {
         tenant_id: 'acme',
         system_id: 'planner',

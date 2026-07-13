@@ -376,6 +376,36 @@ describeIntegration('Postgres Phase 3 adapter parity', () => {
     expect(results[0].rank).toBeLessThanOrEqual(1);
   });
 
+  it('F1: multi-term knowledge search is OR-of-terms (any-term), not AND', async () => {
+    // Standardized contract (F1): knowledge/turn free-text search matches ANY
+    // term across all three adapters — pg via toOrTsQuery (' | '), mirroring the
+    // memory reference's scoreLexical (rank>0 when any term matches). Two rows
+    // that each contain only ONE of the two query terms must BOTH surface; an
+    // AND-of-terms tsquery ('alpha & beta') would match NEITHER (no single row
+    // has both), so this fails on the pre-F1 implicit-AND behavior.
+    const { adapter } = await prepareAdapter();
+    const s = scopeIn('ws1');
+    const alpha = await adapter.insertKnowledgeMemory({
+      ...s,
+      fact: 'alpha configuration details',
+      fact_type: 'reference',
+      source: 'user_stated',
+      confidence: 'high',
+    });
+    const beta = await adapter.insertKnowledgeMemory({
+      ...s,
+      fact: 'beta deployment notes',
+      fact_type: 'reference',
+      source: 'user_stated',
+      confidence: 'high',
+    });
+    const ids = new Set(
+      (await adapter.searchKnowledge(s, 'alpha beta')).map((r) => r.item.id),
+    );
+    expect(ids.has(alpha.id)).toBe(true);
+    expect(ids.has(beta.id)).toBe(true);
+  });
+
   it('P2: searchPlaybooks returns a normalized rank, not the array index', async () => {
     const { adapter } = await prepareAdapter();
     const s = scopeIn('ws1');

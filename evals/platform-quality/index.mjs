@@ -137,6 +137,7 @@ export async function runPlatformQualityEval() {
         body: JSON.stringify({
           fact: item.fact,
           factType: item.factType,
+          visibility_class: item.visibility_class,
           scope: item.scope,
         }),
       });

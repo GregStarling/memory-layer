@@ -1738,6 +1738,17 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           (body.confidence == null
             ? 'high'
             : requireEnum(body.confidence, ['high', 'medium', 'low'], 'confidence')) as FactConfidence,
+          undefined,
+          {
+            visibilityClass:
+              body.visibility_class == null
+                ? undefined
+                : requireEnum(
+                    body.visibility_class,
+                    MEMORY_VISIBILITY_CLASSES,
+                    'visibility_class',
+                  ),
+          },
         );
         writeJson(res, 201, { knowledgeId: fact.id });
         return;
