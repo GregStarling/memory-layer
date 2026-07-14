@@ -1,4 +1,4 @@
-import { startHttpServer } from 'memory-layer/server';
+import { startHttpServer } from 'ai-memory-layer/server';
 
 async function main() {
   const service = await startHttpServer({

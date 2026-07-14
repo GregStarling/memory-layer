@@ -82,6 +82,16 @@ export interface ExtractionPolicy {
   contradictionSeverityHighThreshold?: number;
 }
 
+/**
+ * Explicit "no token budget" sentinel. Callers opt into unbounded context by
+ * setting `tokenBudget: UNLIMITED_TOKEN_BUDGET` (equivalently `Number.MAX_SAFE_INTEGER`).
+ * This value is the *explicit* unlimited representation only — it is never the
+ * silent product default. The workload presets (see src/core/presets.ts) each
+ * carry a real finite default budget, so getContext() trims by default and only
+ * runs unbounded when a caller asks for it.
+ */
+export const UNLIMITED_TOKEN_BUDGET = Number.MAX_SAFE_INTEGER;
+
 export interface ContextPolicy {
   mode?: ContextMode;
   maxKnowledgeItems?: number;
@@ -173,7 +183,12 @@ export const DEFAULT_CONTEXT_POLICY: Required<ContextPolicy> = {
   maxKnowledgeItems: 20,
   maxRecentSummaries: 3,
   mode: 'chat',
-  tokenBudget: Number.MAX_SAFE_INTEGER,
+  // Base-policy fallback for the low-level buildMemoryContext primitive used
+  // without a preset. Real product entry points (createMemory/getContext) always
+  // apply a workload preset whose contextPolicy supplies a finite budget, so this
+  // MAX_SAFE_INTEGER only surfaces as the explicit-unlimited opt-in value — never
+  // as a silent default on the managed getContext() path.
+  tokenBudget: UNLIMITED_TOKEN_BUDGET,
   lexicalWeight: 1,
   semanticWeight: 1.2,
   recencyWeight: 1,

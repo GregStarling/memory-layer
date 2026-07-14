@@ -38,6 +38,10 @@ export const MEMORY_MANAGER_PRESETS: Record<MemoryManagerPreset, MemoryManagerPr
     contextPolicy: {
       mode: 'coding',
       maxKnowledgeItems: 16,
+      // IDE assistants share a large model window with the user's code/diffs;
+      // give memory a generous but bounded slice so oversized corpora trim
+      // rather than silently blowing the prompt budget.
+      tokenBudget: 8000,
       maxRecentSummaries: 4,
       touchSelectedKnowledge: true,
     },
@@ -69,6 +73,9 @@ export const MEMORY_MANAGER_PRESETS: Record<MemoryManagerPreset, MemoryManagerPr
     contextPolicy: {
       mode: 'chat',
       maxKnowledgeItems: 12,
+      // Conversational agents run alongside chat history and system prompts;
+      // the tightest default keeps injected memory compact and predictable.
+      tokenBudget: 4000,
       maxRecentSummaries: 3,
       touchSelectedKnowledge: true,
     },
@@ -100,6 +107,10 @@ export const MEMORY_MANAGER_PRESETS: Record<MemoryManagerPreset, MemoryManagerPr
     contextPolicy: {
       mode: 'autonomous_agent',
       maxKnowledgeItems: 20,
+      // Autonomous agents recall more items (higher maxKnowledgeItems) but run
+      // unattended, so a mid-sized budget balances broad recall against runaway
+      // prompt cost; trimming stays observable via the token_budget_trimmed trace.
+      tokenBudget: 6000,
       maxRecentSummaries: 5,
       touchSelectedKnowledge: true,
     },

@@ -59,6 +59,7 @@ Environment variables:
   MEMORY_ADMIN_API_KEY Admin key for privileged endpoints
   MEMORY_TRANSPORT     Transport type (mcp|http|both)
   MEMORY_HOST          HTTP host
+  MEMORY_PORT          HTTP port (default: 3100)
   MEMORY_BODY_LIMIT    Maximum HTTP request body bytes
 
 Examples:

@@ -31,6 +31,7 @@ import type {
   AssociationType,
 } from '../contracts/types.js';
 import { EPISODE_DETAIL_LEVELS, PLAYBOOK_STATUSES, ASSOCIATION_TYPES, ASSOCIATION_TARGET_KINDS } from '../contracts/types.js';
+import type { LintCategory } from '../contracts/lint.js';
 import { ACTOR_KINDS, CONTEXT_VIEW_POLICIES, MEMORY_VISIBILITY_CLASSES } from '../contracts/coordination.js';
 import {
   CONTEXT_ESCALATION_RULE_DECISIONS,
@@ -192,6 +193,18 @@ const {
   parseOptionalNonNegativeInteger, parseContextViewPolicy, parseContextContract,
   parseContextInvariant, parseContextEscalationPolicy, parseActorRef, parseLimit,
 } = createParsers(failHttpValidation);
+
+const FACT_TYPES = ['preference', 'entity', 'decision', 'constraint', 'reference'] as const;
+const FACT_CONFIDENCES = ['high', 'medium', 'low'] as const;
+const LINT_CATEGORIES = [
+  'orphan_knowledge',
+  'evidence_concentration',
+  'trust_distribution',
+  'contradiction_cluster',
+  'stale_provisional',
+  'ontology_violation',
+] as const;
+const MARKDOWN_GROUP_BY = ['knowledge_class', 'topic', 'tag', 'flat'] as const;
 
 function safeSecretEquals(provided: string | string[] | undefined, expected: string): boolean {
   if (typeof provided !== 'string') return false;
@@ -1150,6 +1163,120 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       });
       const result = requestManager.refreshDocuments(documents);
       writeJson(res, 200, result);
+    }],
+    // Phase 5 wiki surface (4.5): thin HTTP dispatches to existing manager
+    // methods, so generated clients hit real endpoints instead of 404s. Each
+    // resolves scope through resolveRequestScope like its neighbors; domain
+    // errors (missing turn, no extractor, scope mismatch) surface via the
+    // shared catch → writeError mapping.
+    ['POST /v1/promote-response', async ({ req, res, query, readJsonBody }) => {
+      const body = await readJsonBody();
+      const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+      if (typeof body.turnId !== 'number' || !Number.isInteger(body.turnId)) {
+        failHttpValidation('Missing or invalid field: turnId');
+      }
+      const factTypes = Array.isArray(body.factTypes)
+        ? body.factTypes.map((t) => requireEnum(t, FACT_TYPES, 'factTypes[]') as FactType)
+        : undefined;
+      const minConfidence =
+        body.minConfidence == null
+          ? undefined
+          : (requireEnum(body.minConfidence, FACT_CONFIDENCES, 'minConfidence') as FactConfidence);
+      const knowledge = await requestManager.promoteResponse(body.turnId as number, {
+        factTypes,
+        minConfidence,
+      });
+      writeJson(res, 200, { knowledge });
+    }],
+    ['POST /v1/documents', async ({ req, res, query, readJsonBody }) => {
+      const body = await readJsonBody();
+      const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+      const content = requireString(body.content, 'content');
+      const title = requireString(body.title, 'title');
+      const result = await requestManager.ingestDocument(content, {
+        title,
+        url: optionalString(body.url, 'url'),
+        mimeType: optionalString(body.mimeType, 'mimeType'),
+        metadata: isRecord(body.metadata)
+          ? (body.metadata as Record<string, string>)
+          : undefined,
+      });
+      writeJson(res, 201, result);
+    }],
+    ['GET /v1/documents', async ({ req, res, query }) => {
+      const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+      const limit = parseLimit(query.limit);
+      if (query.limit && limit == null) {
+        writeError(res, 400, 'Invalid limit parameter');
+        return;
+      }
+      const cursor = parseOptionalInteger(query.cursor);
+      if (query.cursor && cursor == null) {
+        writeError(res, 400, 'Invalid cursor parameter');
+        return;
+      }
+      const result = await requestManager.listSourceDocuments({
+        limit: limit ?? undefined,
+        cursor: cursor ?? undefined,
+      });
+      writeJson(res, 200, result);
+    }],
+    ['GET /v1/export/markdown', async ({ req, res, query }) => {
+      const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+      const boolParam = (value: string | undefined): boolean | undefined =>
+        value == null ? undefined : value === 'true';
+      const changelogLimit = parseOptionalInteger(query.changelogLimit);
+      if (query.changelogLimit && changelogLimit == null) {
+        writeError(res, 400, 'Invalid changelogLimit parameter');
+        return;
+      }
+      const groupBy =
+        query.groupBy == null
+          ? undefined
+          : (requireEnum(query.groupBy, MARKDOWN_GROUP_BY, 'groupBy') as
+              | 'knowledge_class'
+              | 'topic'
+              | 'tag'
+              | 'flat');
+      const filterByTags = query.tags
+        ? query.tags.split(',').map((t) => t.trim()).filter(Boolean)
+        : undefined;
+      const result = await requestManager.exportAsMarkdown({
+        includeEvidence: boolParam(query.includeEvidence),
+        includeTrustMetadata: boolParam(query.includeTrustMetadata),
+        includeChangelog: boolParam(query.includeChangelog),
+        changelogLimit: changelogLimit ?? undefined,
+        groupBy,
+        filterByTags,
+        includeSourceDocuments: boolParam(query.includeSourceDocuments),
+      });
+      // MarkdownExportResult.files is a Map; serialize it as a JSON object.
+      writeJson(res, 200, {
+        files: Object.fromEntries(result.files),
+        stats: result.stats,
+      });
+    }],
+    ['POST /v1/lint/knowledge', async ({ req, res, query, readJsonBody }) => {
+      const body = await readJsonBody();
+      // Resolve (and enforce) scope before shape validation so a cross-tenant
+      // caller is rejected with 403, not a 400 that leaks route acceptance.
+      const scopeInput = resolveRequestScope(config.scope, req, query, body);
+      const categories = Array.isArray(body.categories)
+        ? body.categories.map((c) => requireEnum(c, LINT_CATEGORIES, 'categories[]') as LintCategory)
+        : undefined;
+      const maxIssues = typeof body.maxIssues === 'number' ? body.maxIssues : undefined;
+      const minOrphanAgeDays =
+        typeof body.minOrphanAgeDays === 'number' ? body.minOrphanAgeDays : undefined;
+      const filterByTags = Array.isArray(body.filterByTags)
+        ? body.filterByTags.filter((t): t is string => typeof t === 'string')
+        : undefined;
+      const report = await serverContext.lintKnowledge(scopeInput, {
+        categories,
+        maxIssues,
+        minOrphanAgeDays,
+        filterByTags,
+      });
+      writeJson(res, 200, report);
     }],
   ]);
 
@@ -2429,6 +2556,19 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       }
 
       // POST /v1/sessions/:sessionId/snapshot — capture a frozen snapshot
+      // GET /v1/documents/:id — read a single ingested source document (4.5).
+      const documentGetMatch = path.match(/^\/v1\/documents\/(\d+)$/);
+      if (documentGetMatch && req.method === 'GET') {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const doc = await requestManager.getSourceDocument(Number(documentGetMatch[1]));
+        if (!doc) {
+          writeError(res, 404, 'Document not found');
+          return;
+        }
+        writeJson(res, 200, doc);
+        return;
+      }
+
       const snapshotCaptureMatch = path.match(/^\/v1\/sessions\/([^/]+)\/snapshot$/);
       if (snapshotCaptureMatch && req.method === 'POST') {
         const body = await readBody(req, bodyLimitBytes);

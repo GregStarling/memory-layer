@@ -1495,4 +1495,199 @@ describe('HTTP server', () => {
       ).status,
     ).toBe(400);
   });
+
+  // Phase 4.5: the five wiki routes that were documented in openapi.yaml but
+  // had no implementation (generated clients 404'd). Each is a thin dispatch to
+  // an existing manager method through the standard auth + scope pipeline.
+  describe('wiki surface routes (documents / export / promote / lint)', () => {
+    // A GET and a POST variant per route so the auth + scope loops cover both.
+    const NEW_ROUTES: Array<{ method: 'GET' | 'POST'; path: string; body?: unknown }> = [
+      { method: 'POST', path: '/v1/documents', body: { content: 'x', title: 'T' } },
+      { method: 'GET', path: '/v1/documents' },
+      { method: 'GET', path: '/v1/documents/1' },
+      { method: 'GET', path: '/v1/export/markdown' },
+      { method: 'POST', path: '/v1/promote-response', body: { turnId: 1 } },
+      { method: 'POST', path: '/v1/lint/knowledge', body: {} },
+    ];
+
+    it('POST /v1/documents ingests a document and returns {document, knowledge}', async () => {
+      const base = await setup(13130);
+      const res = await fetch(`${base}/v1/documents`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: 'The user prefers TypeScript.', title: 'Preferences' }),
+      });
+      expect(res.status).toBe(201);
+      const body = await res.json();
+      expect(body.document).toBeTruthy();
+      expect(body.document.title).toBe('Preferences');
+      expect(body.document.status).toBe('processed');
+      expect(Array.isArray(body.knowledge)).toBe(true);
+    });
+
+    it('POST /v1/documents rejects a missing required field with 400', async () => {
+      const base = await setup(13131);
+      const res = await fetch(`${base}/v1/documents`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'no content' }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it('GET /v1/documents lists ingested documents with pagination fields', async () => {
+      const base = await setup(13132);
+      await fetch(`${base}/v1/documents`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: 'The user prefers Rust.', title: 'Doc A' }),
+      });
+      const res = await fetch(`${base}/v1/documents`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(Array.isArray(body.items)).toBe(true);
+      expect(body.items.length).toBeGreaterThanOrEqual(1);
+      expect(typeof body.hasMore).toBe('boolean');
+      expect('nextCursor' in body).toBe(true);
+    });
+
+    it('GET /v1/documents/:id returns the document, and 404 for an unknown id', async () => {
+      const base = await setup(13133);
+      const created = await (
+        await fetch(`${base}/v1/documents`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: 'The user prefers Go.', title: 'Doc B' }),
+        })
+      ).json();
+      const ok = await fetch(`${base}/v1/documents/${created.document.id}`);
+      expect(ok.status).toBe(200);
+      expect((await ok.json()).id).toBe(created.document.id);
+
+      const missing = await fetch(`${base}/v1/documents/999999`);
+      expect(missing.status).toBe(404);
+    });
+
+    it('GET /v1/export/markdown returns files (as an object) and stats', async () => {
+      const base = await setup(13134);
+      await fetch(`${base}/v1/facts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fact: 'Exportable fact', factType: 'reference' }),
+      });
+      const res = await fetch(`${base}/v1/export/markdown?includeTrustMetadata=true`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      // files must be a plain JSON object (the manager returns a Map).
+      expect(body.files && typeof body.files === 'object' && !Array.isArray(body.files)).toBe(true);
+      expect(typeof body.stats.totalFacts).toBe('number');
+      expect(typeof body.stats.totalFiles).toBe('number');
+    });
+
+    it('GET /v1/export/markdown rejects an invalid groupBy with 400', async () => {
+      const base = await setup(13135);
+      const res = await fetch(`${base}/v1/export/markdown?groupBy=bogus`);
+      expect(res.status).toBe(400);
+    });
+
+    it('POST /v1/promote-response promotes knowledge from an assistant turn', async () => {
+      const base = await setup(13136);
+      const turn = await (
+        await fetch(`${base}/v1/turns`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ role: 'assistant', content: 'The user prefers dark mode.' }),
+        })
+      ).json();
+      const res = await fetch(`${base}/v1/promote-response`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ turnId: turn.turnId }),
+      });
+      expect(res.status).toBe(200);
+      expect(Array.isArray((await res.json()).knowledge)).toBe(true);
+    });
+
+    it('POST /v1/promote-response 404s for an unknown turn and 400s for a bad turnId', async () => {
+      const base = await setup(13137);
+      const missing = await fetch(`${base}/v1/promote-response`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ turnId: 987654 }),
+      });
+      expect(missing.status).toBe(404);
+
+      const bad = await fetch(`${base}/v1/promote-response`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ turnId: 'not-a-number' }),
+      });
+      expect(bad.status).toBe(400);
+    });
+
+    it('POST /v1/lint/knowledge returns a lint report', async () => {
+      const base = await setup(13138);
+      await fetch(`${base}/v1/facts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fact: 'Lintable fact', factType: 'reference' }),
+      });
+      const res = await fetch(`${base}/v1/lint/knowledge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ categories: ['trust_distribution'] }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(Array.isArray(body.issues)).toBe(true);
+      expect(typeof body.stats.totalKnowledge).toBe('number');
+      expect(typeof body.generatedAt).toBe('number');
+    });
+
+    it('POST /v1/lint/knowledge rejects an invalid category with 400', async () => {
+      const base = await setup(13139);
+      const res = await fetch(`${base}/v1/lint/knowledge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ categories: ['not_a_category'] }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it('requires bearer auth on every wiki route when apiKey is set', async () => {
+      const base = await setup(13140, { apiKey: 'wiki-key' });
+      for (const route of NEW_ROUTES) {
+        const res = await fetch(`${base}${route.path}`, {
+          method: route.method,
+          headers: { 'Content-Type': 'application/json' },
+          body: route.body ? JSON.stringify(route.body) : undefined,
+        });
+        await res.text().catch(() => undefined);
+        expect(`${route.method} ${route.path} → ${res.status}`).toBe(
+          `${route.method} ${route.path} → 401`,
+        );
+      }
+    });
+
+    it('enforces tenant binding on every wiki route (cross-tenant → 403)', async () => {
+      const base = await setup(13141, { apiKeys: [{ key: 'key-a', tenantId: 'tenant-a' }] });
+      for (const route of NEW_ROUTES) {
+        const res = await fetch(`${base}${route.path}`, {
+          method: route.method,
+          headers: {
+            Authorization: 'Bearer key-a',
+            'Content-Type': 'application/json',
+            'x-memory-tenant': 'tenant-b',
+            'x-memory-system': 'sys',
+            'x-memory-scope': 'task',
+          },
+          body: route.body ? JSON.stringify(route.body) : undefined,
+        });
+        await res.text().catch(() => undefined);
+        expect(`${route.method} ${route.path} → ${res.status}`).toBe(
+          `${route.method} ${route.path} → 403`,
+        );
+      }
+    });
+  });
 });

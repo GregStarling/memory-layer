@@ -9,3 +9,4 @@ node_modules/
 *.sqlite
 *.egg-info/
 data/
+memory-layer/

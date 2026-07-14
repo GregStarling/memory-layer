@@ -39,8 +39,9 @@ async function main(): Promise<void> {
 
   const search = await manager.search('local auditable');
   console.log(search.knowledge);
-  console.log(wrapped.trackedWorkItems);
-  console.log(manager.recall({ start_at: 0 }));
+  console.log(wrapped.responseText);
+  const recalled = await manager.recall({ start_at: 0 });
+  console.log(recalled.workItems);
 
   await manager.close();
 }

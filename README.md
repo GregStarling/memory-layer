@@ -1,6 +1,6 @@
 # ai-memory-layer
 
-Version 4.1.0
+Version 4.4.0
 
 Backend-agnostic cognitive memory for AI systems.
 
@@ -10,7 +10,7 @@ Memory Layer gives an AI system durable, evolving memory across sessions: raw co
 
 Memory Layer is narrow on purpose — it is NOT Heart (what the system believes, values, and refuses) and NOT Voice (how the writing sounds at the surface). Memory is what the system remembers happened. See the [architecture docs](docs/) for the full three-layer split.
 
-**Version 4.0.0** — Phase 5 ships the temporal event log with point-in-time replay and diffs, multi-agent coordination (work items, claims, handoffs), SQLite migration hardening (forward-only v13→v14), and a 100/100 codebase score. See [CHANGELOG.md](CHANGELOG.md) for the full release notes.
+This release consolidates a temporal event log with point-in-time replay and diffs, multi-agent coordination (work items, claims, handoffs), tenant-bound API keys with cross-scope visibility gating, atomic mutation+event writes, embedding model/dimension versioning, and cross-adapter conformance across the in-memory, SQLite, and PostgreSQL backends. Quality is held by regression-gated evals (retrieval and memory-quality suites with a delta ratchet), not a self-assigned score. See [CHANGELOG.md](CHANGELOG.md) for the full release notes.
 
 ## Quick Start
 
@@ -148,13 +148,13 @@ candidate --> provisional --> trusted
                   +-- disputed    +-- superseded --> retired
 ```
 
-Promotion requires grounding in source turns, corroboration across sessions, or explicit user statements. Contradictions are detected automatically. Every decision is audited via the evidence chain and knowledge audit log.
+Promotion requires grounding in source turns, corroboration across sessions, or explicit user statements. Contradictions are detected by slot-key matching: the extractor normalizes each fact into a `subject:attribute:value` slot over a fixed domain vocabulary (editors, languages, databases, frameworks, and similar groups), and two facts that share a slot key but disagree on value or negation are flagged as a conflict. This catches direct disagreements within the known vocabulary; it is not general semantic contradiction detection over arbitrary natural language. Every decision is audited via the evidence chain and knowledge audit log.
 
 Facts are classified by type (`preference`, `constraint`, `entity`, `decision`, `reference`) and by knowledge class (`identity`, `preference`, `constraint`, `procedure`, `strategy`, `project_fact`, `anti_pattern`, `episodic_fact`). Classification drives retrieval ranking, maintenance retention, and profile assembly.
 
 ### Hybrid Retrieval
 
-`getContext()` scores every candidate fact across eight dimensions: lexical relevance, semantic similarity, recency, trust score, class importance, evidence density, scope affinity, and diversity. Selected knowledge seeds a single-hop association expansion, then the result is token-trimmed to budget and returned as a structured `MemoryContext` ready for prompt injection.
+`getContext()` scores every candidate fact across eight dimensions: lexical relevance, vector similarity, recency, trust score, class importance, evidence density, scope affinity, and diversity. The "vector similarity" dimension uses whatever embedding tier is active. Out of the box that is the built-in offline generator, which is hashed lexical/trigram matching — token, character-trigram, bigram, and skip-gram features are TF-IDF weighted and hashed into a fixed-width vector — not a learned semantic model. It rewards shared and near-shared surface terms, not paraphrase understanding. Configure a provider embedding (OpenAI / Voyage) for genuine semantic similarity. Selected knowledge seeds a single-hop association expansion, then the result is token-trimmed to budget and returned as a structured `MemoryContext` ready for prompt injection.
 
 ## Surfaces
 
@@ -187,6 +187,10 @@ Each agent gets its own `scope_id`. Agents in the same `workspace_id` share know
 
 Items carry a visibility class (`private`, `shared_collaboration`, `workspace`, `tenant`) controlling what surfaces under each view policy.
 
+### Trust model
+
+Scopes partition storage, but the guarantees you get depend on how the HTTP server is configured. On the server, API keys bind to tenants: the `MEMORY_API_KEYS` registry pins each key to a tenant (or `'*'`) plus a cross-scope ceiling and an optional admin flag, and a request whose resolved scope names a different tenant, or asks to widen past the key's ceiling, is rejected with `403`. The legacy single `MEMORY_API_KEY` is treated as a wildcard (all tenants) and logs a startup warning — use the registry for any multi-tenant deployment. Within a permitted tenant, visibility classes gate cross-scope reads: a `private` fact never surfaces to another scope at any widening level, and `shared_collaboration` items stay inside their `collaboration_id`, on every read path (`searchKnowledge`, `getContext`, and temporal reads). The in-process Node package trusts its caller and enforces no key check — isolation there is whatever `scope`/`crossScopeLevel` you pass. See [docs/SECURITY.md](docs/SECURITY.md) for key binding and [docs/SCOPE_MODEL.md](docs/SCOPE_MODEL.md) for the widening matrix and visibility gate.
+
 ## Temporal Intelligence
 
 An append-only event log records every state change with before/after payloads.
@@ -206,6 +210,15 @@ for await (const event of memory.streamChanges({ signal: controller.signal })) {
 ```
 
 Snapshots pin a watermark event ID before assembling context, ensuring a consistent cut of the event log.
+
+### Replay limits
+
+Point-in-time replay is honest about its boundaries:
+
+- **Event cap.** Replay accumulates at most 5,000 events by default and throws a `ValidationError` rather than silently truncating when a time range exceeds that; widen the range narrower or raise the cap deliberately.
+- **Lexical-only ranking in replay.** `getContextAt()` ranks historical facts and turns with the lexical scorer only — it does not run embedding/vector similarity — so relevance ordering in a replayed context can differ from a live `getContext()` on the same query.
+- **Pre-cutover inexactness.** Replay is exact only after the temporal cutover watermark (the point where the append-only log became authoritative). For an `asOf` before the cutover, replay is best-effort: scope and state filters still apply, but semantic retrieval may consult the live embedding index because that index carries no temporal dimension for pre-cutover data. These responses are flagged `exact: false`.
+- **Coverage.** Replay reconstructs the entity kinds the event log covers; entities explicitly outside the temporal contract are documented in [CHANGELOG.md](CHANGELOG.md) and are not guaranteed to reconstruct.
 
 ## Multi-Agent Coordination
 
@@ -229,7 +242,7 @@ const handoff = await memory.handoffWorkItem({
 });
 await memory.acceptHandoff(handoff.id, monitorBot);
 
-// Episodic & cognitive retrieval
+// Episodic & cognitive retrieval (require a configured LLM client — see note below)
 const episodes = await memory.searchEpisodes({ query: 'deployment failures', limit: 5 });
 const reflection = await memory.reflect({ query: 'What patterns emerge from our deployments?' });
 
@@ -247,7 +260,7 @@ const playbook = await memory.createPlaybook({
 Beyond storage and retrieval, memory-layer actively analyzes, improves, and curates the knowledge it holds.
 
 ```typescript
-// Reflection — detect patterns across the knowledge base
+// Reflection — detect patterns across the knowledge base (requires an LLM client — see note below)
 const reflection = await memory.reflect({ query: 'What recurring issues appear in deployments?' });
 
 // Derivation — generate playbook candidates, rules, and anti-patterns from patterns
@@ -277,6 +290,8 @@ const result = memory.refreshDocuments([
 const bundle = memory.exportBundle('backup-2024', { includeTurns: true });
 const md = await memory.exportAsMarkdown({ groupBy: 'class', includeEvidence: true });
 ```
+
+> **LLM client required for episodic reflection.** `reflect()`, `searchEpisodes()`, `summarizeEpisode()`, and `createPlaybookFromTask()` call a generative model and throw `ProviderUnavailableError` unless you construct the manager with a `structuredClient` (e.g. `summarizer: 'openai'` / `extractor: 'openai'`, or a custom client). The zero-config in-memory setup shown in the Quick Start has no LLM client and does not support these methods. Heuristic knowledge operations — `derive()`, `reflectOnKnowledge()`, `getGraphReport()`, `lintKnowledge()`, `getCoreMemory()`, `getCurationSummary()`, `refreshDocuments()`, and export/import — run fully offline with no client.
 
 ## Context Governance
 
@@ -346,11 +361,13 @@ When an agent is blocked, it can request a broader context. The escalation polic
 
 ### Presets
 
-| Preset | Designed For | Compaction | Cross-Scope | Knowledge TTL |
-|--------|-------------|------------|-------------|---------------|
-| `ai_ide` | Coding assistants, refactoring tools | Moderate (18/30 turns) | Workspace-shared | 14 days |
-| `chat_agent` | Conversational agents, support bots | Balanced (14/24 turns) | Scope-local | 7 days |
-| `autonomous_agent` | Dark factories, autonomous loops | Aggressive (10/18 turns) | Workspace-shared | 3 days |
+| Preset | Designed For | Compaction | Cross-Scope | Working-Memory TTL | Context Token Budget |
+|--------|-------------|------------|-------------|--------------------|----------------------|
+| `ai_ide` | Coding assistants, refactoring tools | Moderate (18/30 turns) | Workspace-shared | 14 days | 8,000 |
+| `chat_agent` | Conversational agents, support bots | Balanced (14/24 turns) | Scope-local | 7 days | 4,000 |
+| `autonomous_agent` | Dark factories, autonomous loops | Aggressive (10/18 turns) | Workspace-shared | 3 days | 6,000 |
+
+Each preset sets a real default context token budget, so `getContext()` trims an oversized corpus to fit and records what it dropped in the returned trim trace (surfaced as a `token_budget_trimmed` warning). To disable trimming, opt into an unbounded budget explicitly — set `tokenBudget: UNLIMITED_TOKEN_BUDGET` (an exported constant equal to `Number.MAX_SAFE_INTEGER`) on the context policy or a context contract. Unbounded context is always an explicit opt-in, never the silent default.
 
 ### Quality Modes
 
@@ -366,11 +383,17 @@ When an agent is blocked, it can request a broader context. The escalation polic
 
 | Tier | Extraction | Retrieval | Requires |
 |------|-----------|-----------|----------|
-| **Offline default** | Regex + heuristic | Lexical + local embeddings | Nothing |
-| **Local semantic** | Composite heuristic | Lexical + local TF-IDF embeddings | Nothing |
-| **Provider-backed** | Claude/OpenAI LLM | Lexical + provider embeddings | API key |
+| **Offline default** | Regex + heuristic | Lexical + hashed trigram vectors | Nothing |
+| **Local heuristic** | Composite heuristic | Lexical + hashed trigram vectors (TF-IDF weighted) | Nothing |
+| **Provider-backed** | Claude/OpenAI LLM | Lexical + provider (semantic) embeddings | API key |
+
+The two offline tiers do not perform semantic (learned-embedding) similarity: their "vector" component is feature-hashed lexical/trigram matching, which finds shared and near-shared surface terms. Paraphrase-level semantic retrieval requires the provider-backed tier (`OPENAI_API_KEY` or `VOYAGE_API_KEY`).
 
 Four policy objects (`MonitorPolicy`, `ExtractionPolicy`, `ContextPolicy`, `MaintenancePolicy`) give fine-grained control over compaction thresholds, extraction behavior, context scoring weights, and maintenance lifecycles. Presets configure sensible defaults; override individual fields when needed.
+
+### Token Counting
+
+Token budgets are measured with a character-ratio estimator by default (roughly four characters per token, with model-aware ratios for GPT, Claude, and Llama-family models). For exact BPE counts, opt in explicitly: construct `createTiktokenEstimator()` and pass it as the manager's `tokenEstimator`. When the optional `tiktoken` package is installed, that estimator uses exact BPE token counts; when it is absent or a model encoding is unavailable, it falls back to the character-ratio estimator. Installing `tiktoken` alone does not change token counting — the estimator must be wired in.
 
 ## Storage Backends
 
@@ -425,7 +448,7 @@ runtime = MemoryRuntimeClient(client)
 result = runtime.run_turn("What constraints apply?", lambda prepared: call_model(prepared.context))
 ```
 
-Async support via `AsyncMemoryClient` and `AsyncMemoryRuntimeClient`. Full HTTP API surface parity.
+Async support via `AsyncMemoryClient` and `AsyncMemoryRuntimeClient` (both mirror the sync surface). The client covers the day-to-day HTTP endpoints — turns/exchanges, context, search and cross-scope search, facts, work items/claims/handoffs, temporal reads (state, timeline, diff, events), knowledge inspection and reverification, episodes and reflection, playbooks, associations, curation, core memory, document refresh, bundle export/import, and health — in both sync and async forms. It is not a 1:1 mirror of every route: the context-governance configuration endpoints (context contracts, invariants, and escalation policy under `/v1/context/config`) are managed via the Node package or direct HTTP rather than through the Python client.
 
 ## Local Development
 

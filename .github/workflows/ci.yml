@@ -22,6 +22,7 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run build
+      - run: npx tsc -p examples/tsconfig.json
       - run: npm run test:coverage
       - run: npm run eval:retrieval:enforce
       - run: npm run eval:gate

@@ -1,6 +1,6 @@
 {
   "name": "ai-memory-layer",
-  "version": "4.1.0",
+  "version": "4.4.0",
   "description": "Backend-agnostic memory package with scoped conversation history, compaction policy, orchestration workflows, and a SQLite adapter.",
   "type": "module",
   "main": "dist/index.js",
@@ -90,6 +90,7 @@
     "test:coverage": "vitest run --coverage",
     "test:postgres": "vitest run src/__tests__/postgres-integration.test.ts src/__tests__/adapter-conformance.test.ts src/__tests__/postgres-phase3-parity.test.ts",
     "lint": "tsc --noEmit",
+    "lint:examples": "npm run build && tsc -p examples/tsconfig.json",
     "benchmark:search": "npm run build && node benchmarks/search-benchmark.mjs",
     "benchmark:semantic": "npm run build && node benchmarks/semantic-benchmark.mjs",
     "benchmark:compaction": "npm run build && node benchmarks/compaction-benchmark.mjs",
@@ -127,6 +128,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.8",
     "@types/node": "^22.0.0",
+    "@types/pg": "^8.20.0",
     "@vitest/coverage-v8": "^4.1.9",
     "typescript": "^5.5.0",
     "vitest": "^4.1.9"

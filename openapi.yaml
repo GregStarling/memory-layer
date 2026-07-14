@@ -107,6 +107,68 @@ components:
           type: array
           items:
             type: string
+    SourceDocument:
+      type: object
+      required: [id, title, content_hash, mime_type, metadata, status, fact_count, token_estimate, created_at]
+      properties:
+        id:
+          type: integer
+        tenant_id:
+          type: string
+        system_id:
+          type: string
+        workspace_id:
+          type: string
+        collaboration_id:
+          type: string
+        scope_id:
+          type: string
+        title:
+          type: string
+        content_hash:
+          type: string
+        mime_type:
+          type: string
+        url:
+          type: string
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+        status:
+          type: string
+          enum: [pending, processed, failed]
+        fact_count:
+          type: integer
+        token_estimate:
+          type: integer
+        created_at:
+          type: integer
+        processed_at:
+          type: integer
+          nullable: true
+    Snapshot:
+      type: object
+      required: [snapshotId, bootstrap, context, frozenAt, sessionId]
+      properties:
+        snapshotId:
+          type: string
+        sessionId:
+          type: string
+        bootstrap:
+          type: object
+          description: Session bootstrap payload captured at freeze time
+        context:
+          type: object
+          description: Assembled memory context captured at freeze time
+        frozenAt:
+          type: integer
+          description: Unix timestamp (ms) when the snapshot was frozen
+        watermarkEventId:
+          type: integer
+          nullable: true
+          description: Event-log watermark at freeze time
     AliasCandidate:
       type: object
       properties:
@@ -2445,18 +2507,7 @@ paths:
                   knowledge:
                     type: array
                     items:
-                      type: object
-                      properties:
-                        id:
-                          type: integer
-                        fact:
-                          type: string
-                        factType:
-                          type: string
-                        knowledgeClass:
-                          type: string
-                        state:
-                          type: string
+                      $ref: '#/components/schemas/KnowledgeMemory'
   /v1/documents:
     post:
       tags: [ingestion]
@@ -2490,31 +2541,19 @@ paths:
                   $ref: '#/components/schemas/Scope'
       responses:
         '201':
-          description: Document ingested
+          description: Document ingested (the created source document plus any knowledge extracted from it)
           content:
             application/json:
               schema:
                 type: object
-                required: [documentId, status, factCount, knowledge]
+                required: [document, knowledge]
                 properties:
-                  documentId:
-                    type: integer
-                  status:
-                    type: string
-                    enum: [pending, processed, failed]
-                  factCount:
-                    type: integer
+                  document:
+                    $ref: '#/components/schemas/SourceDocument'
                   knowledge:
                     type: array
                     items:
-                      type: object
-                      properties:
-                        id:
-                          type: integer
-                        fact:
-                          type: string
-                        factType:
-                          type: string
+                      $ref: '#/components/schemas/KnowledgeMemory'
     get:
       tags: [retrieval]
       summary: List source documents
@@ -2546,7 +2585,7 @@ paths:
                   items:
                     type: array
                     items:
-                      type: object
+                      $ref: '#/components/schemas/SourceDocument'
                   hasMore:
                     type: boolean
                   nextCursor:
@@ -2573,7 +2612,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
+                $ref: '#/components/schemas/SourceDocument'
         '404':
           description: Document not found
           content:
@@ -2609,8 +2648,13 @@ paths:
           in: query
           schema:
             type: string
-            enum: [knowledge_class, topic, flat]
+            enum: [knowledge_class, topic, tag, flat]
           description: How to group knowledge into files (default knowledge_class)
+        - name: tags
+          in: query
+          schema:
+            type: string
+          description: Comma-separated tags to restrict the export to
         - name: includeSourceDocuments
           in: query
           schema:
@@ -2660,7 +2704,7 @@ paths:
                   type: array
                   items:
                     type: string
-                    enum: [orphan_knowledge, evidence_concentration, trust_distribution, contradiction_cluster, stale_provisional]
+                    enum: [orphan_knowledge, evidence_concentration, trust_distribution, contradiction_cluster, stale_provisional, ontology_violation]
                   description: Restrict lint to specific categories
                 maxIssues:
                   type: integer
@@ -2668,6 +2712,11 @@ paths:
                 minOrphanAgeDays:
                   type: integer
                   description: Minimum age in days for orphan detection
+                filterByTags:
+                  type: array
+                  items:
+                    type: string
+                  description: Restrict lint to knowledge carrying any of these tags
                 scope:
                   $ref: '#/components/schemas/Scope'
       responses:
@@ -2690,7 +2739,7 @@ paths:
                           enum: [info, warning, error]
                         category:
                           type: string
-                          enum: [orphan_knowledge, evidence_concentration, trust_distribution, contradiction_cluster, stale_provisional]
+                          enum: [orphan_knowledge, evidence_concentration, trust_distribution, contradiction_cluster, stale_provisional, ontology_violation]
                         message:
                           type: string
                         knowledgeIds:
@@ -3332,6 +3381,93 @@ paths:
                     type: array
                     items:
                       type: object
+  /v1/inspect/context:
+    get:
+      tags: [observability]
+      summary: Assemble context with the full debug trace included
+      description: Same assembly as GET /v1/context but always includes the debug trace; pass as_of to reconstruct context at a historical timestamp.
+      parameters:
+        - $ref: '#/components/parameters/Query'
+        - name: as_of
+          in: query
+          schema:
+            type: number
+          description: Unix timestamp (seconds) to reconstruct context as of
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Assembled context with debug trace
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContextResponse'
+  /v1/inspect/session-state:
+    get:
+      tags: [observability]
+      summary: Inspect the assembled session state
+      parameters:
+        - $ref: '#/components/parameters/Query'
+        - name: as_of
+          in: query
+          schema:
+            type: number
+          description: Unix timestamp (seconds) to reconstruct session state as of
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Session state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessionState]
+                properties:
+                  sessionState:
+                    type: object
+                    nullable: true
+  /v1/inspect/retrieval:
+    get:
+      tags: [observability]
+      summary: Inspect knowledge-retrieval reasoning for an assembled context
+      parameters:
+        - $ref: '#/components/parameters/Query'
+        - name: as_of
+          in: query
+          schema:
+            type: number
+          description: Unix timestamp (seconds) to reconstruct retrieval as of
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Retrieval reasoning trace
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessionState, knowledgeSelectionReasons, debugTrace]
+                properties:
+                  sessionState:
+                    type: object
+                    nullable: true
+                  knowledgeSelectionReasons:
+                    type: array
+                    items:
+                      type: object
+                  debugTrace:
+                    type: object
+                    nullable: true
   /v1/inspect/reverification:
     get:
       tags: [observability]
@@ -3421,6 +3557,122 @@ paths:
                     type: array
                     items:
                       type: string
+  /v1/sessions/{id}/snapshot:
+    post:
+      tags: [coordination]
+      summary: Capture and cache a session snapshot
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Session identifier
+        - name: contract
+          in: query
+          schema:
+            type: string
+          description: Context contract name to assemble under
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                relevanceQuery:
+                  type: string
+                  description: Query used to rank knowledge in the snapshot
+                contract:
+                  type: string
+                  description: Context contract name (overrides the query param)
+                scope:
+                  $ref: '#/components/schemas/Scope'
+      responses:
+        '201':
+          description: Snapshot captured
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [snapshot]
+                properties:
+                  snapshot:
+                    $ref: '#/components/schemas/Snapshot'
+    get:
+      tags: [coordination]
+      summary: Fetch the cached snapshot for a session
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Session identifier
+        - $ref: '#/components/parameters/ScopeTenant'
+        - $ref: '#/components/parameters/ScopeSystem'
+        - $ref: '#/components/parameters/ScopeWorkspace'
+        - $ref: '#/components/parameters/ScopeCollaboration'
+        - $ref: '#/components/parameters/ScopeId'
+      responses:
+        '200':
+          description: Cached snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [snapshot]
+                properties:
+                  snapshot:
+                    $ref: '#/components/schemas/Snapshot'
+        '404':
+          description: No cached snapshot for this session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/sessions/{id}/refresh:
+    post:
+      tags: [coordination]
+      summary: Re-capture and replace the cached snapshot for a session
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Session identifier
+        - name: contract
+          in: query
+          schema:
+            type: string
+          description: Context contract name to assemble under
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                relevanceQuery:
+                  type: string
+                  description: Query used to rank knowledge in the snapshot
+                contract:
+                  type: string
+                  description: Context contract name (overrides the query param)
+                scope:
+                  $ref: '#/components/schemas/Scope'
+      responses:
+        '200':
+          description: Snapshot refreshed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [snapshot]
+                properties:
+                  snapshot:
+                    $ref: '#/components/schemas/Snapshot'
   /healthz:
     get:
       tags: [observability]

@@ -329,6 +329,14 @@ export function validateAgainstSchema(
   if (type === 'string') {
     if (value !== undefined && value !== null && typeof value !== 'string') {
       errors.push(`${pathLabel}: expected string, got ${describe(value)}`);
+    } else if (
+      typeof value === 'string' &&
+      Array.isArray(schema.enum) &&
+      !(schema.enum as unknown[]).includes(value)
+    ) {
+      errors.push(
+        `${pathLabel}: value ${JSON.stringify(value)} not in enum [${(schema.enum as unknown[]).join(', ')}]`,
+      );
     }
     return errors;
   }

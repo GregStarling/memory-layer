@@ -5,7 +5,7 @@
  * using cross-scope retrieval to access each other's knowledge.
  */
 import { createExtractiveSummarizer, createMemoryManager, createRegexExtractor } from 'ai-memory-layer';
-import { createPostgresAdapter } from 'memory-layer/adapters/postgres';
+import { createPostgresAdapter } from 'ai-memory-layer/adapters/postgres';
 
 async function main() {
   const connectionString = process.env.MEMORY_DATABASE_URL;

@@ -180,6 +180,7 @@ export {
   DEFAULT_EXTRACTION_POLICY,
   DEFAULT_CONTEXT_POLICY,
   DEFAULT_MAINTENANCE_POLICY,
+  UNLIMITED_TOKEN_BUDGET,
 } from './contracts/policy.js';
 export type {
   EmbeddingVector,

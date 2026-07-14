@@ -7,8 +7,10 @@ import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type { EmbeddingAdapter } from '../contracts/embedding.js';
 import type { AliasMap } from '../contracts/aliases.js';
 import type { OntologyConfig } from '../contracts/ontology.js';
+import type { LintOptions, LintReport } from '../contracts/lint.js';
 import { type MemoryScope } from '../contracts/identity.js';
 import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
+import { lintKnowledge as runKnowledgeLint } from '../core/knowledge-lint.js';
 import {
   parseAliases,
   parseOntology,
@@ -51,6 +53,14 @@ export interface ServerContext {
   }>;
   saveAliases(scopeInput: string | MemoryScope, aliasMap: AliasMap): Promise<void>;
   saveOntology(scopeInput: string | MemoryScope, ontology: OntologyConfig): Promise<void>;
+  /**
+   * Lint the knowledge base for a scope. Encapsulated here (rather than reached
+   * for in the HTTP layer) so the adapter is never accessed bare: callers pass a
+   * scope that has already been through the server's auth + scope-resolution
+   * pipeline, and lint runs against the same shared adapter every manager uses.
+   * Ontology-violation checks use the scope's persisted ontology.
+   */
+  lintKnowledge(scopeInput: string | MemoryScope, options?: LintOptions): Promise<LintReport>;
   getCacheSizes(): { managers: number; sessionManagers: number };
   close(): Promise<void>;
 }
@@ -267,6 +277,18 @@ export function createServerContext(config: ServerContextConfig): ServerContext 
     });
   }
 
+  async function lintKnowledgeForScope(
+    scopeInput: string | MemoryScope,
+    options?: LintOptions,
+  ): Promise<LintReport> {
+    const { asyncAdapter } = await getAdapterResources();
+    // getManager hydrates persisted aliases/ontology for the scope, so the
+    // ontology-violation lint category sees the same config the manager uses.
+    const manager = await getManager(scopeInput);
+    const ontology = manager.getOntology();
+    return runKnowledgeLint(asyncAdapter, materializeScope(scopeInput), options, ontology);
+  }
+
   return {
     getManager,
     getSessionManager,
@@ -276,6 +298,7 @@ export function createServerContext(config: ServerContextConfig): ServerContext 
     refreshScopeConfig,
     saveAliases,
     saveOntology,
+    lintKnowledge: lintKnowledgeForScope,
     getCacheSizes() {
       return {
         managers: managers.size,

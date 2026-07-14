@@ -6,7 +6,11 @@ import { buildMemoryContext } from '../core/context.js';
 import { assessContext } from '../core/monitor.js';
 import { MEMORY_MANAGER_PRESETS, resolveMemoryManagerPreset } from '../core/presets.js';
 import { rankKnowledge } from '../core/retrieval.js';
-import { DEFAULT_CONTEXT_POLICY, DEFAULT_MONITOR_POLICY } from '../contracts/policy.js';
+import {
+  DEFAULT_CONTEXT_POLICY,
+  DEFAULT_MONITOR_POLICY,
+  UNLIMITED_TOKEN_BUDGET,
+} from '../contracts/policy.js';
 import type { StorageAdapter } from '../contracts/storage.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import { makeScope, seedTurns } from './test-helpers.js';
@@ -165,5 +169,112 @@ describe('policy defaults and overrides', () => {
   it('exposes workload presets for drop-in manager setup', () => {
     expect(MEMORY_MANAGER_PRESETS.ai_ide.contextPolicy.mode).toBe('coding');
     expect(resolveMemoryManagerPreset('autonomous_agent').crossScopeLevel).toBe('workspace');
+  });
+
+  it('gives every workload preset a real finite default token budget', () => {
+    expect(MEMORY_MANAGER_PRESETS.ai_ide.contextPolicy.tokenBudget).toBe(8000);
+    expect(MEMORY_MANAGER_PRESETS.chat_agent.contextPolicy.tokenBudget).toBe(4000);
+    expect(MEMORY_MANAGER_PRESETS.autonomous_agent.contextPolicy.tokenBudget).toBe(6000);
+    // Regression guard: no preset silently inherits the unlimited sentinel.
+    for (const preset of Object.values(MEMORY_MANAGER_PRESETS)) {
+      const budget = preset.contextPolicy.tokenBudget;
+      expect(typeof budget).toBe('number');
+      expect(budget).toBeGreaterThan(0);
+      expect(budget).toBeLessThan(UNLIMITED_TOKEN_BUDGET);
+    }
+  });
+
+  it('reserves MAX_SAFE_INTEGER as the explicit-unlimited opt-in, not a preset default', () => {
+    expect(UNLIMITED_TOKEN_BUDGET).toBe(Number.MAX_SAFE_INTEGER);
+    // The low-level base policy still carries the unlimited sentinel (used only
+    // when no preset is applied); the managed getContext() path always trims via
+    // a preset budget.
+    expect(DEFAULT_CONTEXT_POLICY.tokenBudget).toBe(UNLIMITED_TOKEN_BUDGET);
+  });
+
+  it('trims an oversized corpus under the default preset budget and records a trace', async () => {
+    const scope = makeScope();
+    seedTurns(adapter, scope, 2, { tokenEstimate: 50 });
+    const largeFact = 'The deployment runbook requires review before every release. '.repeat(40);
+    for (let i = 0; i < 12; i += 1) {
+      adapter.insertKnowledgeMemory({
+        ...scope,
+        fact: `${largeFact} (variant ${i})`,
+        fact_type: 'reference',
+        knowledge_class: 'project_fact',
+        source: 'manual',
+        confidence: 'high',
+      });
+    }
+
+    // Mirror what the managed getContext() path does: config.contextPolicy comes
+    // straight from the resolved preset (chat_agent is the default preset).
+    const context = await buildMemoryContext(asyncAdapter, scope, {
+      policy: resolveMemoryManagerPreset('chat_agent').contextPolicy,
+    });
+
+    expect(context.tokenEstimate).toBeLessThanOrEqual(4000);
+    expect(context.debugTrace.tokenTrimming.droppedKnowledgeIds.length).toBeGreaterThan(0);
+    const trimWarning = context.warnings?.find((warning) => warning.code === 'token_budget_trimmed');
+    expect(trimWarning).toBeDefined();
+    expect(trimWarning?.severity).toBe('warning');
+  });
+
+  it('returns the full corpus when the caller explicitly opts into an unlimited budget', async () => {
+    const scope = makeScope();
+    seedTurns(adapter, scope, 2, { tokenEstimate: 50 });
+    const largeFact = 'The deployment runbook requires review before every release. '.repeat(40);
+    for (let i = 0; i < 12; i += 1) {
+      adapter.insertKnowledgeMemory({
+        ...scope,
+        fact: `${largeFact} (variant ${i})`,
+        fact_type: 'reference',
+        knowledge_class: 'project_fact',
+        source: 'manual',
+        confidence: 'high',
+      });
+    }
+
+    const unlimited = await buildMemoryContext(asyncAdapter, scope, {
+      policy: {
+        ...resolveMemoryManagerPreset('chat_agent').contextPolicy,
+        tokenBudget: UNLIMITED_TOKEN_BUDGET,
+      },
+    });
+    const trimmed = await buildMemoryContext(asyncAdapter, scope, {
+      policy: resolveMemoryManagerPreset('chat_agent').contextPolicy,
+    });
+
+    // Nothing is dropped for token budget and no trim warning is raised; the
+    // relevance/selection caps still apply, but the unlimited run retains strictly
+    // more knowledge than the default-budget run trims down to.
+    expect(unlimited.debugTrace.tokenTrimming.droppedKnowledgeIds).toHaveLength(0);
+    const trimWarning = unlimited.warnings?.find(
+      (warning) => warning.code === 'token_budget_trimmed',
+    );
+    expect(trimWarning).toBeUndefined();
+    expect(unlimited.relevantKnowledge.length).toBeGreaterThan(trimmed.relevantKnowledge.length);
+  });
+
+  it('lets a user-supplied token budget override the preset default (back-compat)', async () => {
+    const scope = makeScope();
+    seedTurns(adapter, scope, 2, { tokenEstimate: 50 });
+    const largeFact = 'The deployment runbook requires review before every release. '.repeat(40);
+    for (let i = 0; i < 12; i += 1) {
+      adapter.insertKnowledgeMemory({
+        ...scope,
+        fact: `${largeFact} (variant ${i})`,
+        fact_type: 'reference',
+        knowledge_class: 'project_fact',
+        source: 'manual',
+        confidence: 'high',
+      });
+    }
+
+    const context = await buildMemoryContext(asyncAdapter, scope, {
+      policy: { ...resolveMemoryManagerPreset('chat_agent').contextPolicy, tokenBudget: 1000 },
+    });
+
+    expect(context.tokenEstimate).toBeLessThanOrEqual(1000);
   });
 });
