@@ -1,0 +1,53 @@
+{
+  "version": "4.5.0",
+  "node": "v22.22.3",
+  "runs": 5,
+  "benchmarks": {
+    "search": {
+      "opsPerSec": 46.25,
+      "unit": "searches/sec",
+      "samples": [
+        46.95,
+        46.25,
+        46.39,
+        46.21,
+        45.48
+      ],
+      "config": {
+        "docs": 500,
+        "queries": 50
+      }
+    },
+    "semantic": {
+      "opsPerSec": 792.35,
+      "unit": "lookups/sec",
+      "samples": [
+        792.35,
+        825.49,
+        776.33,
+        805.08,
+        761.19
+      ],
+      "config": {
+        "docs": 1000,
+        "queries": 250,
+        "embeddingDims": 3
+      }
+    },
+    "compaction": {
+      "opsPerSec": 186.18,
+      "unit": "compactions/sec",
+      "samples": [
+        165.98,
+        116.72,
+        195.03,
+        186.18,
+        188.69
+      ],
+      "config": {
+        "turns": 50,
+        "retain": 8
+      }
+    }
+  }
+}

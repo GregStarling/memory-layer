@@ -2,6 +2,41 @@
 
 All notable changes to `memory-layer` are documented here.
 
+## 4.5.0 - 2026-07-15
+
+### Added
+
+- Retrieval quality eval rebuilt as a 102-case categorized dataset (exact-term, paraphrase, distractor-resistance, cross-class, trust-vs-recency) scoring MRR/recall@k against an in-run exact-token baseline the gate must demonstrably beat. Paraphrase performance under the offline tier is reported honestly as known-weak.
+- Temporal replay equivalence property test: seeded random operation sequences checkpointed and replayed over SQLite and Postgres event logs, asserting live-vs-replayed state equality.
+- Concurrency test tier (Postgres-only, CI): claim races, optimistic-lock races, lazy-expiry double-emission, and parallel compaction now have real multi-connection race tests.
+- Postgres adapter behavioral coverage is measured in CI via a dedicated vitest config that runs every pg-gated suite — including the three 4.3.0-era verification suites whose Postgres legs had never executed in CI.
+- Benchmark tracking: per-release results under `benchmarks/results/`, with a warn-only CI comparison against the previous release.
+
+### Changed
+
+- Memory-quality evals report raw per-metric actuals with explicit pass/fail and `knownWeak` flags; the former min-capped 0-100 score is replaced by a pass rate explicitly labeled as such. Metrics previously computed from 1-3 examples now use 20+ materially distinct cases.
+- Regex-against-schema pseudo-tests for the Postgres adapter removed in favor of the live behavioral suites.
+
+## 4.4.0 - 2026-07-14
+
+Consolidated release covering the security, data-integrity, adapter-parity, and honest-surfaces work landed since 4.1.0.
+
+### Added
+
+- Tenant-bound API keys (`MEMORY_API_KEYS`), secure-by-default CORS (`MEMORY_CORS_ORIGIN`), rate limiting, `MEMORY_ALLOW_UNAUTHENTICATED` opt-out, Docker startup guard, and `docs/SECURITY.md`.
+- Atomic mutation+event writes, event-cursor pagination correctness, embedding dimension/model versioning with real HNSW usage, and an `expireStaleHandoffs`/`expireStaleClaims` reaper replacing side-effectful reads.
+- Cross-adapter conformance suite pinning search semantics, rank scale (0,1], ordering, filters-before-LIMIT, and visibility across the in-memory, SQLite, and Postgres adapters — running against real Postgres in CI.
+- Visibility classes enforced end-to-end on every cross-scope read path (lexical, semantic, event-log, and temporal replay). `learnFact`, MCP `memory_learn_fact`, and `POST /v1/facts` accept an optional visibility class so facts can be shared deliberately (`workspace`, `shared_collaboration`, `tenant`); facts remain private by default.
+- The five documented-but-unimplemented HTTP endpoints are now real: `POST /v1/documents`, `GET /v1/documents/{id}`, `GET /v1/export/markdown`, `POST /v1/lint/knowledge`, `POST /v1/promote-response`. Five served-but-undocumented routes added to the OpenAPI spec, with a bidirectional spec-to-route parity test.
+- Presets set real default context token budgets (ai_ide 8000, chat_agent 4000, autonomous_agent 6000) with a trim trace; `UNLIMITED_TOKEN_BUDGET` is exported as the explicit unbounded opt-in.
+- Optional `created_at` on `NewKnowledgeMemory`, honored by all adapters with integer coercion on Postgres.
+
+### Fixed
+
+- Postgres: concurrent claim race, optimistic locking without a version guard, search returning superseded records by default, scoped `deleteEmbedding` no-op, `insertPlaybook` dropping `visibility_class`, `to_tsquery` crashes on empty or non-Latin queries, and unbounded time ranges binding non-finite values to INTEGER columns.
+- SQLite: work items permanently unclaimable after lease expiry, destructive migration ordering, vector search returning retired knowledge, and multi-term search standardized to any-term semantics across all adapters.
+- Examples import the correct package name and typecheck in CI; README claims corrected to match the code (contradiction detection scope, offline-tier retrieval, replay limits, multi-tenancy trust model).
+
 ## 4.1.0 - 2026-04-08
 
 ### Fixed

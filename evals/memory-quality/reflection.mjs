@@ -8,53 +8,45 @@ import { assertScenario, average, ratio, tagEvalOutput } from './shared.mjs';
 
 export async function runReflectionEvals(_options = {}) {
   // --- Metric: rationale_extraction_accuracy ---
+  // De-fitted from 11 examples to 28 materially-distinct cases (manager
+  // decision D4): 20 positives spanning distinct domains and every causal
+  // marker the extractor recognizes (because / in order to / the reason is /
+  // this ensures / so that / to prevent|avoid|ensure / due to), plus 8
+  // negatives that must NOT extract (no causal marker, or a marker whose clause
+  // is too short to clear the >=4-word / >=10-char guard). reflectionPatternQuality
+  // below is measured over the 20 positives, so both metrics have >=20 cases.
   const rationaleCases = [
-    // Positive cases: should extract rationale
-    {
-      text: 'We use TypeScript because it provides type safety and catches errors at compile time',
-      expectRationale: true,
-    },
-    {
-      text: 'The cache layer was added in order to reduce database load during peak hours',
-      expectRationale: true,
-    },
-    {
-      text: 'We chose SQLite. The reason is that it requires no separate server process',
-      expectRationale: true,
-    },
-    {
-      text: 'This ensures that all data is validated before reaching the database layer',
-      expectRationale: true,
-    },
-    {
-      text: 'We disabled the old API endpoint so that clients would migrate to the new version',
-      expectRationale: true,
-    },
-    {
-      text: 'Rate limiting was added to prevent abuse from automated clients making excessive requests',
-      expectRationale: true,
-    },
-    {
-      text: 'The migration was delayed due to incompatibility with the new authentication provider',
-      expectRationale: true,
-    },
-    // Negative cases: should NOT extract rationale (too short/vague)
-    {
-      text: 'The system uses TypeScript.',
-      expectRationale: false,
-    },
-    {
-      text: 'Dark mode is the default.',
-      expectRationale: false,
-    },
-    {
-      text: 'The project started in 2024.',
-      expectRationale: false,
-    },
-    {
-      text: 'Because yes',
-      expectRationale: false,
-    },
+    // Positive cases: should extract rationale (>=4-word, >=10-char clause).
+    { text: 'We use TypeScript because it provides strong compile-time type safety', expectRationale: true },
+    { text: 'The cache layer was added in order to reduce database load during peak traffic', expectRationale: true },
+    { text: 'We chose SQLite. The reason is that it needs no separate server process', expectRationale: true },
+    { text: 'Input is validated at the edge. This ensures that malformed requests never reach the core', expectRationale: true },
+    { text: 'We disabled the legacy endpoint so that clients would migrate to the new API', expectRationale: true },
+    { text: 'Rate limiting was introduced to prevent abuse from automated scraping clients', expectRationale: true },
+    { text: 'The rollout was delayed due to incompatibility with the upstream authentication provider', expectRationale: true },
+    { text: 'We adopted feature flags because they decouple deploys from customer-facing releases', expectRationale: true },
+    { text: 'Connection pooling was tuned in order to survive sudden bursts of concurrent requests', expectRationale: true },
+    { text: 'We pin dependency versions. The reason is that reproducible builds prevent surprise breakage', expectRationale: true },
+    { text: 'Every upload is scanned. This ensures that malware never lands in shared storage', expectRationale: true },
+    { text: 'We shard the write path so that no single node becomes a throughput bottleneck', expectRationale: true },
+    { text: 'Secrets are loaded from the vault to avoid leaking credentials into log output', expectRationale: true },
+    { text: 'The migration window shrank due to unexpected contention on the primary index', expectRationale: true },
+    { text: 'We serve everything over HTTPS because plaintext transport would expose session tokens', expectRationale: true },
+    { text: 'Background jobs were batched in order to smooth the load on the metrics pipeline', expectRationale: true },
+    { text: 'We retain audit logs for years. The reason is that regulators can request them anytime', expectRationale: true },
+    { text: 'Every schema change is versioned to ensure that rollbacks stay fully deterministic', expectRationale: true },
+    { text: 'We throttle outbound webhooks so that a slow consumer cannot stall the dispatch queue', expectRationale: true },
+    { text: 'The deploy was paused due to a spike in error rates from the checkout service', expectRationale: true },
+    // Negative cases: should NOT extract rationale (no causal marker, or marker
+    // with a clause too short/vague to clear the >=4-word guard).
+    { text: 'The system uses TypeScript.', expectRationale: false },
+    { text: 'Dark mode is the default.', expectRationale: false },
+    { text: 'The project started in 2024.', expectRationale: false },
+    { text: 'Because yes', expectRationale: false },
+    { text: 'The API returns JSON payloads.', expectRationale: false },
+    { text: 'Deployments happen on Tuesdays.', expectRationale: false },
+    { text: 'The team has twelve engineers.', expectRationale: false },
+    { text: 'Logs rotate daily.', expectRationale: false },
   ];
 
   let rationaleCorrect = 0;

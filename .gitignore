@@ -9,4 +9,7 @@ node_modules/
 *.sqlite
 *.egg-info/
 data/
+# evals/data holds committed eval datasets (e.g. the Phase 5 retrieval cases),
+# not runtime data — exempt it from the data/ pattern above.
+!evals/data/
 memory-layer/

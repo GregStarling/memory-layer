@@ -1,6 +1,14 @@
 {
+  "note": "Regenerated for Phase 5 (QualityDefit / manager decision D3). Shape switched from the old min-capped 0-100 quality grade to the de-fitted shape: per-metric raw actuals + explicit thresholds, passRate (fraction of metrics meeting threshold), and knownWeakMetrics. `metrics` holds the MEASURED actual values of the current (calibrated) system, so the delta gate ratchets against real behavior. `overallScore` = passRate*100 is a pass rate, NOT a quality grade.",
+  "scorePresentation": "overallScore = passRate * 100 (fraction of metrics meeting their threshold). This is a pass rate, NOT a 0-100 quality grade.",
+  "passRate": 1,
   "overallScore": 100,
   "passed": true,
+  "metricsPassing": 44,
+  "metricsTotal": 44,
+  "knownWeakMetrics": [
+    "aliasResolutionQuality"
+  ],
   "metrics": {
     "constraintRetentionRate": 1,
     "preferenceRetentionRate": 1,
@@ -14,7 +22,7 @@
     "trustedMemoryRecall": 1,
     "memoryIsolationAccuracy": 1,
     "provisionalLeakRate": 0,
-    "postCompactionFidelityScore": 1,
+    "postCompactionFidelityScore": 0.9761904761904762,
     "postMaintenanceFidelityScore": 1,
     "episodicRetrievalPrecision": 1,
     "episodicRecapCompleteness": 1,
@@ -35,7 +43,7 @@
     "discoverSurpriseQuality": 1,
     "edgeProvenanceRanking": 1,
     "graphReportTokenBudget": 1,
-    "temporalExtractionAccuracy": 1,
+    "temporalExtractionAccuracy": 0.9090909090909091,
     "factsAtFastPath": 1,
     "timeFormattingQuality": 1,
     "rationaleExtractionAccuracy": 1,
@@ -44,7 +52,7 @@
     "curationCompleteness": 1,
     "coreMemoryTokenBudget": 1,
     "tagFilteringAccuracy": 1,
-    "aliasResolutionQuality": 0.6666666666666666,
+    "aliasResolutionQuality": 0.5,
     "clusterCoherence": 1
   }
 }

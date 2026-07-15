@@ -2,9 +2,14 @@ import {
   compactTurns,
   createSQLiteAdapter,
   createSessionId,
+  wrapSyncAdapter,
 } from '../dist/index.js';
 
-const adapter = createSQLiteAdapter(':memory:');
+// compactTurns expects an AsyncStorageAdapter. Wrap the native sync adapter
+// (as real consumers / the test suite do) so the atomic-storage transaction
+// runs on the sync path instead of handing an async fn to better-sqlite3.
+const syncAdapter = createSQLiteAdapter(':memory:');
+const adapter = wrapSyncAdapter(syncAdapter);
 const scope = {
   tenant_id: 'bench',
   system_id: 'compaction',
@@ -13,7 +18,7 @@ const scope = {
 const sessionId = createSessionId(scope);
 
 for (let i = 0; i < 50; i += 1) {
-  adapter.insertTurn({
+  syncAdapter.insertTurn({
     ...scope,
     session_id: sessionId,
     actor: i % 2 === 0 ? 'user' : 'assistant',
@@ -23,7 +28,7 @@ for (let i = 0; i < 50; i += 1) {
   });
 }
 
-const turns = adapter.getActiveTurns(scope);
+const turns = syncAdapter.getActiveTurns(scope);
 const startedAt = performance.now();
 await compactTurns(
   adapter,
@@ -52,4 +57,4 @@ console.log(
   ),
 );
 
-adapter.close();
+syncAdapter.close();

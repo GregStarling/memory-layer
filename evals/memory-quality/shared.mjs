@@ -45,8 +45,38 @@ export const THRESHOLDS = {
   // Phase 5: Intelligence
   coreMemoryTokenBudget: 0.9,
   tagFilteringAccuracy: 0.85,
-  aliasResolutionQuality: (2 / 3) * 0.85,  // baseline 0.667 × 0.85 ≈ 0.567
-  clusterCoherence: 1.0 * 0.85,            // baseline 1.0 × 0.85 = 0.85
+  // KNOWN-WEAK. Calibrated from MEASURED current behavior: over the 20-pair
+  // alias dataset (intelligence.mjs) the offline Levenshtein matcher resolves
+  // exactly the 10 spelling-variant pairs and none of the 10 abbreviation/
+  // synonym pairs → a measured natural baseline of 0.5. Threshold fitted at
+  // 0.5 × 0.85 = 0.425 (below the weak baseline; gates against regression only).
+  aliasResolutionQuality: 0.5 * 0.85, // measured baseline 0.5 × 0.85 = 0.425
+  // NOT known-weak: the measured natural baseline is 1.0 (two clean triangles
+  // per graph always cluster). 0.85 here is a routine safety margin, not a
+  // concession to a weak capability.
+  clusterCoherence: 1.0 * 0.85, // measured baseline 1.0 × 0.85 = 0.85
+};
+
+// Metrics where a lower value is better (rates of undesirable behavior).
+export const LOWER_IS_BETTER = new Set(['falseMemoryRate', 'provisionalLeakRate']);
+
+// Metrics whose threshold is deliberately fitted BELOW the feature's natural,
+// measured best-case baseline. These still gate (a regression below the fitted
+// floor fails CI), but the report labels them `knownWeak: true` so the aggregate
+// is never mistaken for a "the system is perfect" quality grade. The honest
+// statement is: this capability is weak today; the gate only prevents it getting
+// worse. Never inflate, never hide (manager decision D2/D3).
+export const KNOWN_WEAK = {
+  aliasResolutionQuality: {
+    naturalBaseline: 0.5,
+    reason:
+      'Offline Levenshtein/substring alias detection resolves only the 10 ' +
+      'spelling-variant pairs (PostgreSQL/Postgres, Grafana/Graphana, ...) and ' +
+      'none of the 10 abbreviation/synonym pairs (Kubernetes/K8s, Database/DB, ' +
+      'JavaScript/JS, ...) in the 20-pair dataset — the length-ratio prefilter and ' +
+      'edit-distance threshold drop them. Measured natural baseline 0.5; threshold ' +
+      'fitted at 0.5*0.85 = 0.425, below it. Weak, not passing-at-100.',
+  },
 };
 
 export function assertScenario(name, passed, detail = {}) {
@@ -67,32 +97,65 @@ export function clamp(value, min = 0, max = 1) {
   return Math.max(min, Math.min(max, value));
 }
 
+/**
+ * Run an array of async case functions and return the pass-rate as a ratio.
+ * Used by the de-fitted metrics that grew from 1-3 examples to >=20 distinct
+ * cases (manager decision D4). Each case returns a boolean (or 0/1).
+ */
+export async function rateOverCases(cases, run) {
+  let hits = 0;
+  const trace = [];
+  for (const testCase of cases) {
+    const passed = Boolean(await run(testCase));
+    if (passed) hits += 1;
+    trace.push({ case: testCase.name ?? testCase.label ?? null, passed });
+  }
+  return { rate: ratio(hits, cases.length), hits, total: cases.length, trace };
+}
+
 export function evaluateThreshold(metricName, actual) {
   const threshold = THRESHOLDS[metricName];
-  const lowerIsBetter = metricName === 'falseMemoryRate' || metricName === 'provisionalLeakRate';
+  const lowerIsBetter = LOWER_IS_BETTER.has(metricName);
   const passed = lowerIsBetter ? actual <= threshold : actual >= threshold;
-  const normalized = lowerIsBetter
-    ? actual <= threshold
-      ? 1
-      : clamp(threshold / Math.max(actual, Number.EPSILON))
-    : clamp(actual / threshold);
+  const weak = KNOWN_WEAK[metricName];
   return {
     metric: metricName,
     threshold,
     actual,
     passed,
-    normalized,
+    direction: lowerIsBetter ? 'lower_is_better' : 'higher_is_better',
+    knownWeak: Boolean(weak),
+    ...(weak ? { knownWeakReason: weak.reason, naturalBaseline: weak.naturalBaseline } : {}),
   };
 }
 
+/**
+ * De-fitted summary (manager decision D3): NO min-capped normalized average
+ * masquerading as a 0-100 quality grade. Instead we report:
+ *   (a) raw actual value per metric,
+ *   (b) per-metric pass/fail against an explicit threshold,
+ *   (c) passRate = fraction of metrics meeting their threshold.
+ * `overallScore` is retained ONLY for back-compat consumers and is defined as
+ * passRate*100 — a pass fraction, explicitly NOT a quality grade (see
+ * scorePresentation). knownWeak metrics still gate but are labelled weak.
+ */
 export function summarizeMetrics(metrics) {
   const evaluations = Object.keys(THRESHOLDS).map((metricName) =>
-    evaluateThreshold(metricName, metrics[metricName] ?? 0),
+    evaluateThreshold(metricName, metrics[metricName] ?? (LOWER_IS_BETTER.has(metricName) ? 1 : 0)),
   );
-  const overallScore = Math.round(average(evaluations.map((entry) => entry.normalized)) * 10000) / 100;
+  const metricsPassing = evaluations.filter((entry) => entry.passed).length;
+  const metricsTotal = evaluations.length;
+  const passRate = metricsTotal === 0 ? 0 : metricsPassing / metricsTotal;
   return {
-    overallScore,
+    passRate,
+    // Retained field name for back-compat; value is passRate*100, NOT a grade.
+    overallScore: Math.round(passRate * 10000) / 100,
+    scorePresentation:
+      'overallScore = passRate * 100 (fraction of metrics meeting their threshold). This is a pass rate, NOT a 0-100 quality grade.',
     passed: evaluations.every((entry) => entry.passed),
+    metricsPassing,
+    metricsTotal,
+    knownWeakMetrics: evaluations.filter((entry) => entry.knownWeak).map((entry) => entry.metric),
     evaluations,
   };
 }
@@ -105,11 +168,54 @@ export function mergeScenarioOutputs(outputs) {
   const scenarios = outputs.flatMap((output) => output.scenarios);
   const summary = summarizeMetrics(metrics);
   return {
+    passRate: summary.passRate,
     overallScore: summary.overallScore,
+    scorePresentation: summary.scorePresentation,
     passed: summary.passed,
+    metricsPassing: summary.metricsPassing,
+    metricsTotal: summary.metricsTotal,
+    knownWeakMetrics: summary.knownWeakMetrics,
     metrics,
     evaluations: summary.evaluations,
     scenarios,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Live-provider profile (manager decision D4). By default every suite runs with
+// deterministic mocked LLM clients so CI is hermetic and byte-stable. Set
+// MEMORY_EVAL_LIVE=1 with OPENAI_API_KEY present (LOCAL ONLY — CI never sets
+// this) to swap the mock for the real OpenAI structured-generation client on
+// the suites where the LLM output actually matters (episodic recap/reflect).
+// ---------------------------------------------------------------------------
+export function isLiveProfile() {
+  return process.env.MEMORY_EVAL_LIVE === '1' && Boolean(process.env.OPENAI_API_KEY);
+}
+
+/**
+ * Build a real `{ generate }` structured-generation client backed by OpenAI.
+ * Only called when isLiveProfile() is true. Throws a clear error if the SDK is
+ * not installed. Returns the mock unchanged when not in the live profile so
+ * callers can unconditionally wrap: `resolveEvalClient(createMockClient())`.
+ */
+export function resolveEvalClient(mockClient, { model = 'gpt-4.1-mini' } = {}) {
+  if (!isLiveProfile()) return mockClient;
+  return {
+    async generate(request) {
+      const sdk = await import('openai');
+      const OpenAI = sdk.default ?? sdk.OpenAI ?? sdk;
+      const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      const response = await client.chat.completions.create({
+        model: request.model ?? model,
+        max_tokens: request.maxTokens ?? 1024,
+        messages: [
+          { role: 'system', content: request.systemPrompt ?? '' },
+          { role: 'user', content: request.userPrompt ?? request.prompt ?? '' },
+        ],
+        response_format: { type: 'json_object' },
+      });
+      return response.choices?.[0]?.message?.content ?? '';
+    },
   };
 }
 
@@ -154,6 +260,7 @@ export function buildDiagnosticReport({ outputs, engineResult, baseline, platfor
         metric: evaluation.metric,
         threshold: evaluation.threshold,
         actual: evaluation.actual,
+        knownWeak: evaluation.knownWeak,
         trace: output?.diagnostic?.metricTraces?.[evaluation.metric] ?? null,
       };
     });
@@ -183,10 +290,16 @@ export function buildDiagnosticReport({ outputs, engineResult, baseline, platfor
   return {
     currentTruth: {
       enginePassed: engineResult.passed,
+      enginePassRate: engineResult.passRate,
+      engineMetricsPassing: engineResult.metricsPassing,
+      engineMetricsTotal: engineResult.metricsTotal,
       engineOverallScore: engineResult.overallScore,
+      scorePresentation: engineResult.scorePresentation,
+      knownWeakMetrics: engineResult.knownWeakMetrics ?? [],
       platformPassed: platformQuality?.passed ?? null,
     },
     baseline: {
+      passRate: baseline.passRate ?? null,
       overallScore: baseline.overallScore,
       passed: baseline.passed,
       metricDeltas: baselineDeltas,

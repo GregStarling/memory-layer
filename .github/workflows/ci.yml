@@ -24,6 +24,11 @@ jobs:
       - run: npm run build
       - run: npx tsc -p examples/tsconfig.json
       - run: npm run test:coverage
+      # Benchmark regression check (Phase 5.5, D7): warn-only, never fails CI.
+      # Timing is machine-dependent; the compare script always exits 0 and
+      # surfaces >20% regressions vs the checked-in results as annotations.
+      - run: npm run benchmark:compare
+        continue-on-error: true
       - run: npm run eval:retrieval:enforce
       - run: npm run eval:gate
       - run: npm run eval:memory-quality:enforce
@@ -75,7 +80,12 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: npm run test:postgres
+      # Coverage-instrumented single pass (Phase 5.3, D5): runs every pg-gated
+      # suite exactly once — vitest.postgres.config.ts's include list is the
+      # single source of truth for what executes here — and reports (not yet
+      # enforces) src/adapters/postgres/** coverage; ratchet thresholds in
+      # after the first measured run.
+      - run: npm run test:postgres:coverage
 
   platform-proof:
     runs-on: ubuntu-latest

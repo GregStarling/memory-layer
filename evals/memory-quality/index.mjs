@@ -1,3 +1,25 @@
+/**
+ * Memory-quality eval suite.
+ *
+ * REPORTING (manager decision D3): the suite reports raw actual values per
+ * metric, a per-metric pass/fail against an explicit threshold, and a
+ * `passRate` (fraction of metrics meeting threshold). `overallScore` is kept
+ * only for back-compat consumers and equals passRate*100 — a pass fraction,
+ * NOT a 0-100 quality grade (see `scorePresentation`). Metrics whose threshold
+ * is fitted below the feature's natural baseline are flagged `knownWeak: true`
+ * (see KNOWN_WEAK in shared.mjs) so the aggregate is never read as "perfect".
+ *
+ * DETERMINISM: every suite runs with mocked LLM clients so CI output is
+ * byte-stable and hermetic (no network, no API keys).
+ *
+ * LIVE-PROVIDER PROFILE (manager decision D4): set MEMORY_EVAL_LIVE=1 with
+ * OPENAI_API_KEY present to swap the mock for the real OpenAI structured-
+ * generation client on the suites where the LLM output actually matters
+ * (currently episodic-recall: recap + reflect synthesis). This is LOCAL ONLY —
+ * CI never sets MEMORY_EVAL_LIVE, so the enforced gates always run mocked. Use
+ * it to sanity-check that the pipeline holds up against a real model:
+ *     MEMORY_EVAL_LIVE=1 OPENAI_API_KEY=sk-... npm run eval:memory-quality
+ */
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -74,6 +96,13 @@ async function main() {
   const diagnostic = process.argv.includes('--diagnostic');
   const result = await runMemoryQualityEvals({ diagnostic });
   console.log(JSON.stringify(result, null, 2));
+  // Human-readable one-liner to stderr so JSON on stdout stays machine-parseable.
+  const weak = result.knownWeakMetrics ?? [];
+  console.error(
+    `\nmemory-quality: passRate ${result.metricsPassing}/${result.metricsTotal} ` +
+      `(${result.overallScore}% of metrics meet threshold — a pass rate, not a quality grade)` +
+      (weak.length ? `; knownWeak: ${weak.join(', ')}` : ''),
+  );
   if (enforce && !result.passed) {
     process.exit(1);
   }

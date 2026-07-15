@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -7,21 +5,15 @@ import {
   createPostgresEmbeddingAdapter,
 } from '../adapters/postgres/index.js';
 
+// These are mock-client dispatch tests: they verify the adapter routes queries
+// to the right executor (pool vs. connected client), wraps mutations in
+// BEGIN/COMMIT + savepoints, and binds low-confidence / boolean-flag values in
+// the correct positions. Real schema/behavioral parity against Postgres is
+// covered by the conformance + parity + integration suites, which run against a
+// live pg instance in the postgres-integration CI job (since Phase 3). The
+// former regex-against-schema.sql "parity" assertions were deleted in Phase 5:
+// grepping the DDL text proves nothing the live suites don't prove behaviorally.
 describe('postgres adapter transactions', () => {
-  function loadSchemaSql(): string {
-    return readFileSync(new URL('../adapters/postgres/schema.sql', import.meta.url), 'utf8');
-  }
-
-  it('keeps fresh schema parity for low confidence facts and boolean candidate flags', () => {
-    const schemaSql = loadSchemaSql();
-
-    expect(schemaSql).toMatch(/confidence IN \('high', 'medium', 'low'\)/);
-    expect(schemaSql).toMatch(/source_summary BOOLEAN NOT NULL DEFAULT FALSE/);
-    expect(schemaSql).toMatch(/source_turns BOOLEAN NOT NULL DEFAULT TRUE/);
-    expect(schemaSql).toMatch(/ALTER COLUMN source_summary TYPE BOOLEAN USING/);
-    expect(schemaSql).toMatch(/ALTER COLUMN source_turns TYPE BOOLEAN USING/);
-  });
-
   it('pins transactional queries to a connected client', async () => {
     const rootQueries: string[] = [];
     const clientQueries: string[] = [];
