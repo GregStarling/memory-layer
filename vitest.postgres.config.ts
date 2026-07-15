@@ -49,12 +49,16 @@ export default defineConfig({
       // `**` glob pulled in schema.sql, which the coverage remapper tried to
       // parse as a module and crashed (RolldownError) on the first CI run.
       include: ['src/adapters/postgres/**/*.ts'],
-      // REPORT-ONLY for the debut run: no thresholds. Nobody has ever measured
-      // pg-adapter coverage under these suites; enforcing a guessed number on
-      // the first instrumented CI run risks failing the job blind. The first
-      // postgres-integration run prints the actual numbers (text + lcov above);
-      // ratchet: add thresholds at (measured − 5) in the immediate follow-up
-      // commit once that report exists.
+      // Ratcheted from the first measured postgres-integration run
+      // (CI run 29419443126, 2026-07-15): stmts 67.8 / branch 55.79 /
+      // funcs 71.91 / lines 71.53 — thresholds pinned at measured − 5.
+      // Raise these only from a newer measured run, never aspirationally.
+      thresholds: {
+        statements: 62,
+        branches: 50,
+        functions: 66,
+        lines: 66,
+      },
     },
   },
 });
