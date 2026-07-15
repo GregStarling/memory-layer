@@ -3290,7 +3290,7 @@ export function createPostgresAdapter(
          input.trigger_type, input.turn_id_start, input.turn_id_end,
          input.turns_compacted, input.tokens_compacted_estimate, input.working_memory_id,
          input.active_turn_count_before, input.active_turn_count_after,
-         input.duration_ms, input.model_call_made, input.error ?? null,
+         input.duration_ms, input.model_call_made ?? false, input.error ?? null,
          resolveCreatedAt(input.created_at)],
       );
       return mapCompactionLog(rows[0]);

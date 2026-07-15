@@ -965,7 +965,9 @@ describe('MCP server handler', () => {
     expect(JSON.parse(snapshot.content[0].text).snapshot.watermarkEventId).toBe(latestCursor);
   });
 
-  it('rejects oversized MCP diff ranges at the default transport cap', async () => {
+  // Seeds 5001 turns into an on-disk sqlite file — legitimately slow on shared
+  // CI runners, so it carries an explicit timeout instead of the 5s default.
+  it('rejects oversized MCP diff ranges at the default transport cap', { timeout: 30_000 }, async () => {
     cleanupDbPath = `/tmp/memory-layer-mcp-diff-${Date.now()}-${Math.random()}.sqlite`;
     handler = createMcpServerHandler({ dbPath: cleanupDbPath });
     const adapter = createSQLiteAdapter(cleanupDbPath);

@@ -45,8 +45,10 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'lcov'],
       // Scope coverage to the pg adapter ONLY — this config exists to measure
-      // exactly the code the default job cannot.
-      include: ['src/adapters/postgres/**'],
+      // exactly the code the default job cannot. Restrict to .ts: the bare
+      // `**` glob pulled in schema.sql, which the coverage remapper tried to
+      // parse as a module and crashed (RolldownError) on the first CI run.
+      include: ['src/adapters/postgres/**/*.ts'],
       // REPORT-ONLY for the debut run: no thresholds. Nobody has ever measured
       // pg-adapter coverage under these suites; enforcing a guessed number on
       // the first instrumented CI run risks failing the job blind. The first

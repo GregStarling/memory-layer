@@ -482,6 +482,26 @@ describe.each(harnessCases())('adapter conformance [%s]', (name, factory) => {
         duration_ms: 77,
         model_call_made: true,
       });
+
+      // Omitted model_call_made defaults to FALSE on every adapter. This was a
+      // three-way divergence (memory: true, sqlite: false, pg: NOT NULL crash)
+      // caught the first time the pg legs of the Phase 2 suites ran in CI.
+      const defaulted = await db.insertCompactionLog({
+        ...s,
+        session_id: 'cl-sess',
+        trigger_type: 'manual',
+        turn_id_start: 10,
+        turn_id_end: 12,
+        turns_compacted: 2,
+        tokens_compacted_estimate: 100,
+        working_memory_id: wm.id,
+        active_turn_count_before: 4,
+        active_turn_count_after: 2,
+        duration_ms: 5,
+        created_at: 1_700_000_790,
+      });
+      const defaultedBack = await db.getCompactionLogById(defaulted.id);
+      expect(defaultedBack?.model_call_made).toBe(false);
     });
 
     maybeIt('Playbook round-trips visibility_class (workspace/tenant, not defaulted to private) [F6(c)]', async () => {

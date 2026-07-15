@@ -1943,7 +1943,10 @@ export function createInMemoryAdapter(telemetry?: TelemetryOptions): StorageAdap
         active_turn_count_before: input.active_turn_count_before,
         active_turn_count_after: input.active_turn_count_after,
         duration_ms: input.duration_ms,
-        model_call_made: input.model_call_made ?? true,
+        // Parity: undefined defaults to false on every adapter (pg schema says
+        // DEFAULT FALSE; sqlite's `? 1 : 0` coercion yields 0) — this was `true`
+        // here, a three-way divergence caught by the pg leg's NOT NULL violation.
+        model_call_made: input.model_call_made ?? false,
         error: input.error ?? null,
         created_at: input.created_at ?? nowSeconds(),
       };

@@ -1040,7 +1040,9 @@ describe('HTTP server', () => {
     expect(snapshot.snapshot.watermarkEventId).toBe(latestCursor === '0' ? null : latestCursor);
   });
 
-  it('rejects oversized HTTP diff ranges at the default transport cap', async () => {
+  // Seeds 5001 turns into an on-disk sqlite file — legitimately slow on shared
+  // CI runners, so it carries an explicit timeout instead of the 5s default.
+  it('rejects oversized HTTP diff ranges at the default transport cap', { timeout: 30_000 }, async () => {
     const dbPath = `/tmp/memory-layer-http-diff-${Date.now()}-${Math.random()}.sqlite`;
     const instance = await startHttpServer({ port: 13118, dbPath });
     cleanup = async () => {

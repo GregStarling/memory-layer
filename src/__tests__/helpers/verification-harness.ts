@@ -206,6 +206,12 @@ export async function makePostgresHarness(): Promise<HarnessAdapter> {
     sync: null,
     embeddings: createPostgresEmbeddingAdapter(pool),
     close: async () => {
+      // Idempotent: a test that calls manager.close() has already ended this
+      // pool (the manager closes its adapter), and afterEach then calls
+      // harness.close() again — pg's Pool throws "Called end on pool more
+      // than once" where sqlite tolerates the double-close.
+      const state = pool as unknown as { ended?: boolean; ending?: boolean };
+      if (state.ended || state.ending) return;
       try {
         await pool.query(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`);
       } catch {
