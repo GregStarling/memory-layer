@@ -21,7 +21,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
+      # dependency-cruiser supports node ^22||^24||>=26 only; the boundary
+      # check is a repo-structure gate, so one matrix leg is sufficient.
       - run: npm run lint:boundaries
+        if: ${{ matrix.node-version != 20 }}
       - run: npm run build
       # PyGen (Phase 6.6b): the Python client's request methods are generated
       # from the operation registry. Regenerating on this tree must be a no-op;
