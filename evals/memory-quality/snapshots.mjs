@@ -1,4 +1,4 @@
-import { createMemory } from '../../dist/core/quick.js';
+import { createMemory } from '../../dist/composition/quick.js';
 import { createMemoryRuntime } from '../../dist/core/runtime.js';
 import { assertScenario, ratio, tagEvalOutput } from './shared.mjs';
 

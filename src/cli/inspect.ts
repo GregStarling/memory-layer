@@ -2,7 +2,7 @@ import {
   createMemory,
   createMemoryWithAsyncAdapter,
   type CreateMemoryOptions,
-} from '../core/quick.js';
+} from '../composition/quick.js';
 import type { MemoryManager } from '../core/manager.js';
 import type { MemoryScope, ScopeLevel } from '../contracts/identity.js';
 import type {

@@ -1,5 +1,5 @@
 import type { MemoryScope, NormalizedMemoryScope } from './identity.js';
-import type { MemoryVisibilityClass } from './coordination.js';
+import type { MemoryVisibilityClass } from './visibility-class.js';
 
 export type TurnRole = 'user' | 'assistant' | 'system';
 export type CompactionTrigger = 'soft' | 'hard' | 'session_gap' | 'manual';

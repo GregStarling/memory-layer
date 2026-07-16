@@ -13,6 +13,7 @@ import {
 } from '../core/extractor.js';
 import { createClaudeExtractor, createOpenAIExtractor } from '../summarizers/extractor.js';
 import { parseExtractionResponse } from '../summarizers/prompts.js';
+import { ProviderUnavailableError } from '../contracts/errors.js';
 
 describe('extractors', () => {
   it('normalizes fact text for deduplication', () => {
@@ -233,12 +234,37 @@ describe('extractors', () => {
     await expect(extractor('Just chatting about a transient idea.', [], [])).resolves.toEqual([]);
   });
 
-  it('throws a clear error when anthropic sdk is missing', async () => {
+  it('throws a typed ProviderUnavailableError when anthropic sdk is missing', async () => {
+    await expect(createClaudeExtractor()('summary', [], [])).rejects.toBeInstanceOf(
+      ProviderUnavailableError,
+    );
     await expect(createClaudeExtractor()('summary', [], [])).rejects.toThrow('@anthropic-ai/sdk');
   });
 
-  it('throws a clear error when openai sdk is missing', async () => {
+  it('throws a typed ProviderUnavailableError when openai sdk is missing', async () => {
+    await expect(createOpenAIExtractor()('summary', [], [])).rejects.toBeInstanceOf(
+      ProviderUnavailableError,
+    );
     await expect(createOpenAIExtractor()('summary', [], [])).rejects.toThrow('openai');
+  });
+
+  it('surfaces malformed extraction responses as ProviderUnavailableError', () => {
+    // items present but not an array -> "response must be a JSON array"
+    expect(() => parseExtractionResponse('{"items":"nope"}')).toThrow(ProviderUnavailableError);
+    // fact field missing -> "invalid extracted fact"
+    expect(() => parseExtractionResponse('[{"factType":"preference"}]')).toThrow(
+      ProviderUnavailableError,
+    );
+    // unknown factType -> "invalid factType"
+    expect(() => parseExtractionResponse('[{"fact":"x","factType":"bogus"}]')).toThrow(
+      ProviderUnavailableError,
+    );
+    // unknown confidence -> "invalid confidence"
+    expect(() =>
+      parseExtractionResponse('[{"fact":"x","factType":"preference","confidence":"low"}]'),
+    ).toThrow(ProviderUnavailableError);
+    // non-JSON payload -> "response did not contain JSON"
+    expect(() => parseExtractionResponse('definitely not json')).toThrow(ProviderUnavailableError);
   });
 
   it('supports custom extractor clients', async () => {

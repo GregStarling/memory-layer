@@ -1,5 +1,6 @@
 import type { MemoryManager } from '../core/manager.js';
 import type { MemoryRuntime } from '../core/runtime.js';
+import { ValidationError } from '../contracts/errors.js';
 import type { EpisodeDetailLevel, TimeRange } from '../contracts/types.js';
 import type { CognitiveMemoryType } from '../contracts/cognitive.js';
 
@@ -233,7 +234,7 @@ export function createClaudeMemoryTools(runtime: MemoryRuntime, manager?: Memory
         }
       }
 
-      throw new Error(`Unknown Claude memory tool '${name}'`);
+      throw new ValidationError(`Unknown Claude memory tool '${name}'`);
     },
   };
 }

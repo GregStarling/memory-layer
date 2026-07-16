@@ -21,7 +21,13 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
+      - run: npm run lint:boundaries
       - run: npm run build
+      # PyGen (Phase 6.6b): the Python client's request methods are generated
+      # from the operation registry. Regenerating on this tree must be a no-op;
+      # a non-empty diff means the checked-in client has drifted from the
+      # registry (or the generator changed without regenerating).
+      - run: node scripts/generate-python-client.mjs && git diff --exit-code clients/python
       - run: npx tsc -p examples/tsconfig.json
       - run: npm run test:coverage
       # Benchmark regression check (Phase 5.5, D7): warn-only, never fails CI.

@@ -1,4 +1,4 @@
-import { type CreateMemoryOptions } from '../core/quick.js';
+import { type CreateMemoryOptions } from '../composition/quick.js';
 import type { MemoryManager } from '../core/manager.js';
 import type {
   ContextContract,
@@ -43,6 +43,7 @@ import {
 import { scopeKeyFor } from './scope-propagation.js';
 import { createServerContext } from './server-context.js';
 import { normalizeAliasMap, normalizeOntologyConfig } from '../core/scope-config.js';
+import { CORE_MCP_TOOL_NAMES, ALL_MCP_TOOL_NAMES } from './operations/registry.js';
 
 export interface McpServerConfig {
   /** Database path. Defaults to ':memory:'. */
@@ -85,6 +86,15 @@ export interface McpServerConfig {
   defaultDiffMaxEvents?: number;
   /** Hard maximum event cap for diff/reporting tools. Defaults to 20000. */
   maxDiffMaxEvents?: number;
+  /**
+   * Expose the full/admin MCP tool set (Phase 6.3). By default only the curated
+   * "core" set (the daily drivers, <=25 tools) is advertised, keeping the tool
+   * list inside LLM tool-selection comfort. Set to `true` — or the environment
+   * variable `MEMORY_MCP_ADMIN_TOOLS=1`, or the `--admin-tools` CLI flag — to
+   * advertise every tool. BREAKING (5.0.0): the default list shrank from 62 to
+   * the core set.
+   */
+  adminTools?: boolean;
 }
 
 interface McpTool {
@@ -1141,6 +1151,16 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
     config.defaultDiffMaxEvents,
     config.maxDiffMaxEvents,
   );
+  // Curate the advertised tool list from the operation registry (Phase 6.3).
+  // Default = the core set (daily drivers, <=25); the full/admin set is opt-in
+  // via config.adminTools, MEMORY_MCP_ADMIN_TOOLS=1, or the --admin-tools CLI
+  // flag. The authored tool schemas live in TOOLS (below), joined by name; a
+  // bidirectional parity test guards registry ⇆ TOOLS drift.
+  const adminTools = config.adminTools ?? process.env.MEMORY_MCP_ADMIN_TOOLS === '1';
+  const activeToolNames = new Set<string>(
+    adminTools ? ALL_MCP_TOOL_NAMES : CORE_MCP_TOOL_NAMES,
+  );
+  const tools = TOOLS.filter((tool) => activeToolNames.has(tool.name));
   const runtimes = new Map<string, MemoryRuntime>();
   const sessionRuntimes = new Map<string, MemoryRuntime>();
   const resolvedDatabaseUrl = config.databaseUrl ?? process.env.MEMORY_DATABASE_URL;
@@ -2096,7 +2116,7 @@ export function createMcpServerHandler(config: McpServerConfig = {}) {
   }
 
   return {
-    tools: TOOLS,
+    tools,
     callTool,
     manager: undefined,
     async close() {

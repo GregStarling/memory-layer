@@ -4,7 +4,7 @@ import { createSQLiteAdapterWithEmbeddings } from '../adapters/sqlite/index.js';
 import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 import { createMemoryEventEmitter } from '../core/events.js';
 import { createMemoryManager } from '../core/manager.js';
-import { createClaudeMemoryManager } from '../core/provider-managers.js';
+import { createClaudeMemoryManager } from '../composition/provider-managers.js';
 import { createRegexExtractor } from '../core/extractor.js';
 import { makeScope } from './test-helpers.js';
 import type { StructuredGenerationClient } from '../summarizers/client.js';

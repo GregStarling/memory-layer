@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { createMemory } from '../core/quick.js';
+import { createMemory } from '../composition/quick.js';
 
 describe('createMemory quick factory', () => {
   afterEach(() => {

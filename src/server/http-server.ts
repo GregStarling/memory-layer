@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
-import { type CreateMemoryOptions } from '../core/quick.js';
+import { type CreateMemoryOptions } from '../composition/quick.js';
 import type { MemoryManager } from '../core/manager.js';
 import type {
   ContextContract,
@@ -59,6 +59,8 @@ import {
 } from './serialization.js';
 import { scopeKeyFor, withScopeManagers } from './scope-propagation.js';
 import { createServerContext } from './server-context.js';
+import { OPERATIONS } from './operations/registry.js';
+import { createOperationMatcher } from './operations/types.js';
 import { normalizeAliasMap, normalizeOntologyConfig } from '../core/scope-config.js';
 export interface HttpServerConfig {
   /** Port to listen on. Defaults to 3100. */
@@ -988,78 +990,79 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
     req: IncomingMessage;
     res: ServerResponse;
     query: Record<string, string>;
+    params: Record<string, string>;
     readJsonBody: () => Promise<Record<string, unknown>>;
   };
   type RegisteredHttpRouteHandler = (context: RegisteredHttpRouteContext) => Promise<void>;
 
-  const registeredRoutes = new Map<string, RegisteredHttpRouteHandler>([
-    ['GET /v1/discover', async ({ req, res, query }) => {
+  const opHandlers: Record<string, RegisteredHttpRouteHandler> = {
+    discover: async ({ req, res, query }) => {
       const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
       const maxResults = parseOptionalFiniteInteger(query.max_results, { name: 'max_results', min: 0 }, failHttpValidation);
       const minScore = parseOptionalFiniteNumber(query.min_score, { name: 'min_score' }, failHttpValidation);
       const maxDepth = parseOptionalFiniteInteger(query.max_depth, { name: 'max_depth', min: 0 }, failHttpValidation);
-      const report = await requestManager.discover({
+      const report = await requestManager.graph.discover({
         maxResults: maxResults ?? undefined,
         minSurpriseScore: minScore ?? undefined,
         maxDepth: maxDepth ?? undefined,
       });
       writeJson(res, 200, report);
-    }],
-    ['GET /v1/report', async ({ req, res, query }) => {
+    },
+    getReport: async ({ req, res, query }) => {
       const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-      const report = await requestManager.getGraphReport({
+      const report = await requestManager.graph.getGraphReport({
         tokenBudget: parseOptionalInteger(query.token_budget) ?? undefined,
         includeSections: query.sections ? query.sections.split(',') : undefined,
         filterByTags: query.tags ? query.tags.split(',') : undefined,
       });
       writeJson(res, 200, report);
-    }],
-    ['GET /v1/facts-at', async ({ req, res, query }) => {
+    },
+    getFactsAt: async ({ req, res, query }) => {
       const timestamp = parseOptionalFiniteNumber(query.timestamp, { name: 'timestamp' }, failHttpValidation);
       if (timestamp == null) {
         writeError(res, 400, 'Missing or invalid timestamp parameter');
         return;
       }
       const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-      const result = await requestManager.getFactsAt(timestamp);
+      const result = await requestManager.temporal.getFactsAt(timestamp);
       writeJson(res, 200, result);
-    }],
-    ['POST /v1/reflect-knowledge', async ({ req, res, query, readJsonBody }) => {
+    },
+    reflectKnowledge: async ({ req, res, query, readJsonBody }) => {
       const body = await readJsonBody();
       const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-      const result = await requestManager.reflectOnKnowledge({
+      const result = await requestManager.curation.reflectOnKnowledge({
         maxFacts: typeof body.maxFacts === 'number' ? body.maxFacts : undefined,
         includePlaybooks: typeof body.includePlaybooks === 'boolean' ? body.includePlaybooks : undefined,
         rateLimitKey: typeof body.rateLimitKey === 'string' ? body.rateLimitKey : undefined,
       });
       writeJson(res, 200, result);
-    }],
-    ['POST /v1/derive', async ({ req, res, query, readJsonBody }) => {
+    },
+    derive: async ({ req, res, query, readJsonBody }) => {
       const body = await readJsonBody();
       const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-      const outputs = await requestManager.derive({
+      const outputs = await requestManager.curation.derive({
         outputTypes: Array.isArray(body.outputTypes) ? body.outputTypes : undefined,
         maxOutputs: typeof body.maxOutputs === 'number' ? body.maxOutputs : undefined,
       });
       writeJson(res, 200, { outputs });
-    }],
-    ['GET /v1/curation', async ({ req, res, query }) => {
+    },
+    getCuration: async ({ req, res, query }) => {
       const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-      const summary = await requestManager.getCurationSummary(undefined, {
+      const summary = await requestManager.curation.getCurationSummary(undefined, {
         since: parseOptionalFiniteNumber(query.since, { name: 'since' }, failHttpValidation) ?? undefined,
         limit: parseOptionalInteger(query.limit) ?? undefined,
         actionTypes: query.action_types ? query.action_types.split(',') as import('../contracts/curation.js').CurationActionType[] : undefined,
       });
       writeJson(res, 200, summary);
-    }],
-    ['GET /v1/core-memory', async ({ req, res, query }) => {
+    },
+    getCoreMemory: async ({ req, res, query }) => {
       const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-      const bundle = await requestManager.getCoreMemory({
+      const bundle = await requestManager.curation.getCoreMemory({
         tokenBudget: parseOptionalInteger(query.token_budget) ?? undefined,
       });
       writeJson(res, 200, bundle);
-    }],
-    ['POST /v1/aliases', async ({ req, res, query, readJsonBody }) => {
+    },
+    setAliases: async ({ req, res, query, readJsonBody }) => {
       const body = await readJsonBody();
       // Resolve scope (and enforce tenant binding) before body-shape validation
       // so a cross-tenant caller is rejected with 403, not a 400 that leaks the
@@ -1075,23 +1078,23 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         aliasMap,
       );
       writeJson(res, 200, { ok: true });
-    }],
-    ['GET /v1/aliases', async ({ req, res, query }) => {
+    },
+    getAliases: async ({ req, res, query }) => {
       const scopeInput = resolveRequestScope(config.scope, req, query);
       await serverContext.refreshScopeConfig(scopeInput);
       const requestManager = await getManager(scopeInput);
-      const aliases = requestManager.getAliases();
+      const aliases = requestManager.curation.getAliases();
       writeJson(res, 200, { aliasMap: aliases ?? {} });
-    }],
-    ['GET /v1/alias-candidates', async ({ req, res, query }) => {
+    },
+    getAliasCandidates: async ({ req, res, query }) => {
       const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-      const candidates = await requestManager.getAliasCandidates({
+      const candidates = await requestManager.curation.getAliasCandidates({
         threshold: parseOptionalFiniteNumber(query.min_similarity, { name: 'min_similarity' }, failHttpValidation) ?? undefined,
         maxCandidates: parseOptionalInteger(query.max_candidates) ?? undefined,
       });
       writeJson(res, 200, { candidates });
-    }],
-    ['POST /v1/ontology', async ({ req, res, query, readJsonBody }) => {
+    },
+    setOntology: async ({ req, res, query, readJsonBody }) => {
       const body = await readJsonBody();
       // Resolve scope (and enforce tenant binding) before body-shape validation.
       const scopeInput = resolveRequestScope(config.scope, req, query, body);
@@ -1105,25 +1108,25 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         ontology,
       );
       writeJson(res, 200, { ok: true });
-    }],
-    ['GET /v1/ontology', async ({ req, res, query }) => {
+    },
+    getOntology: async ({ req, res, query }) => {
       const scopeInput = resolveRequestScope(config.scope, req, query);
       await serverContext.refreshScopeConfig(scopeInput);
       const requestManager = await getManager(scopeInput);
-      const ontology = requestManager.getOntology();
+      const ontology = requestManager.curation.getOntology();
       writeJson(res, 200, { ontology: ontology ?? null });
-    }],
-    ['POST /v1/bundles/export', async ({ req, res, query, readJsonBody }) => {
+    },
+    exportBundle: async ({ req, res, query, readJsonBody }) => {
       const body = await readJsonBody();
       const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
       const name = requireString(body.name, 'name');
-      const result = requestManager.exportBundle(name, {
+      const result = requestManager.curation.exportBundle(name, {
         knowledgeClassFilter: Array.isArray(body.knowledgeClassFilter) ? body.knowledgeClassFilter : undefined,
         includeTags: Array.isArray(body.includeTags) ? body.includeTags : undefined,
       });
       writeJson(res, 200, result);
-    }],
-    ['POST /v1/bundles/import', async ({ req, res, query, readJsonBody }) => {
+    },
+    importBundle: async ({ req, res, query, readJsonBody }) => {
       const body = await readJsonBody();
       const scopeInput = resolveRequestScope(config.scope, req, query, body);
       const requestManager = await getManager(scopeInput);
@@ -1136,7 +1139,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         ['skip', 'overwrite', 'merge', 'trust_higher'],
         'conflictResolution',
       );
-      const result = requestManager.importBundle(
+      const result = requestManager.curation.importBundle(
         body.bundle as unknown as import('../contracts/bundles.js').MemoryBundle,
         {
           conflictResolution: resolution as import('../contracts/bundles.js').BundleConflictResolution,
@@ -1145,8 +1148,8 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         },
       );
       writeJson(res, 200, result);
-    }],
-    ['POST /v1/refresh-documents', async ({ req, res, query, readJsonBody }) => {
+    },
+    refreshDocuments: async ({ req, res, query, readJsonBody }) => {
       const body = await readJsonBody();
       const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
       if (!Array.isArray(body.documents)) {
@@ -1161,15 +1164,10 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           content: typeof d.content === 'string' ? d.content : undefined,
         };
       });
-      const result = requestManager.refreshDocuments(documents);
+      const result = requestManager.curation.refreshDocuments(documents);
       writeJson(res, 200, result);
-    }],
-    // Phase 5 wiki surface (4.5): thin HTTP dispatches to existing manager
-    // methods, so generated clients hit real endpoints instead of 404s. Each
-    // resolves scope through resolveRequestScope like its neighbors; domain
-    // errors (missing turn, no extractor, scope mismatch) surface via the
-    // shared catch → writeError mapping.
-    ['POST /v1/promote-response', async ({ req, res, query, readJsonBody }) => {
+    },
+    promoteResponse: async ({ req, res, query, readJsonBody }) => {
       const body = await readJsonBody();
       const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
       if (typeof body.turnId !== 'number' || !Number.isInteger(body.turnId)) {
@@ -1182,18 +1180,18 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         body.minConfidence == null
           ? undefined
           : (requireEnum(body.minConfidence, FACT_CONFIDENCES, 'minConfidence') as FactConfidence);
-      const knowledge = await requestManager.promoteResponse(body.turnId as number, {
+      const knowledge = await requestManager.curation.promoteResponse(body.turnId as number, {
         factTypes,
         minConfidence,
       });
       writeJson(res, 200, { knowledge });
-    }],
-    ['POST /v1/documents', async ({ req, res, query, readJsonBody }) => {
+    },
+    ingestDocument: async ({ req, res, query, readJsonBody }) => {
       const body = await readJsonBody();
       const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
       const content = requireString(body.content, 'content');
       const title = requireString(body.title, 'title');
-      const result = await requestManager.ingestDocument(content, {
+      const result = await requestManager.curation.ingestDocument(content, {
         title,
         url: optionalString(body.url, 'url'),
         mimeType: optionalString(body.mimeType, 'mimeType'),
@@ -1202,8 +1200,8 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
           : undefined,
       });
       writeJson(res, 201, result);
-    }],
-    ['GET /v1/documents', async ({ req, res, query }) => {
+    },
+    listDocuments: async ({ req, res, query }) => {
       const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
       const limit = parseLimit(query.limit);
       if (query.limit && limit == null) {
@@ -1215,13 +1213,13 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         writeError(res, 400, 'Invalid cursor parameter');
         return;
       }
-      const result = await requestManager.listSourceDocuments({
+      const result = await requestManager.curation.listSourceDocuments({
         limit: limit ?? undefined,
         cursor: cursor ?? undefined,
       });
       writeJson(res, 200, result);
-    }],
-    ['GET /v1/export/markdown', async ({ req, res, query }) => {
+    },
+    exportMarkdown: async ({ req, res, query }) => {
       const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
       const boolParam = (value: string | undefined): boolean | undefined =>
         value == null ? undefined : value === 'true';
@@ -1241,7 +1239,7 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       const filterByTags = query.tags
         ? query.tags.split(',').map((t) => t.trim()).filter(Boolean)
         : undefined;
-      const result = await requestManager.exportAsMarkdown({
+      const result = await requestManager.curation.exportAsMarkdown({
         includeEvidence: boolParam(query.includeEvidence),
         includeTrustMetadata: boolParam(query.includeTrustMetadata),
         includeChangelog: boolParam(query.includeChangelog),
@@ -1255,8 +1253,8 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         files: Object.fromEntries(result.files),
         stats: result.stats,
       });
-    }],
-    ['POST /v1/lint/knowledge', async ({ req, res, query, readJsonBody }) => {
+    },
+    lintKnowledge: async ({ req, res, query, readJsonBody }) => {
       const body = await readJsonBody();
       // Resolve (and enforce) scope before shape validation so a cross-tenant
       // caller is rejected with 403, not a 400 that leaks route acceptance.
@@ -1277,8 +1275,1231 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
         filterByTags,
       });
       writeJson(res, 200, report);
-    }],
-  ]);
+    },
+    storeTurn: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const turn = await requestManager.processTurn(
+          requireEnum(body.role, ['user', 'assistant', 'system'], 'role'),
+          requireString(body.content, 'content'),
+          optionalString(body.actor, 'actor'),
+        );
+        writeJson(res, 201, { turnId: turn.id, role: turn.role });
+        return;
+    },
+    storeExchange: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const exchange = await requestManager.processExchange(
+          requireString(body.userContent, 'userContent'),
+          requireString(body.assistantContent, 'assistantContent'),
+        );
+        writeJson(res, 201, {
+          userTurnId: exchange.userTurn.id,
+          assistantTurnId: exchange.assistantTurn.id,
+          compacted: exchange.compactionResult !== null,
+        });
+        return;
+    },
+    getContext: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const context = await requestManager.getContext(query.query || undefined, {
+          view: parseContextViewPolicy(query.view),
+          viewer: parseViewerFromQuery(query),
+          includeCoordinationState: query.include_coordination === 'true',
+          contract: query.contract || undefined,
+        });
+        writeJson(res, 200, serializeContextResponse(context, {
+          includeDebug: query.debug === 'true',
+        }));
+        return;
+    },
+    requestContext: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const resolution = await requestManager.governance.requestContextExpansion(
+          {
+            reason: requireEnum(body.reason, CONTEXT_REQUEST_REASONS, 'reason'),
+            note: optionalString(body.note, 'note'),
+            contract: parseContextContract(body.contract, 'contract'),
+          },
+          {
+            currentContract: optionalString(body.currentContract, 'currentContract'),
+          },
+        );
+        writeJson(res, 200, resolution);
+        return;
+    },
+    getContextConfig: async ({ req, res, query, params, readJsonBody }) => {
+        requireAdmin(req);
+        const scopeInput = resolveRequestScope(config.scope, req, query);
+        const requestManager = await getManager(scopeInput);
+        const snapshot = await requestManager.governance.getContextGovernance();
+        writeJson(res, 200, serializeContextGovernance(snapshot));
+        return;
+    },
+    setDefaultContract: async ({ req, res, query, params, readJsonBody }) => {
+        requireAdmin(req);
+        const body = await readBody(req, bodyLimitBytes);
+        const scopeInput = resolveRequestScope(config.scope, req, query, body);
+        const contract = parseContextContract(body.contract, 'contract');
+        await propagateToManagers(scopeInput, async (managed) => {
+          await managed.governance.setDefaultContextContract(contract ?? null);
+        });
+        const snapshot = await (await getManager(scopeInput)).governance.getContextGovernance();
+        writeJson(res, 200, serializeContextGovernance(snapshot));
+        return;
+    },
+    deleteDefaultContract: async ({ req, res, query, params, readJsonBody }) => {
+        requireAdmin(req);
+        const scopeInput = resolveRequestScope(config.scope, req, query);
+        await propagateToManagers(scopeInput, async (managed) => {
+          await managed.governance.setDefaultContextContract(null);
+        });
+        const snapshot = await (await getManager(scopeInput)).governance.getContextGovernance();
+        writeJson(res, 200, serializeContextGovernance(snapshot));
+        return;
+    },
+    putContract: async ({ req, res, query, params, readJsonBody }) => {
+        requireAdmin(req);
+        const body = await readBody(req, bodyLimitBytes);
+        const scopeInput = resolveRequestScope(config.scope, req, query, body);
+        const name = params.name;
+        const contract = parseContextContract(body.contract, 'contract');
+        if (!contract) {
+          writeError(res, 400, 'Missing contract');
+          return;
+        }
+        await propagateToManagers(scopeInput, async (managed) => {
+          await managed.governance.putContextContract(name, contract);
+        });
+        const snapshot = await (await getManager(scopeInput)).governance.getContextGovernance();
+        writeJson(res, 200, serializeContextGovernance(snapshot));
+        return;
+    },
+    deleteContract: async ({ req, res, query, params, readJsonBody }) => {
+        requireAdmin(req);
+        const scopeInput = resolveRequestScope(config.scope, req, query);
+        const name = params.name;
+        let deleted = false;
+        await propagateToManagers(scopeInput, async (managed) => {
+          deleted = (await managed.governance.deleteContextContract(name)) || deleted;
+        });
+        writeJson(res, 200, { deleted, name });
+        return;
+    },
+    putInvariant: async ({ req, res, query, params, readJsonBody }) => {
+        requireAdmin(req);
+        const body = await readBody(req, bodyLimitBytes);
+        const scopeInput = resolveRequestScope(config.scope, req, query, body);
+        const invariantId = params.id;
+        const invariant = parseContextInvariant(
+          {
+            ...(isRecord(body.invariant) ? body.invariant : {}),
+            id: invariantId,
+          },
+          'invariant',
+        );
+        await propagateToManagers(scopeInput, async (managed) => {
+          await managed.governance.putContextInvariant(invariant);
+        });
+        const snapshot = await (await getManager(scopeInput)).governance.getContextGovernance();
+        writeJson(res, 200, serializeContextGovernance(snapshot));
+        return;
+    },
+    deleteInvariant: async ({ req, res, query, params, readJsonBody }) => {
+        requireAdmin(req);
+        const scopeInput = resolveRequestScope(config.scope, req, query);
+        const invariantId = params.id;
+        let deleted = false;
+        await propagateToManagers(scopeInput, async (managed) => {
+          deleted = (await managed.governance.deleteContextInvariant(invariantId)) || deleted;
+        });
+        writeJson(res, 200, { deleted, id: invariantId });
+        return;
+    },
+    setEscalationPolicy: async ({ req, res, query, params, readJsonBody }) => {
+        requireAdmin(req);
+        const body = await readBody(req, bodyLimitBytes);
+        const scopeInput = resolveRequestScope(config.scope, req, query, body);
+        const policy = parseContextEscalationPolicy(body.policy, 'policy');
+        await propagateToManagers(scopeInput, async (managed) => {
+          await managed.governance.setContextEscalationPolicy(policy);
+        });
+        const snapshot = await (await getManager(scopeInput)).governance.getContextGovernance();
+        writeJson(res, 200, serializeContextGovernance(snapshot));
+        return;
+    },
+    getStateAt: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const asOf = parseOptionalFiniteNumber(query.as_of, { name: 'as_of' }, failHttpValidation);
+        if (asOf == null) {
+          writeError(res, 400, 'Missing or invalid as_of parameter');
+          return;
+        }
+        const state = await requestManager.temporal.getStateAt(asOf, {
+          relevanceQuery: query.query || undefined,
+          view: parseContextViewPolicy(query.view),
+          viewer: parseViewerFromQuery(query),
+          includeCoordinationState: query.include_coordination === 'true',
+          contract: query.contract || undefined,
+        });
+        writeJson(res, 200, serializeTemporalState(state, {
+          includeDebug: query.include_debug === 'true',
+        }));
+        return;
+    },
+    getTimeline: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const startAt = parseOptionalFiniteNumber(query.start_at, { name: 'start_at' }, failHttpValidation);
+        const endAt = parseOptionalFiniteNumber(query.end_at, { name: 'end_at' }, failHttpValidation);
+        const cursor = parseOptionalTemporalId(query.cursor);
+        const limit = parseLimit(query.limit);
+        const timeline = await requestManager.temporal.getTimeline({
+          sessionId: query.session_id || undefined,
+          entityKind: query.entity_kind as never,
+          entityId: query.entity_id || undefined,
+          startAt,
+          endAt,
+          limit,
+          cursor,
+        });
+        writeJson(res, 200, serializeTimelineResult(timeline));
+        return;
+    },
+    diffState: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const from = parseOptionalFiniteNumber(query.from, { name: 'from' }, failHttpValidation);
+        const to = parseOptionalFiniteNumber(query.to, { name: 'to' }, failHttpValidation);
+        const maxEvents = parseOptionalFiniteInteger(
+          query.max_events,
+          { name: 'max_events', min: 1, max: maxDiffMaxEvents },
+          failHttpValidation,
+        );
+        if (from == null || to == null) {
+          writeError(res, 400, 'Missing or invalid from/to parameters');
+          return;
+        }
+        const diff = await requestManager.temporal.diffState(from, to, {
+          sessionId: query.session_id || undefined,
+          entityKind: query.entity_kind as never,
+          entityId: query.entity_id || undefined,
+          maxEvents: maxEvents ?? defaultDiffMaxEvents,
+        });
+        writeJson(res, 200, diff);
+        return;
+    },
+    listEvents: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const startAt = parseOptionalFiniteNumber(query.start_at, { name: 'start_at' }, failHttpValidation);
+        const endAt = parseOptionalFiniteNumber(query.end_at, { name: 'end_at' }, failHttpValidation);
+        const cursor = parseOptionalTemporalId(query.cursor);
+        const limit = parseLimit(query.limit);
+        const events = await requestManager.temporal.listMemoryEvents({
+          sessionId: query.session_id || undefined,
+          entityKind: query.entity_kind as never,
+          entityId: query.entity_id || undefined,
+          startAt,
+          endAt,
+          limit,
+          cursor,
+        });
+        writeJson(res, 200, serializeTimelineResult(events));
+        return;
+    },
+    streamChanges: async ({ req, res, query, params, readJsonBody }) => {
+        // Resolve (and tenant-check) the scope BEFORE committing a 200 stream.
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        });
+        let closed = false;
+        const abortController = new AbortController();
+        req.on('close', () => {
+          closed = true;
+          abortController.abort();
+        });
+        const cursor = parseOptionalTemporalId(query.cursor);
+        const initialCursor = await requestManager.temporal.resolveChangeStreamCursor(cursor);
+        const iterator = requestManager.temporal.streamChanges({
+          cursor,
+          sessionId: query.session_id || undefined,
+          entityKind: query.entity_kind as never,
+          entityId: query.entity_id || undefined,
+          pollIntervalMs: 250,
+          signal: abortController.signal,
+        });
+        void (async () => {
+          res.write(`data: ${JSON.stringify({ type: 'connected', cursor: initialCursor })}\n\n`);
+          try {
+            for await (const event of iterator) {
+              if (closed) break;
+              res.write(`data: ${JSON.stringify(event)}\n\n`);
+            }
+          } catch (error) {
+            if (!closed) {
+              // SSE-phase errors happen after writeHead(200), so they bypass the
+              // request-level 1.3 sanitizer. Sanitize here the same way: emit a
+              // generic error event with a request id, and log the real error
+              // server-side under that id. Domain errors carry a safe message.
+              if (isMemoryDomainError(error)) {
+                res.write(
+                  `event: error\ndata: ${JSON.stringify({
+                    type: 'error',
+                    error: error.message,
+                    code: error.code,
+                  })}\n\n`,
+                );
+              } else {
+                const requestId = randomBytes(6).toString('hex');
+                console.error(
+                  `[memory-layer] stream error (request ${requestId}):`,
+                  error,
+                );
+                res.write(
+                  `event: error\ndata: ${JSON.stringify({
+                    type: 'error',
+                    error: 'internal error',
+                    requestId,
+                  })}\n\n`,
+                );
+              }
+              res.end();
+            }
+          }
+        })();
+        return;
+    },
+    search: async ({ req, res, query, params, readJsonBody }) => {
+        if (!query.q) {
+          writeError(res, 400, 'Missing required query parameter: q');
+          return;
+        }
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const searchOpts: import('../contracts/types.js').SearchOptions = {};
+        if (query.limit) searchOpts.limit = parseLimit(query.limit);
+        if (query.tags) searchOpts.tags = query.tags.split(',');
+        const results = await requestManager.search(query.q, searchOpts);
+        writeJson(res, 200, {
+          turns: results.turns.map((r) => ({
+            id: r.item.id,
+            role: r.item.role,
+            content: r.item.content,
+            rank: r.rank,
+          })),
+          knowledge: results.knowledge.map((r) => ({
+            id: r.item.id,
+            fact: r.item.fact,
+            fact_type: r.item.fact_type,
+            rank: r.rank,
+          })),
+        });
+        return;
+    },
+    searchCrossScope: async ({ req, res, query, params, readJsonBody }) => {
+        if (!query.q) {
+          writeError(res, 400, 'Missing required query parameter: q');
+          return;
+        }
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const scopeLevel = parseScopeLevel(query.scope_level, 'scope_level', [
+          'workspace',
+          'system',
+          'tenant',
+        ]) ?? 'workspace';
+        const crossOpts: import('../contracts/types.js').SearchOptions = {};
+        if (query.limit) crossOpts.limit = parseLimit(query.limit);
+        if (query.tags) crossOpts.tags = query.tags.split(',');
+        const results = await requestManager.searchCrossScope(
+          query.q,
+          scopeLevel,
+          crossOpts,
+        );
+        writeJson(res, 200, {
+          knowledge: results.knowledge.map((r) => ({
+            id: r.item.id,
+            fact: r.item.fact,
+            fact_type: r.item.fact_type,
+            scope_id: r.item.scope_id,
+            collaboration_id: r.item.collaboration_id,
+            rank: r.rank,
+          })),
+        });
+        return;
+    },
+    inspectKnowledgeList: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const limit = parseLimit(query.limit);
+        const cursor = parseOptionalInteger(query.cursor);
+        if ((query.limit && limit == null) || (query.cursor && cursor == null)) {
+          writeError(res, 400, 'Invalid pagination parameters');
+          return;
+        }
+        const knowledge = await requestManager.curation.listKnowledge({
+          limit,
+          cursor,
+        });
+        writeJson(res, 200, knowledge);
+        return;
+    },
+    inspectKnowledgeItem: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const detail = await requestManager.curation.inspectKnowledge(Number(params.knowledgeId));
+        if (!detail.knowledge) {
+          writeError(res, 404, 'Knowledge not found');
+          return;
+        }
+        writeJson(res, 200, detail);
+        return;
+    },
+    inspectAudits: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const knowledgeId = parseOptionalInteger(query.knowledge_id);
+        const limit = parseLimit(query.limit);
+        if ((query.knowledge_id && knowledgeId == null) || (query.limit && limit == null)) {
+          writeError(res, 400, 'Invalid audit inspection parameters');
+          return;
+        }
+        const audits = await requestManager.curation.getKnowledgeAudits({
+          knowledgeId,
+          limit,
+        });
+        writeJson(res, 200, { audits });
+        return;
+    },
+    inspectMonitor: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const [monitor, diagnostics] = await Promise.all([
+          requestManager.temporal.getContextMonitor(),
+          requestManager.getRuntimeDiagnostics(),
+        ]);
+        writeJson(res, 200, { monitor, diagnostics });
+        return;
+    },
+    inspectCompactions: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const limit = parseLimit(query.limit);
+        if (query.limit && limit == null) {
+          writeError(res, 400, 'Invalid compaction inspection parameters');
+          return;
+        }
+        const logs = await requestManager.temporal.getRecentCompactionLogs(limit);
+        writeJson(res, 200, { logs });
+        return;
+    },
+    inspectContext: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const asOf = parseOptionalFiniteNumber(query.as_of, { name: 'as_of' }, failHttpValidation);
+        const context = asOf != null
+          ? await requestManager.temporal.getContextAt(asOf, query.query || undefined)
+          : await requestManager.getContext(query.query || undefined);
+        writeJson(res, 200, serializeContextResponse(context, { includeDebug: true }));
+        return;
+    },
+    inspectSessionState: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const asOf = parseOptionalFiniteNumber(query.as_of, { name: 'as_of' }, failHttpValidation);
+        const context = asOf != null
+          ? await requestManager.temporal.getContextAt(asOf, query.query || undefined)
+          : await requestManager.getContext(query.query || undefined);
+        writeJson(res, 200, { sessionState: context.sessionState });
+        return;
+    },
+    inspectRetrieval: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const asOf = parseOptionalFiniteNumber(query.as_of, { name: 'as_of' }, failHttpValidation);
+        const context = asOf != null
+          ? await requestManager.temporal.getContextAt(asOf, query.query || undefined)
+          : await requestManager.getContext(query.query || undefined);
+        writeJson(res, 200, {
+          sessionState: context.sessionState,
+          knowledgeSelectionReasons: context.knowledgeSelectionReasons,
+          debugTrace: context.debugTrace,
+        });
+        return;
+    },
+    inspectReverification: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const limit = parseOptionalInteger(query.limit);
+        if (query.limit && limit == null) {
+          writeError(res, 400, 'Invalid reverification inspection parameters');
+          return;
+        }
+        const due = await requestManager.curation.getDueReverification({ limit });
+        writeJson(res, 200, { due });
+        return;
+    },
+    learnFact: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const fact = await requestManager.learnFact(
+          requireString(body.fact, 'fact'),
+          requireEnum(body.factType, ['preference', 'entity', 'decision', 'constraint', 'reference'], 'factType') as FactType,
+          (body.confidence == null
+            ? 'high'
+            : requireEnum(body.confidence, ['high', 'medium', 'low'], 'confidence')) as FactConfidence,
+          undefined,
+          {
+            visibilityClass:
+              body.visibility_class == null
+                ? undefined
+                : requireEnum(
+                    body.visibility_class,
+                    MEMORY_VISIBILITY_CLASSES,
+                    'visibility_class',
+                  ),
+          },
+        );
+        writeJson(res, 201, { knowledgeId: fact.id });
+        return;
+    },
+    trackWork: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const item = await requestManager.trackWorkItem(
+          requireString(body.title, 'title'),
+          requireEnum(body.kind ?? 'objective', ['objective', 'unresolved_work', 'constraint'], 'kind') as
+            | 'objective'
+            | 'unresolved_work'
+            | 'constraint',
+          requireEnum(body.status ?? 'open', ['open', 'in_progress', 'blocked', 'done'], 'status') as
+            | 'open'
+            | 'in_progress'
+            | 'blocked'
+            | 'done',
+          optionalString(body.detail, 'detail'),
+          {
+            visibilityClass:
+              body.visibility_class == null
+                ? undefined
+                : requireEnum(
+                    body.visibility_class,
+                    MEMORY_VISIBILITY_CLASSES,
+                    'visibility_class',
+                  ),
+          },
+        );
+        writeJson(res, 201, { workItemId: item.id });
+        return;
+    },
+    updateWorkItem: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const item = await requestManager.coordination.updateWorkItem(
+          Number(params.id),
+          {
+            title: body.title != null ? requireString(body.title, 'title') : undefined,
+            detail: body.detail != null ? optionalString(body.detail, 'detail') ?? null : undefined,
+            status:
+              body.status != null
+                ? (requireEnum(body.status, ['open', 'in_progress', 'blocked', 'done'], 'status') as
+                    | 'open'
+                    | 'in_progress'
+                    | 'blocked'
+                    | 'done')
+                : undefined,
+            visibility_class:
+              body.visibility_class != null
+                ? requireEnum(body.visibility_class, MEMORY_VISIBILITY_CLASSES, 'visibility_class')
+                : undefined,
+          },
+          {
+            expectedVersion: parseOptionalFiniteInteger(
+              body.expectedVersion,
+              { name: 'expectedVersion', min: 0 },
+              failHttpValidation,
+            ),
+          },
+        );
+        writeJson(res, 200, { workItem: item });
+        return;
+    },
+    claimWorkItem: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const actor = parseActorRef(body.actor, 'actor');
+        if (!actor) {
+          writeError(res, 400, 'Missing required field: actor');
+          return;
+        }
+        const claim = await requestManager.coordination.claimWorkItem({
+          workItemId: Number(params.id),
+          actor,
+          leaseSeconds: parseOptionalFiniteInteger(
+            body.leaseSeconds,
+            { name: 'leaseSeconds', min: 1 },
+            failHttpValidation,
+          ),
+        });
+        writeJson(res, 200, { claim: serializeWorkClaim(claim) });
+        return;
+    },
+    renewWorkClaim: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const actor = parseActorRef(body.actor, 'actor');
+        if (!actor) {
+          writeError(res, 400, 'Missing required field: actor');
+          return;
+        }
+        const claim = await requestManager.coordination.renewWorkClaim(
+          Number(params.id),
+          actor,
+          parseOptionalFiniteInteger(
+            body.leaseSeconds,
+            { name: 'leaseSeconds', min: 1 },
+            failHttpValidation,
+          ),
+        );
+        writeJson(res, 200, { claim: claim ? serializeWorkClaim(claim) : null });
+        return;
+    },
+    releaseWorkClaim: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const actor = parseActorRef(body.actor, 'actor');
+        if (!actor) {
+          writeError(res, 400, 'Missing required field: actor');
+          return;
+        }
+        const claim = await requestManager.coordination.releaseWorkClaim(
+          Number(params.id),
+          actor,
+          optionalString(body.reason, 'reason'),
+        );
+        writeJson(res, 200, { claim: claim ? serializeWorkClaim(claim) : null });
+        return;
+    },
+    listWorkClaims: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const claims = await requestManager.coordination.listWorkClaims();
+        writeJson(res, 200, { claims: claims.map(serializeWorkClaim) });
+        return;
+    },
+    handoffWorkItem: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const fromActor = parseActorRef(body.from_actor, 'from_actor');
+        const toActor = parseActorRef(body.to_actor, 'to_actor');
+        if (!fromActor || !toActor) {
+          writeError(res, 400, 'Missing required field: from_actor/to_actor');
+          return;
+        }
+        const handoff = await requestManager.coordination.handoffWorkItem({
+          workItemId: Number(params.id),
+          fromActor,
+          toActor,
+          summary: requireString(body.summary, 'summary'),
+          contextBundleRef: optionalString(body.context_bundle_ref, 'context_bundle_ref') ?? null,
+          expiresAt:
+            parseOptionalFiniteInteger(
+              body.expires_at,
+              { name: 'expires_at', min: 0 },
+              failHttpValidation,
+            ) ?? null,
+        });
+        writeJson(res, 201, { handoff: serializeHandoffRecord(handoff) });
+        return;
+    },
+    acceptHandoff: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const actor = parseActorRef(body.actor, 'actor');
+        if (!actor) {
+          writeError(res, 400, 'Missing required field: actor');
+          return;
+        }
+        const id = Number(params.id);
+        const action = ('accept' as string);
+        const reason = optionalString(body.reason, 'reason');
+        const handoff =
+          action === 'accept'
+            ? await requestManager.coordination.acceptHandoff(id, actor, reason)
+            : action === 'reject'
+              ? await requestManager.coordination.rejectHandoff(id, actor, reason)
+              : await requestManager.coordination.cancelHandoff(id, actor, reason);
+        writeJson(res, 200, { handoff: handoff ? serializeHandoffRecord(handoff) : null });
+        return;
+    },
+    rejectHandoff: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const actor = parseActorRef(body.actor, 'actor');
+        if (!actor) {
+          writeError(res, 400, 'Missing required field: actor');
+          return;
+        }
+        const id = Number(params.id);
+        const action = ('reject' as string);
+        const reason = optionalString(body.reason, 'reason');
+        const handoff =
+          action === 'accept'
+            ? await requestManager.coordination.acceptHandoff(id, actor, reason)
+            : action === 'reject'
+              ? await requestManager.coordination.rejectHandoff(id, actor, reason)
+              : await requestManager.coordination.cancelHandoff(id, actor, reason);
+        writeJson(res, 200, { handoff: handoff ? serializeHandoffRecord(handoff) : null });
+        return;
+    },
+    cancelHandoff: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const actor = parseActorRef(body.actor, 'actor');
+        if (!actor) {
+          writeError(res, 400, 'Missing required field: actor');
+          return;
+        }
+        const id = Number(params.id);
+        const action = ('cancel' as string);
+        const reason = optionalString(body.reason, 'reason');
+        const handoff =
+          action === 'accept'
+            ? await requestManager.coordination.acceptHandoff(id, actor, reason)
+            : action === 'reject'
+              ? await requestManager.coordination.rejectHandoff(id, actor, reason)
+              : await requestManager.coordination.cancelHandoff(id, actor, reason);
+        writeJson(res, 200, { handoff: handoff ? serializeHandoffRecord(handoff) : null });
+        return;
+    },
+    listPendingHandoffs: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const handoffs = await requestManager.coordination.listPendingHandoffs({
+          direction: (query.direction as 'inbound' | 'outbound' | 'all' | undefined) ?? 'all',
+        });
+        writeJson(res, 200, { handoffs: handoffs.map(serializeHandoffRecord) });
+        return;
+    },
+    forceCompact: async ({ req, res, query, params, readJsonBody }) => {
+        if (adminApiKey && !safeSecretEquals(req.headers['x-admin-key'], adminApiKey)) {
+          writeError(res, 403, 'Admin key required');
+          return;
+        }
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const result = await requestManager.forceCompact();
+        writeJson(res, 200, {
+          compacted: result !== null,
+          archivedTurnCount: result?.archivedTurnIds.length ?? 0,
+        });
+        return;
+    },
+    getHealth: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const [context, diagnostics] = await Promise.all([
+          requestManager.getContext(),
+          requestManager.getRuntimeDiagnostics(),
+        ]);
+        writeJson(res, 200, {
+          activeTurnCount: context.activeTurns.length,
+          tokenEstimate: context.tokenEstimate,
+          knowledgeCount: context.relevantKnowledge.length,
+          objectiveCount: context.activeObjectives.length,
+          unresolvedWorkCount: context.unresolvedWork.length,
+          sessionStateUpdatedAt: context.sessionState.updatedAt,
+          circuitBreakers: diagnostics.circuitBreakers,
+        });
+        return;
+    },
+    runMaintenance: async ({ req, res, query, params, readJsonBody }) => {
+        if (adminApiKey && !safeSecretEquals(req.headers['x-admin-key'], adminApiKey)) {
+          writeError(res, 403, 'Admin key required');
+          return;
+        }
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const report = await requestManager.runMaintenance();
+        writeJson(res, 200, {
+          expiredWorkingMemory: report.expiredWorkingMemoryIds.length,
+          retiredKnowledge: report.retiredKnowledgeIds.length,
+          deletedWorkItems: report.deletedWorkItemIds.length,
+          deletedAssociationIds: report.deletedAssociationIds,
+        });
+        return;
+    },
+    reverifyKnowledgeItem: async ({ req, res, query, params, readJsonBody }) => {
+        if (adminApiKey && !safeSecretEquals(req.headers['x-admin-key'], adminApiKey)) {
+          writeError(res, 403, 'Admin key required');
+          return;
+        }
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const result = await requestManager.curation.reverifyKnowledge(Number(params.knowledgeId));
+        writeJson(res, 200, result);
+        return;
+    },
+    reverifyKnowledge: async ({ req, res, query, params, readJsonBody }) => {
+        if (adminApiKey && !safeSecretEquals(req.headers['x-admin-key'], adminApiKey)) {
+          writeError(res, 403, 'Admin key required');
+          return;
+        }
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        let limit: number | undefined;
+        if (body.limit != null) {
+          if (typeof body.limit !== 'number' || !Number.isInteger(body.limit)) {
+            throw new HttpRequestError(400, 'Invalid field: limit');
+          }
+          limit = body.limit;
+        }
+        const report = await requestManager.curation.runReverification({ limit });
+        writeJson(res, 200, report);
+        return;
+    },
+    listChanges: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const cursor = parseOptionalTemporalId(query.cursor);
+        const sinceValue = query.since ? new Date(query.since) : new Date(0);
+        if (cursor == null && Number.isNaN(sinceValue.valueOf())) {
+          writeError(res, 400, 'Invalid since parameter');
+          return;
+        }
+        const page = await requestManager.temporal.listKnowledgeChanges({
+          cursor,
+          since: cursor == null ? sinceValue : undefined,
+          scopeLevel: parseScopeLevel(query.scope_level, 'scope_level') ?? 'scope',
+        });
+        writeJson(res, 200, {
+          changes: page.changes.map((change) => ({
+            event_id: change.event_id,
+            event_type: change.event_type,
+            change_at: change.created_at,
+            id: change.knowledge.id,
+            fact: change.knowledge.fact,
+            fact_type: change.knowledge.fact_type,
+            knowledge_state: change.knowledge.knowledge_state,
+            verification_status: change.knowledge.verification_status,
+            trust_score: change.knowledge.trust_score,
+            workspace_id: change.knowledge.workspace_id,
+            scope_id: change.knowledge.scope_id,
+            retired_at: change.knowledge.retired_at,
+            superseded_at: change.knowledge.superseded_at,
+            superseded_by_id: change.knowledge.superseded_by_id,
+            created_at: change.knowledge.created_at,
+            last_accessed_at: change.knowledge.last_accessed_at,
+            collaboration_id: change.knowledge.collaboration_id,
+          })),
+          nextCursor: page.nextCursor,
+        });
+        return;
+    },
+    eventsStream: async ({ req, res, query, params, readJsonBody }) => {
+        // Resolve (and tenant-check) the scope BEFORE committing a 200 stream,
+        // so a cross-tenant request is rejected with 403 rather than leaking an
+        // open stream bound to a tenant the key may not access.
+        const scope = resolveRequestScope(config.scope, req, query);
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        });
+        res.write('data: {"type":"connected"}\n\n');
+        sseClients.add({
+          response: res,
+          scope: materializeScope(scope),
+          scopeLevel: parseScopeLevel(query.scope_level, 'scope_level') ?? 'scope',
+          eventTypes: parseEventTypes(query.event_types),
+        });
+        req.on('close', () => {
+          for (const client of sseClients) {
+            if (client.response === res) {
+              sseClients.delete(client);
+            }
+          }
+        });
+        return;
+    },
+    searchEpisodes: async ({ req, res, query, params, readJsonBody }) => {
+        if (!query.q) {
+          writeError(res, 400, 'Missing required query parameter: q');
+          return;
+        }
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const detailLevel = query.detail
+          ? requireEnum(query.detail, EPISODE_DETAIL_LEVELS, 'detail')
+          : undefined;
+        const episodeStartAt = parseOptionalFiniteNumber(
+          query.start_at,
+          { name: 'start_at' },
+          failHttpValidation,
+        );
+        const episodeEndAt = parseOptionalFiniteNumber(
+          query.end_at,
+          { name: 'end_at' },
+          failHttpValidation,
+        );
+        const episodes = await requestManager.curation.searchEpisodes({
+          query: query.q,
+          detailLevel,
+          limit: parseLimit(query.limit),
+          timeRange:
+            episodeStartAt != null || episodeEndAt != null
+              ? {
+                  start_at: episodeStartAt,
+                  end_at: episodeEndAt,
+                }
+              : undefined,
+        });
+        writeJson(res, 200, { episodes });
+        return;
+    },
+    summarizeEpisode: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const sessionId = requireString(body.session_id, 'session_id');
+        const detailLevel = body.detailLevel
+          ? requireEnum(body.detailLevel, EPISODE_DETAIL_LEVELS, 'detailLevel')
+          : undefined;
+        const summary = await requestManager.curation.summarizeEpisode(sessionId, { detailLevel });
+        writeJson(res, 200, { episode: summary });
+        return;
+    },
+    reflect: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const reflectQuery = requireString(body.query, 'query');
+        const detailLevel = body.detailLevel
+          ? requireEnum(body.detailLevel, EPISODE_DETAIL_LEVELS, 'detailLevel')
+          : undefined;
+        const includeDeclarative = body.includeDeclarative != null ? Boolean(body.includeDeclarative) : undefined;
+        const includeEpisodic = body.includeEpisodic != null ? Boolean(body.includeEpisodic) : undefined;
+        const reflectLimit = parseOptionalNonNegativeInteger(body.limit, 'limit');
+        const timeRange = isRecord(body.timeRange)
+          ? {
+              start_at: parseOptionalFiniteNumber(
+                body.timeRange.start_at,
+                { name: 'timeRange.start_at' },
+                failHttpValidation,
+              ),
+              end_at: parseOptionalFiniteNumber(
+                body.timeRange.end_at,
+                { name: 'timeRange.end_at' },
+                failHttpValidation,
+              ),
+            }
+          : undefined;
+        const result = await requestManager.reflect({
+          query: reflectQuery,
+          detailLevel,
+          includeDeclarative,
+          includeEpisodic,
+          limit: reflectLimit,
+          timeRange,
+        });
+        writeJson(res, 200, result);
+        return;
+    },
+    searchCognitive: async ({ req, res, query, params, readJsonBody }) => {
+        if (!query.q) {
+          writeError(res, 400, 'Missing required query parameter: q');
+          return;
+        }
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const types = query.types
+          ? (query.types.split(',').map((t) => t.trim()).filter(Boolean) as CognitiveMemoryType[])
+          : undefined;
+        const cogMinTrust = parseOptionalFiniteNumber(
+          query.minimumTrustScore,
+          { name: 'minimumTrustScore', min: 0, max: 1 },
+          failHttpValidation,
+        );
+        const cogActiveOnly = query.activeOnly != null
+          ? query.activeOnly === 'true'
+          : undefined;
+        const result = await requestManager.curation.searchCognitive({
+          query: query.q,
+          types,
+          limit: parseLimit(query.limit),
+          minimumTrustScore: cogMinTrust,
+          activeOnly: cogActiveOnly,
+        });
+        writeJson(res, 200, result);
+        return;
+    },
+    getProfile: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const validViews: ProfileView[] = ['user', 'operator', 'workspace'];
+        const view = query.view
+          ? requireEnum(query.view, validViews, 'view')
+          : undefined;
+        const validSections: ProfileSection[] = ['identity', 'preferences', 'communication', 'constraints', 'workflows'];
+        const sections = query.sections
+          ? query.sections.split(',').map((s) => requireEnum(s.trim(), validSections, 'sections'))
+          : undefined;
+        const minTrust = parseOptionalFiniteNumber(
+          query.min_trust,
+          { name: 'min_trust', min: 0, max: 1 },
+          failHttpValidation,
+        );
+        const includeProvisional = query.includeProvisional === 'true' ? true : undefined;
+        const includeDisputed = query.includeDisputed === 'true' ? true : undefined;
+        const profile = await requestManager.getProfile({
+          view,
+          sections,
+          minimumTrustScore: minTrust,
+          includeProvisional,
+          includeDisputed,
+        });
+        writeJson(res, 200, { profile });
+        return;
+    },
+    createPlaybook: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const playbook = await requestManager.playbooks.createPlaybook({
+          title: requireString(body.title, 'title'),
+          description: requireString(body.description, 'description'),
+          instructions: requireString(body.instructions, 'instructions'),
+          references: Array.isArray(body.references) ? body.references.map(String) : undefined,
+          templates: Array.isArray(body.templates) ? body.templates.map(String) : undefined,
+          scripts: Array.isArray(body.scripts) ? body.scripts.map(String) : undefined,
+          assets: Array.isArray(body.assets) ? body.assets.map(String) : undefined,
+          tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
+          status: body.status ? requireEnum(body.status, PLAYBOOK_STATUSES, 'status') : undefined,
+        });
+        writeJson(res, 201, { playbook });
+        return;
+    },
+    listPlaybooks: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        if (query.q) {
+          const results = await requestManager.playbooks.searchPlaybooks(
+            query.q,
+            query.limit ? { limit: parseLimit(query.limit) } : undefined,
+          );
+          writeJson(res, 200, {
+            playbooks: results.map((r) => ({ ...r.item, rank: r.rank })),
+          });
+        } else {
+          const playbooks = await requestManager.playbooks.listPlaybooks();
+          writeJson(res, 200, { playbooks });
+        }
+        return;
+    },
+    createPlaybookFromTask: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const playbook = await requestManager.playbooks.createPlaybookFromTask({
+          title: requireString(body.title, 'title'),
+          description: requireString(body.description, 'description'),
+          sessionId: requireString(body.sessionId, 'sessionId'),
+          tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
+          sourceWorkingMemoryId: parseOptionalFiniteInteger(
+            body.sourceWorkingMemoryId,
+            { name: 'sourceWorkingMemoryId', min: 1 },
+            failHttpValidation,
+          ),
+        });
+        writeJson(res, 201, { playbook });
+        return;
+    },
+    getPlaybook: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const playbook = await requestManager.playbooks.getPlaybook(Number(params.playbookId));
+        if (!playbook) {
+          writeError(res, 404, 'Playbook not found');
+          return;
+        }
+        writeJson(res, 200, { playbook });
+        return;
+    },
+    updatePlaybook: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const patch: Record<string, unknown> = {};
+        if (body.title != null) patch.title = requireString(body.title, 'title');
+        if (body.description != null) patch.description = requireString(body.description, 'description');
+        if (body.instructions != null) patch.instructions = requireString(body.instructions, 'instructions');
+        if (Array.isArray(body.references)) patch.references = body.references.map(String);
+        if (Array.isArray(body.templates)) patch.templates = body.templates.map(String);
+        if (Array.isArray(body.scripts)) patch.scripts = body.scripts.map(String);
+        if (Array.isArray(body.assets)) patch.assets = body.assets.map(String);
+        if (Array.isArray(body.tags)) patch.tags = body.tags.map(String);
+        if (body.status != null) patch.status = requireEnum(body.status, PLAYBOOK_STATUSES, 'status');
+        const updated = await requestManager.playbooks.updatePlaybook(Number(params.playbookId), patch);
+        if (!updated) {
+          writeError(res, 404, 'Playbook not found');
+          return;
+        }
+        writeJson(res, 200, { playbook: updated });
+        return;
+    },
+    revisePlaybook: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const result = await requestManager.playbooks.revisePlaybook(
+          Number(params.playbookId),
+          requireString(body.instructions, 'instructions'),
+          requireString(body.revisionReason, 'revisionReason'),
+          optionalString(body.sourceSessionId, 'sourceSessionId'),
+        );
+        writeJson(res, 200, result);
+        return;
+    },
+    usePlaybook: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const playbookId = Number(params.playbookId);
+        await requestManager.playbooks.recordPlaybookUse(playbookId);
+        const playbook = await requestManager.playbooks.getPlaybook(playbookId);
+        writeJson(res, 200, { recorded: true, playbook });
+        return;
+    },
+    addAssociation: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const sourceId = Number.isInteger(body.source_id) && (body.source_id as number) > 0
+          ? (body.source_id as number)
+          : (() => { throw new HttpRequestError(400, 'Missing or invalid field: source_id (must be positive integer)'); })();
+        const targetId = Number.isInteger(body.target_id) && (body.target_id as number) > 0
+          ? (body.target_id as number)
+          : (() => { throw new HttpRequestError(400, 'Missing or invalid field: target_id (must be positive integer)'); })();
+        let confidence: number | undefined;
+        if (body.confidence !== undefined && body.confidence !== null) {
+          if (typeof body.confidence !== 'number' || Number.isNaN(body.confidence) || body.confidence < 0 || body.confidence > 1) {
+            throw new HttpRequestError(400, 'Invalid field: confidence (must be a number in [0, 1])');
+          }
+          confidence = body.confidence;
+        }
+        const association = await requestManager.graph.addAssociation({
+          source_kind: requireEnum(body.source_kind, ASSOCIATION_TARGET_KINDS, 'source_kind'),
+          source_id: sourceId,
+          target_kind: requireEnum(body.target_kind, ASSOCIATION_TARGET_KINDS, 'target_kind'),
+          target_id: targetId,
+          association_type: requireEnum(body.association_type, ASSOCIATION_TYPES, 'association_type'),
+          confidence,
+          auto_generated: typeof body.auto_generated === 'boolean' ? body.auto_generated : undefined,
+        });
+        writeJson(res, 201, { association });
+        return;
+    },
+    getAssociations: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const kind = requireEnum(params.kind, ASSOCIATION_TARGET_KINDS, 'kind');
+        const targetId = Number(params.id);
+        const result = await requestManager.graph.getAssociations(kind, targetId);
+        writeJson(res, 200, result);
+        return;
+    },
+    traverseAssociations: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
+        const kind = requireEnum(body.kind, ASSOCIATION_TARGET_KINDS, 'kind');
+        const id = Number.isInteger(body.id) && (body.id as number) > 0
+          ? (body.id as number)
+          : (() => { throw new HttpRequestError(400, 'Missing or invalid field: id (must be positive integer)'); })();
+        const maxDepth = parseOptionalNonNegativeInteger(body.maxDepth, 'maxDepth');
+        const maxNodes = parseOptionalNonNegativeInteger(body.maxNodes, 'maxNodes');
+        const graph = await requestManager.graph.traverseAssociations(kind, id, { maxDepth, maxNodes });
+        writeJson(res, 200, graph);
+        return;
+    },
+    removeAssociation: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        await requestManager.graph.removeAssociation(Number(params.id));
+        writeJson(res, 200, { deleted: true });
+        return;
+    },
+    getDocument: async ({ req, res, query, params, readJsonBody }) => {
+        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
+        const doc = await requestManager.curation.getSourceDocument(Number(params.id));
+        if (!doc) {
+          writeError(res, 404, 'Document not found');
+          return;
+        }
+        writeJson(res, 200, doc);
+        return;
+    },
+    captureSnapshot: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const sessionId = params.id;
+        const scopeInput = resolveRequestScope(config.scope, req, query, body);
+        // Use session-aware manager so getContext/getSessionBootstrap read
+        // the session named in the URL, not the scope's bound default.
+        const requestManager = await getSessionManager(scopeInput, sessionId);
+        const scopeKey = scopeKeyFor(scopeInput);
+        const relevanceQuery = typeof body.relevanceQuery === 'string' ? body.relevanceQuery : undefined;
+        const snapshotData = await requestManager.temporal.captureSnapshot(relevanceQuery, {
+          contract:
+            typeof body.contract === 'string'
+              ? body.contract
+              : typeof query.contract === 'string'
+                ? query.contract
+                : undefined,
+        });
+        const snapshot = {
+          scopeKey,
+          snapshotId: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+          bootstrap: snapshotData.bootstrap,
+          context: snapshotData.context,
+          frozenAt: snapshotData.frozenAt,
+          watermarkEventId: snapshotData.watermarkEventId,
+        };
+        touchSnapshot(`${scopeKey}:${sessionId}`, snapshot);
+        const { scopeKey: _scopeKey, ...publicSnapshot } = snapshot;
+        writeJson(res, 201, { snapshot: { ...publicSnapshot, sessionId } });
+        return;
+    },
+    getSnapshot: async ({ req, res, query, params, readJsonBody }) => {
+        const sessionId = params.id;
+        const scopeInput = resolveRequestScope(config.scope, req, query);
+        const scopeKey = scopeKeyFor(scopeInput);
+        const snapshot = readSnapshot(`${scopeKey}:${sessionId}`);
+        if (!snapshot) {
+          writeError(res, 404, 'Snapshot not found');
+          return;
+        }
+        const { scopeKey: _scopeKey, ...publicSnapshot } = snapshot;
+        writeJson(res, 200, { snapshot: { ...publicSnapshot, sessionId } });
+        return;
+    },
+    refreshSnapshot: async ({ req, res, query, params, readJsonBody }) => {
+        const body = await readBody(req, bodyLimitBytes);
+        const sessionId = params.id;
+        const scopeInput = resolveRequestScope(config.scope, req, query, body);
+        const requestManager = await getSessionManager(scopeInput, sessionId);
+        const scopeKey = scopeKeyFor(scopeInput);
+        const relevanceQuery = typeof body.relevanceQuery === 'string' ? body.relevanceQuery : undefined;
+        const snapshotData = await requestManager.temporal.captureSnapshot(relevanceQuery, {
+          contract:
+            typeof body.contract === 'string'
+              ? body.contract
+              : typeof query.contract === 'string'
+                ? query.contract
+                : undefined,
+        });
+        const snapshot = {
+          scopeKey,
+          snapshotId: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+          bootstrap: snapshotData.bootstrap,
+          context: snapshotData.context,
+          frozenAt: snapshotData.frozenAt,
+          watermarkEventId: snapshotData.watermarkEventId,
+        };
+        touchSnapshot(`${scopeKey}:${sessionId}`, snapshot);
+        const { scopeKey: _scopeKey, ...publicSnapshot } = snapshot;
+        writeJson(res, 200, { snapshot: { ...publicSnapshot, sessionId } });
+        return;
+    },
+  };
+
+  // Dispatch is a loop over the registry (Phase 6.3): the matcher resolves
+  // (method, path) to an operation and its path params; the handler above is
+  // invoked by operation name. Completeness is enforced by construction — a
+  // registry op with no handler (or vice versa) fails startup here.
+  const matchOperation = createOperationMatcher(OPERATIONS);
+  {
+    const handlerNames = new Set(Object.keys(opHandlers));
+    for (const op of OPERATIONS) {
+      if (!handlerNames.has(op.name)) {
+        throw new Error(`Missing HTTP handler for registry operation: ${op.name}`);
+      }
+    }
+    for (const handlerName of handlerNames) {
+      if (!OPERATIONS.some((op) => op.name === handlerName)) {
+        throw new Error(`HTTP handler has no registry operation: ${handlerName}`);
+      }
+    }
+  }
 
   const server = createServer(async (req, res) => {
     // CORS (1.2): apply the resolved policy. Default is same-origin only — no
@@ -1338,1315 +2559,20 @@ export async function startHttpServer(config: HttpServerConfig = {}): Promise<{
       const url = requestUrl;
       const path = requestPath;
       const query = parseQuery(url);
-      const routeHandler = registeredRoutes.get(`${req.method ?? 'GET'} ${path}`);
       let cachedBody: Record<string, unknown> | undefined;
       const readJsonBody = async () => {
         if (cachedBody) return cachedBody;
         cachedBody = await readBody(req, bodyLimitBytes);
         return cachedBody;
       };
-      if (routeHandler) {
-        await routeHandler({ req, res, query, readJsonBody });
-        return;
-      }
-
-      // POST /v1/turns
-      if (path === '/v1/turns' && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const turn = await requestManager.processTurn(
-          requireEnum(body.role, ['user', 'assistant', 'system'], 'role'),
-          requireString(body.content, 'content'),
-          optionalString(body.actor, 'actor'),
-        );
-        writeJson(res, 201, { turnId: turn.id, role: turn.role });
-        return;
-      }
-
-      // POST /v1/exchanges
-      if (path === '/v1/exchanges' && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const exchange = await requestManager.processExchange(
-          requireString(body.userContent, 'userContent'),
-          requireString(body.assistantContent, 'assistantContent'),
-        );
-        writeJson(res, 201, {
-          userTurnId: exchange.userTurn.id,
-          assistantTurnId: exchange.assistantTurn.id,
-          compacted: exchange.compactionResult !== null,
-        });
-        return;
-      }
-
-      // GET /v1/context
-      if (path === '/v1/context' && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const context = await requestManager.getContext(query.query || undefined, {
-          view: parseContextViewPolicy(query.view),
-          viewer: parseViewerFromQuery(query),
-          includeCoordinationState: query.include_coordination === 'true',
-          contract: query.contract || undefined,
-        });
-        writeJson(res, 200, serializeContextResponse(context, {
-          includeDebug: query.debug === 'true',
-        }));
-        return;
-      }
-
-      // POST /v1/context/request
-      if (path === '/v1/context/request' && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const resolution = await requestManager.requestContextExpansion(
-          {
-            reason: requireEnum(body.reason, CONTEXT_REQUEST_REASONS, 'reason'),
-            note: optionalString(body.note, 'note'),
-            contract: parseContextContract(body.contract, 'contract'),
-          },
-          {
-            currentContract: optionalString(body.currentContract, 'currentContract'),
-          },
-        );
-        writeJson(res, 200, resolution);
-        return;
-      }
-
-      if (path === '/v1/context/config' && req.method === 'GET') {
-        requireAdmin(req);
-        const scopeInput = resolveRequestScope(config.scope, req, query);
-        const requestManager = await getManager(scopeInput);
-        const snapshot = await requestManager.getContextGovernance();
-        writeJson(res, 200, serializeContextGovernance(snapshot));
-        return;
-      }
-
-      if (path === '/v1/context/config/default-contract' && req.method === 'PUT') {
-        requireAdmin(req);
-        const body = await readBody(req, bodyLimitBytes);
-        const scopeInput = resolveRequestScope(config.scope, req, query, body);
-        const contract = parseContextContract(body.contract, 'contract');
-        await propagateToManagers(scopeInput, async (managed) => {
-          await managed.setDefaultContextContract(contract ?? null);
-        });
-        const snapshot = await (await getManager(scopeInput)).getContextGovernance();
-        writeJson(res, 200, serializeContextGovernance(snapshot));
-        return;
-      }
-
-      if (path === '/v1/context/config/default-contract' && req.method === 'DELETE') {
-        requireAdmin(req);
-        const scopeInput = resolveRequestScope(config.scope, req, query);
-        await propagateToManagers(scopeInput, async (managed) => {
-          await managed.setDefaultContextContract(null);
-        });
-        const snapshot = await (await getManager(scopeInput)).getContextGovernance();
-        writeJson(res, 200, serializeContextGovernance(snapshot));
-        return;
-      }
-
-      const contextContractMatch = path.match(/^\/v1\/context\/config\/contracts\/([^/]+)$/);
-      if (contextContractMatch && req.method === 'PUT') {
-        requireAdmin(req);
-        const body = await readBody(req, bodyLimitBytes);
-        const scopeInput = resolveRequestScope(config.scope, req, query, body);
-        const name = decodeURIComponent(contextContractMatch[1]);
-        const contract = parseContextContract(body.contract, 'contract');
-        if (!contract) {
-          writeError(res, 400, 'Missing contract');
-          return;
+      const matched = matchOperation(req.method ?? 'GET', path);
+      if (matched) {
+        if (matched.spec.auth === 'admin') {
+          requireAdmin(req);
         }
-        await propagateToManagers(scopeInput, async (managed) => {
-          await managed.putContextContract(name, contract);
-        });
-        const snapshot = await (await getManager(scopeInput)).getContextGovernance();
-        writeJson(res, 200, serializeContextGovernance(snapshot));
+        await opHandlers[matched.spec.name]({ req, res, query, params: matched.params, readJsonBody });
         return;
       }
-
-      if (contextContractMatch && req.method === 'DELETE') {
-        requireAdmin(req);
-        const scopeInput = resolveRequestScope(config.scope, req, query);
-        const name = decodeURIComponent(contextContractMatch[1]);
-        let deleted = false;
-        await propagateToManagers(scopeInput, async (managed) => {
-          deleted = (await managed.deleteContextContract(name)) || deleted;
-        });
-        writeJson(res, 200, { deleted, name });
-        return;
-      }
-
-      const contextInvariantMatch = path.match(/^\/v1\/context\/config\/invariants\/([^/]+)$/);
-      if (contextInvariantMatch && req.method === 'PUT') {
-        requireAdmin(req);
-        const body = await readBody(req, bodyLimitBytes);
-        const scopeInput = resolveRequestScope(config.scope, req, query, body);
-        const invariantId = decodeURIComponent(contextInvariantMatch[1]);
-        const invariant = parseContextInvariant(
-          {
-            ...(isRecord(body.invariant) ? body.invariant : {}),
-            id: invariantId,
-          },
-          'invariant',
-        );
-        await propagateToManagers(scopeInput, async (managed) => {
-          await managed.putContextInvariant(invariant);
-        });
-        const snapshot = await (await getManager(scopeInput)).getContextGovernance();
-        writeJson(res, 200, serializeContextGovernance(snapshot));
-        return;
-      }
-
-      if (contextInvariantMatch && req.method === 'DELETE') {
-        requireAdmin(req);
-        const scopeInput = resolveRequestScope(config.scope, req, query);
-        const invariantId = decodeURIComponent(contextInvariantMatch[1]);
-        let deleted = false;
-        await propagateToManagers(scopeInput, async (managed) => {
-          deleted = (await managed.deleteContextInvariant(invariantId)) || deleted;
-        });
-        writeJson(res, 200, { deleted, id: invariantId });
-        return;
-      }
-
-      if (path === '/v1/context/config/escalation-policy' && req.method === 'PUT') {
-        requireAdmin(req);
-        const body = await readBody(req, bodyLimitBytes);
-        const scopeInput = resolveRequestScope(config.scope, req, query, body);
-        const policy = parseContextEscalationPolicy(body.policy, 'policy');
-        await propagateToManagers(scopeInput, async (managed) => {
-          await managed.setContextEscalationPolicy(policy);
-        });
-        const snapshot = await (await getManager(scopeInput)).getContextGovernance();
-        writeJson(res, 200, serializeContextGovernance(snapshot));
-        return;
-      }
-
-      // GET /v1/state
-      if (path === '/v1/state' && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const asOf = parseOptionalFiniteNumber(query.as_of, { name: 'as_of' }, failHttpValidation);
-        if (asOf == null) {
-          writeError(res, 400, 'Missing or invalid as_of parameter');
-          return;
-        }
-        const state = await requestManager.getStateAt(asOf, {
-          relevanceQuery: query.query || undefined,
-          view: parseContextViewPolicy(query.view),
-          viewer: parseViewerFromQuery(query),
-          includeCoordinationState: query.include_coordination === 'true',
-          contract: query.contract || undefined,
-        });
-        writeJson(res, 200, serializeTemporalState(state, {
-          includeDebug: query.include_debug === 'true',
-        }));
-        return;
-      }
-
-      // GET /v1/timeline
-      if (path === '/v1/timeline' && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const startAt = parseOptionalFiniteNumber(query.start_at, { name: 'start_at' }, failHttpValidation);
-        const endAt = parseOptionalFiniteNumber(query.end_at, { name: 'end_at' }, failHttpValidation);
-        const cursor = parseOptionalTemporalId(query.cursor);
-        const limit = parseLimit(query.limit);
-        const timeline = await requestManager.getTimeline({
-          sessionId: query.session_id || undefined,
-          entityKind: query.entity_kind as never,
-          entityId: query.entity_id || undefined,
-          startAt,
-          endAt,
-          limit,
-          cursor,
-        });
-        writeJson(res, 200, serializeTimelineResult(timeline));
-        return;
-      }
-
-      // GET /v1/state/diff
-      if (path === '/v1/state/diff' && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const from = parseOptionalFiniteNumber(query.from, { name: 'from' }, failHttpValidation);
-        const to = parseOptionalFiniteNumber(query.to, { name: 'to' }, failHttpValidation);
-        const maxEvents = parseOptionalFiniteInteger(
-          query.max_events,
-          { name: 'max_events', min: 1, max: maxDiffMaxEvents },
-          failHttpValidation,
-        );
-        if (from == null || to == null) {
-          writeError(res, 400, 'Missing or invalid from/to parameters');
-          return;
-        }
-        const diff = await requestManager.diffState(from, to, {
-          sessionId: query.session_id || undefined,
-          entityKind: query.entity_kind as never,
-          entityId: query.entity_id || undefined,
-          maxEvents: maxEvents ?? defaultDiffMaxEvents,
-        });
-        writeJson(res, 200, diff);
-        return;
-      }
-
-      // GET /v1/events/log
-      if (path === '/v1/events/log' && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const startAt = parseOptionalFiniteNumber(query.start_at, { name: 'start_at' }, failHttpValidation);
-        const endAt = parseOptionalFiniteNumber(query.end_at, { name: 'end_at' }, failHttpValidation);
-        const cursor = parseOptionalTemporalId(query.cursor);
-        const limit = parseLimit(query.limit);
-        const events = await requestManager.listMemoryEvents({
-          sessionId: query.session_id || undefined,
-          entityKind: query.entity_kind as never,
-          entityId: query.entity_id || undefined,
-          startAt,
-          endAt,
-          limit,
-          cursor,
-        });
-        writeJson(res, 200, serializeTimelineResult(events));
-        return;
-      }
-
-      // GET /v1/changes/stream
-      if (path === '/v1/changes/stream' && req.method === 'GET') {
-        // Resolve (and tenant-check) the scope BEFORE committing a 200 stream.
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        res.writeHead(200, {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-          Connection: 'keep-alive',
-        });
-        let closed = false;
-        const abortController = new AbortController();
-        req.on('close', () => {
-          closed = true;
-          abortController.abort();
-        });
-        const cursor = parseOptionalTemporalId(query.cursor);
-        const initialCursor = await requestManager.resolveChangeStreamCursor(cursor);
-        const iterator = requestManager.streamChanges({
-          cursor,
-          sessionId: query.session_id || undefined,
-          entityKind: query.entity_kind as never,
-          entityId: query.entity_id || undefined,
-          pollIntervalMs: 250,
-          signal: abortController.signal,
-        });
-        void (async () => {
-          res.write(`data: ${JSON.stringify({ type: 'connected', cursor: initialCursor })}\n\n`);
-          try {
-            for await (const event of iterator) {
-              if (closed) break;
-              res.write(`data: ${JSON.stringify(event)}\n\n`);
-            }
-          } catch (error) {
-            if (!closed) {
-              // SSE-phase errors happen after writeHead(200), so they bypass the
-              // request-level 1.3 sanitizer. Sanitize here the same way: emit a
-              // generic error event with a request id, and log the real error
-              // server-side under that id. Domain errors carry a safe message.
-              if (isMemoryDomainError(error)) {
-                res.write(
-                  `event: error\ndata: ${JSON.stringify({
-                    type: 'error',
-                    error: error.message,
-                    code: error.code,
-                  })}\n\n`,
-                );
-              } else {
-                const requestId = randomBytes(6).toString('hex');
-                console.error(
-                  `[memory-layer] stream error (request ${requestId}):`,
-                  error,
-                );
-                res.write(
-                  `event: error\ndata: ${JSON.stringify({
-                    type: 'error',
-                    error: 'internal error',
-                    requestId,
-                  })}\n\n`,
-                );
-              }
-              res.end();
-            }
-          }
-        })();
-        return;
-      }
-
-      // GET /v1/search
-      if (path === '/v1/search' && req.method === 'GET') {
-        if (!query.q) {
-          writeError(res, 400, 'Missing required query parameter: q');
-          return;
-        }
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const searchOpts: import('../contracts/types.js').SearchOptions = {};
-        if (query.limit) searchOpts.limit = parseLimit(query.limit);
-        if (query.tags) searchOpts.tags = query.tags.split(',');
-        const results = await requestManager.search(query.q, searchOpts);
-        writeJson(res, 200, {
-          turns: results.turns.map((r) => ({
-            id: r.item.id,
-            role: r.item.role,
-            content: r.item.content,
-            rank: r.rank,
-          })),
-          knowledge: results.knowledge.map((r) => ({
-            id: r.item.id,
-            fact: r.item.fact,
-            fact_type: r.item.fact_type,
-            rank: r.rank,
-          })),
-        });
-        return;
-      }
-
-      // GET /v1/search/cross-scope
-      if (path === '/v1/search/cross-scope' && req.method === 'GET') {
-        if (!query.q) {
-          writeError(res, 400, 'Missing required query parameter: q');
-          return;
-        }
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const scopeLevel = parseScopeLevel(query.scope_level, 'scope_level', [
-          'workspace',
-          'system',
-          'tenant',
-        ]) ?? 'workspace';
-        const crossOpts: import('../contracts/types.js').SearchOptions = {};
-        if (query.limit) crossOpts.limit = parseLimit(query.limit);
-        if (query.tags) crossOpts.tags = query.tags.split(',');
-        const results = await requestManager.searchCrossScope(
-          query.q,
-          scopeLevel,
-          crossOpts,
-        );
-        writeJson(res, 200, {
-          knowledge: results.knowledge.map((r) => ({
-            id: r.item.id,
-            fact: r.item.fact,
-            fact_type: r.item.fact_type,
-            scope_id: r.item.scope_id,
-            collaboration_id: r.item.collaboration_id,
-            rank: r.rank,
-          })),
-        });
-        return;
-      }
-
-      // GET /v1/inspect/knowledge
-      if (path === '/v1/inspect/knowledge' && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const limit = parseLimit(query.limit);
-        const cursor = parseOptionalInteger(query.cursor);
-        if ((query.limit && limit == null) || (query.cursor && cursor == null)) {
-          writeError(res, 400, 'Invalid pagination parameters');
-          return;
-        }
-        const knowledge = await requestManager.listKnowledge({
-          limit,
-          cursor,
-        });
-        writeJson(res, 200, knowledge);
-        return;
-      }
-
-      const knowledgeInspectMatch = path.match(/^\/v1\/inspect\/knowledge\/(\d+)$/);
-      if (knowledgeInspectMatch && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const detail = await requestManager.inspectKnowledge(Number(knowledgeInspectMatch[1]));
-        if (!detail.knowledge) {
-          writeError(res, 404, 'Knowledge not found');
-          return;
-        }
-        writeJson(res, 200, detail);
-        return;
-      }
-
-      // GET /v1/inspect/audits
-      if (path === '/v1/inspect/audits' && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const knowledgeId = parseOptionalInteger(query.knowledge_id);
-        const limit = parseLimit(query.limit);
-        if ((query.knowledge_id && knowledgeId == null) || (query.limit && limit == null)) {
-          writeError(res, 400, 'Invalid audit inspection parameters');
-          return;
-        }
-        const audits = await requestManager.getKnowledgeAudits({
-          knowledgeId,
-          limit,
-        });
-        writeJson(res, 200, { audits });
-        return;
-      }
-
-      // GET /v1/inspect/monitor
-      if (path === '/v1/inspect/monitor' && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const [monitor, diagnostics] = await Promise.all([
-          requestManager.getContextMonitor(),
-          requestManager.getRuntimeDiagnostics(),
-        ]);
-        writeJson(res, 200, { monitor, diagnostics });
-        return;
-      }
-
-      // GET /v1/inspect/compactions
-      if (path === '/v1/inspect/compactions' && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const limit = parseLimit(query.limit);
-        if (query.limit && limit == null) {
-          writeError(res, 400, 'Invalid compaction inspection parameters');
-          return;
-        }
-        const logs = await requestManager.getRecentCompactionLogs(limit);
-        writeJson(res, 200, { logs });
-        return;
-      }
-
-      // GET /v1/inspect/context
-      if (path === '/v1/inspect/context' && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const asOf = parseOptionalFiniteNumber(query.as_of, { name: 'as_of' }, failHttpValidation);
-        const context = asOf != null
-          ? await requestManager.getContextAt(asOf, query.query || undefined)
-          : await requestManager.getContext(query.query || undefined);
-        writeJson(res, 200, serializeContextResponse(context, { includeDebug: true }));
-        return;
-      }
-
-      // GET /v1/inspect/session-state
-      if (path === '/v1/inspect/session-state' && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const asOf = parseOptionalFiniteNumber(query.as_of, { name: 'as_of' }, failHttpValidation);
-        const context = asOf != null
-          ? await requestManager.getContextAt(asOf, query.query || undefined)
-          : await requestManager.getContext(query.query || undefined);
-        writeJson(res, 200, { sessionState: context.sessionState });
-        return;
-      }
-
-      // GET /v1/inspect/retrieval
-      if (path === '/v1/inspect/retrieval' && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const asOf = parseOptionalFiniteNumber(query.as_of, { name: 'as_of' }, failHttpValidation);
-        const context = asOf != null
-          ? await requestManager.getContextAt(asOf, query.query || undefined)
-          : await requestManager.getContext(query.query || undefined);
-        writeJson(res, 200, {
-          sessionState: context.sessionState,
-          knowledgeSelectionReasons: context.knowledgeSelectionReasons,
-          debugTrace: context.debugTrace,
-        });
-        return;
-      }
-
-      // GET /v1/inspect/reverification
-      if (path === '/v1/inspect/reverification' && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const limit = parseOptionalInteger(query.limit);
-        if (query.limit && limit == null) {
-          writeError(res, 400, 'Invalid reverification inspection parameters');
-          return;
-        }
-        const due = await requestManager.getDueReverification({ limit });
-        writeJson(res, 200, { due });
-        return;
-      }
-
-      // POST /v1/facts
-      if (path === '/v1/facts' && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const fact = await requestManager.learnFact(
-          requireString(body.fact, 'fact'),
-          requireEnum(body.factType, ['preference', 'entity', 'decision', 'constraint', 'reference'], 'factType') as FactType,
-          (body.confidence == null
-            ? 'high'
-            : requireEnum(body.confidence, ['high', 'medium', 'low'], 'confidence')) as FactConfidence,
-          undefined,
-          {
-            visibilityClass:
-              body.visibility_class == null
-                ? undefined
-                : requireEnum(
-                    body.visibility_class,
-                    MEMORY_VISIBILITY_CLASSES,
-                    'visibility_class',
-                  ),
-          },
-        );
-        writeJson(res, 201, { knowledgeId: fact.id });
-        return;
-      }
-
-      // POST /v1/work
-      if (path === '/v1/work' && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const item = await requestManager.trackWorkItem(
-          requireString(body.title, 'title'),
-          requireEnum(body.kind ?? 'objective', ['objective', 'unresolved_work', 'constraint'], 'kind') as
-            | 'objective'
-            | 'unresolved_work'
-            | 'constraint',
-          requireEnum(body.status ?? 'open', ['open', 'in_progress', 'blocked', 'done'], 'status') as
-            | 'open'
-            | 'in_progress'
-            | 'blocked'
-            | 'done',
-          optionalString(body.detail, 'detail'),
-          {
-            visibilityClass:
-              body.visibility_class == null
-                ? undefined
-                : requireEnum(
-                    body.visibility_class,
-                    MEMORY_VISIBILITY_CLASSES,
-                    'visibility_class',
-                  ),
-          },
-        );
-        writeJson(res, 201, { workItemId: item.id });
-        return;
-      }
-
-      const workItemMatch = path.match(/^\/v1\/work-items\/(\d+)$/);
-      if (workItemMatch && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const item = await requestManager.updateWorkItem(
-          Number(workItemMatch[1]),
-          {
-            title: body.title != null ? requireString(body.title, 'title') : undefined,
-            detail: body.detail != null ? optionalString(body.detail, 'detail') ?? null : undefined,
-            status:
-              body.status != null
-                ? (requireEnum(body.status, ['open', 'in_progress', 'blocked', 'done'], 'status') as
-                    | 'open'
-                    | 'in_progress'
-                    | 'blocked'
-                    | 'done')
-                : undefined,
-            visibility_class:
-              body.visibility_class != null
-                ? requireEnum(body.visibility_class, MEMORY_VISIBILITY_CLASSES, 'visibility_class')
-                : undefined,
-          },
-          {
-            expectedVersion: parseOptionalFiniteInteger(
-              body.expectedVersion,
-              { name: 'expectedVersion', min: 0 },
-              failHttpValidation,
-            ),
-          },
-        );
-        writeJson(res, 200, { workItem: item });
-        return;
-      }
-
-      const claimMatch = path.match(/^\/v1\/work-items\/(\d+)\/claim$/);
-      if (claimMatch && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const actor = parseActorRef(body.actor, 'actor');
-        if (!actor) {
-          writeError(res, 400, 'Missing required field: actor');
-          return;
-        }
-        const claim = await requestManager.claimWorkItem({
-          workItemId: Number(claimMatch[1]),
-          actor,
-          leaseSeconds: parseOptionalFiniteInteger(
-            body.leaseSeconds,
-            { name: 'leaseSeconds', min: 1 },
-            failHttpValidation,
-          ),
-        });
-        writeJson(res, 200, { claim: serializeWorkClaim(claim) });
-        return;
-      }
-
-      const renewMatch = path.match(/^\/v1\/work-claims\/(\d+)\/renew$/);
-      if (renewMatch && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const actor = parseActorRef(body.actor, 'actor');
-        if (!actor) {
-          writeError(res, 400, 'Missing required field: actor');
-          return;
-        }
-        const claim = await requestManager.renewWorkClaim(
-          Number(renewMatch[1]),
-          actor,
-          parseOptionalFiniteInteger(
-            body.leaseSeconds,
-            { name: 'leaseSeconds', min: 1 },
-            failHttpValidation,
-          ),
-        );
-        writeJson(res, 200, { claim: claim ? serializeWorkClaim(claim) : null });
-        return;
-      }
-
-      const releaseMatch = path.match(/^\/v1\/work-claims\/(\d+)\/release$/);
-      if (releaseMatch && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const actor = parseActorRef(body.actor, 'actor');
-        if (!actor) {
-          writeError(res, 400, 'Missing required field: actor');
-          return;
-        }
-        const claim = await requestManager.releaseWorkClaim(
-          Number(releaseMatch[1]),
-          actor,
-          optionalString(body.reason, 'reason'),
-        );
-        writeJson(res, 200, { claim: claim ? serializeWorkClaim(claim) : null });
-        return;
-      }
-
-      if (path === '/v1/work-claims' && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const claims = await requestManager.listWorkClaims();
-        writeJson(res, 200, { claims: claims.map(serializeWorkClaim) });
-        return;
-      }
-
-      const handoffCreateMatch = path.match(/^\/v1\/work-items\/(\d+)\/handoffs$/);
-      if (handoffCreateMatch && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const fromActor = parseActorRef(body.from_actor, 'from_actor');
-        const toActor = parseActorRef(body.to_actor, 'to_actor');
-        if (!fromActor || !toActor) {
-          writeError(res, 400, 'Missing required field: from_actor/to_actor');
-          return;
-        }
-        const handoff = await requestManager.handoffWorkItem({
-          workItemId: Number(handoffCreateMatch[1]),
-          fromActor,
-          toActor,
-          summary: requireString(body.summary, 'summary'),
-          contextBundleRef: optionalString(body.context_bundle_ref, 'context_bundle_ref') ?? null,
-          expiresAt:
-            parseOptionalFiniteInteger(
-              body.expires_at,
-              { name: 'expires_at', min: 0 },
-              failHttpValidation,
-            ) ?? null,
-        });
-        writeJson(res, 201, { handoff: serializeHandoffRecord(handoff) });
-        return;
-      }
-
-      const handoffActionMatch = path.match(/^\/v1\/handoffs\/(\d+)\/(accept|reject|cancel)$/);
-      if (handoffActionMatch && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const actor = parseActorRef(body.actor, 'actor');
-        if (!actor) {
-          writeError(res, 400, 'Missing required field: actor');
-          return;
-        }
-        const id = Number(handoffActionMatch[1]);
-        const action = handoffActionMatch[2];
-        const reason = optionalString(body.reason, 'reason');
-        const handoff =
-          action === 'accept'
-            ? await requestManager.acceptHandoff(id, actor, reason)
-            : action === 'reject'
-              ? await requestManager.rejectHandoff(id, actor, reason)
-              : await requestManager.cancelHandoff(id, actor, reason);
-        writeJson(res, 200, { handoff: handoff ? serializeHandoffRecord(handoff) : null });
-        return;
-      }
-
-      if (path === '/v1/handoffs' && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const handoffs = await requestManager.listPendingHandoffs({
-          direction: (query.direction as 'inbound' | 'outbound' | 'all' | undefined) ?? 'all',
-        });
-        writeJson(res, 200, { handoffs: handoffs.map(serializeHandoffRecord) });
-        return;
-      }
-
-      // POST /v1/compact
-      if (path === '/v1/compact' && req.method === 'POST') {
-        if (adminApiKey && !safeSecretEquals(req.headers['x-admin-key'], adminApiKey)) {
-          writeError(res, 403, 'Admin key required');
-          return;
-        }
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const result = await requestManager.forceCompact();
-        writeJson(res, 200, {
-          compacted: result !== null,
-          archivedTurnCount: result?.archivedTurnIds.length ?? 0,
-        });
-        return;
-      }
-
-      // GET /v1/health
-      if (path === '/v1/health' && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const [context, diagnostics] = await Promise.all([
-          requestManager.getContext(),
-          requestManager.getRuntimeDiagnostics(),
-        ]);
-        writeJson(res, 200, {
-          activeTurnCount: context.activeTurns.length,
-          tokenEstimate: context.tokenEstimate,
-          knowledgeCount: context.relevantKnowledge.length,
-          objectiveCount: context.activeObjectives.length,
-          unresolvedWorkCount: context.unresolvedWork.length,
-          sessionStateUpdatedAt: context.sessionState.updatedAt,
-          circuitBreakers: diagnostics.circuitBreakers,
-        });
-        return;
-      }
-
-      // NOTE: /healthz and /readyz are handled earlier, before authentication
-      // (they must never require a key). See the isHealthProbe short-circuit.
-
-      // POST /v1/maintenance
-      if (path === '/v1/maintenance' && req.method === 'POST') {
-        if (adminApiKey && !safeSecretEquals(req.headers['x-admin-key'], adminApiKey)) {
-          writeError(res, 403, 'Admin key required');
-          return;
-        }
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const report = await requestManager.runMaintenance();
-        writeJson(res, 200, {
-          expiredWorkingMemory: report.expiredWorkingMemoryIds.length,
-          retiredKnowledge: report.retiredKnowledgeIds.length,
-          deletedWorkItems: report.deletedWorkItemIds.length,
-          deletedAssociationIds: report.deletedAssociationIds,
-        });
-        return;
-      }
-
-      const reverificationMatch = path.match(/^\/v1\/reverification\/(\d+)$/);
-      if (reverificationMatch && req.method === 'POST') {
-        if (adminApiKey && !safeSecretEquals(req.headers['x-admin-key'], adminApiKey)) {
-          writeError(res, 403, 'Admin key required');
-          return;
-        }
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const result = await requestManager.reverifyKnowledge(Number(reverificationMatch[1]));
-        writeJson(res, 200, result);
-        return;
-      }
-
-      // POST /v1/reverification/run
-      if (path === '/v1/reverification/run' && req.method === 'POST') {
-        if (adminApiKey && !safeSecretEquals(req.headers['x-admin-key'], adminApiKey)) {
-          writeError(res, 403, 'Admin key required');
-          return;
-        }
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        let limit: number | undefined;
-        if (body.limit != null) {
-          if (typeof body.limit !== 'number' || !Number.isInteger(body.limit)) {
-            throw new HttpRequestError(400, 'Invalid field: limit');
-          }
-          limit = body.limit;
-        }
-        const report = await requestManager.runReverification({ limit });
-        writeJson(res, 200, report);
-        return;
-      }
-
-      // GET /v1/changes
-      if (path === '/v1/changes' && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const cursor = parseOptionalTemporalId(query.cursor);
-        const sinceValue = query.since ? new Date(query.since) : new Date(0);
-        if (cursor == null && Number.isNaN(sinceValue.valueOf())) {
-          writeError(res, 400, 'Invalid since parameter');
-          return;
-        }
-        const page = await requestManager.listKnowledgeChanges({
-          cursor,
-          since: cursor == null ? sinceValue : undefined,
-          scopeLevel: parseScopeLevel(query.scope_level, 'scope_level') ?? 'scope',
-        });
-        writeJson(res, 200, {
-          changes: page.changes.map((change) => ({
-            event_id: change.event_id,
-            event_type: change.event_type,
-            change_at: change.created_at,
-            id: change.knowledge.id,
-            fact: change.knowledge.fact,
-            fact_type: change.knowledge.fact_type,
-            knowledge_state: change.knowledge.knowledge_state,
-            verification_status: change.knowledge.verification_status,
-            trust_score: change.knowledge.trust_score,
-            workspace_id: change.knowledge.workspace_id,
-            scope_id: change.knowledge.scope_id,
-            retired_at: change.knowledge.retired_at,
-            superseded_at: change.knowledge.superseded_at,
-            superseded_by_id: change.knowledge.superseded_by_id,
-            created_at: change.knowledge.created_at,
-            last_accessed_at: change.knowledge.last_accessed_at,
-            collaboration_id: change.knowledge.collaboration_id,
-          })),
-          nextCursor: page.nextCursor,
-        });
-        return;
-      }
-
-      // GET /v1/events (SSE)
-      if (path === '/v1/events' && req.method === 'GET') {
-        // Resolve (and tenant-check) the scope BEFORE committing a 200 stream,
-        // so a cross-tenant request is rejected with 403 rather than leaking an
-        // open stream bound to a tenant the key may not access.
-        const scope = resolveRequestScope(config.scope, req, query);
-        res.writeHead(200, {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-          Connection: 'keep-alive',
-        });
-        res.write('data: {"type":"connected"}\n\n');
-        sseClients.add({
-          response: res,
-          scope: materializeScope(scope),
-          scopeLevel: parseScopeLevel(query.scope_level, 'scope_level') ?? 'scope',
-          eventTypes: parseEventTypes(query.event_types),
-        });
-        req.on('close', () => {
-          for (const client of sseClients) {
-            if (client.response === res) {
-              sseClients.delete(client);
-            }
-          }
-        });
-        return;
-      }
-
-      // GET /v1/episodes
-      if (path === '/v1/episodes' && req.method === 'GET') {
-        if (!query.q) {
-          writeError(res, 400, 'Missing required query parameter: q');
-          return;
-        }
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const detailLevel = query.detail
-          ? requireEnum(query.detail, EPISODE_DETAIL_LEVELS, 'detail')
-          : undefined;
-        const episodeStartAt = parseOptionalFiniteNumber(
-          query.start_at,
-          { name: 'start_at' },
-          failHttpValidation,
-        );
-        const episodeEndAt = parseOptionalFiniteNumber(
-          query.end_at,
-          { name: 'end_at' },
-          failHttpValidation,
-        );
-        const episodes = await requestManager.searchEpisodes({
-          query: query.q,
-          detailLevel,
-          limit: parseLimit(query.limit),
-          timeRange:
-            episodeStartAt != null || episodeEndAt != null
-              ? {
-                  start_at: episodeStartAt,
-                  end_at: episodeEndAt,
-                }
-              : undefined,
-        });
-        writeJson(res, 200, { episodes });
-        return;
-      }
-
-      // POST /v1/episodes/summarize
-      if (path === '/v1/episodes/summarize' && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const sessionId = requireString(body.session_id, 'session_id');
-        const detailLevel = body.detailLevel
-          ? requireEnum(body.detailLevel, EPISODE_DETAIL_LEVELS, 'detailLevel')
-          : undefined;
-        const summary = await requestManager.summarizeEpisode(sessionId, { detailLevel });
-        writeJson(res, 200, { episode: summary });
-        return;
-      }
-
-      // POST /v1/reflect
-      if (path === '/v1/reflect' && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const reflectQuery = requireString(body.query, 'query');
-        const detailLevel = body.detailLevel
-          ? requireEnum(body.detailLevel, EPISODE_DETAIL_LEVELS, 'detailLevel')
-          : undefined;
-        const includeDeclarative = body.includeDeclarative != null ? Boolean(body.includeDeclarative) : undefined;
-        const includeEpisodic = body.includeEpisodic != null ? Boolean(body.includeEpisodic) : undefined;
-        const reflectLimit = parseOptionalNonNegativeInteger(body.limit, 'limit');
-        const timeRange = isRecord(body.timeRange)
-          ? {
-              start_at: parseOptionalFiniteNumber(
-                body.timeRange.start_at,
-                { name: 'timeRange.start_at' },
-                failHttpValidation,
-              ),
-              end_at: parseOptionalFiniteNumber(
-                body.timeRange.end_at,
-                { name: 'timeRange.end_at' },
-                failHttpValidation,
-              ),
-            }
-          : undefined;
-        const result = await requestManager.reflect({
-          query: reflectQuery,
-          detailLevel,
-          includeDeclarative,
-          includeEpisodic,
-          limit: reflectLimit,
-          timeRange,
-        });
-        writeJson(res, 200, result);
-        return;
-      }
-
-      // GET /v1/memory
-      if (path === '/v1/memory' && req.method === 'GET') {
-        if (!query.q) {
-          writeError(res, 400, 'Missing required query parameter: q');
-          return;
-        }
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const types = query.types
-          ? (query.types.split(',').map((t) => t.trim()).filter(Boolean) as CognitiveMemoryType[])
-          : undefined;
-        const cogMinTrust = parseOptionalFiniteNumber(
-          query.minimumTrustScore,
-          { name: 'minimumTrustScore', min: 0, max: 1 },
-          failHttpValidation,
-        );
-        const cogActiveOnly = query.activeOnly != null
-          ? query.activeOnly === 'true'
-          : undefined;
-        const result = await requestManager.searchCognitive({
-          query: query.q,
-          types,
-          limit: parseLimit(query.limit),
-          minimumTrustScore: cogMinTrust,
-          activeOnly: cogActiveOnly,
-        });
-        writeJson(res, 200, result);
-        return;
-      }
-
-      // GET /v1/profile
-      if (path === '/v1/profile' && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const validViews: ProfileView[] = ['user', 'operator', 'workspace'];
-        const view = query.view
-          ? requireEnum(query.view, validViews, 'view')
-          : undefined;
-        const validSections: ProfileSection[] = ['identity', 'preferences', 'communication', 'constraints', 'workflows'];
-        const sections = query.sections
-          ? query.sections.split(',').map((s) => requireEnum(s.trim(), validSections, 'sections'))
-          : undefined;
-        const minTrust = parseOptionalFiniteNumber(
-          query.min_trust,
-          { name: 'min_trust', min: 0, max: 1 },
-          failHttpValidation,
-        );
-        const includeProvisional = query.includeProvisional === 'true' ? true : undefined;
-        const includeDisputed = query.includeDisputed === 'true' ? true : undefined;
-        const profile = await requestManager.getProfile({
-          view,
-          sections,
-          minimumTrustScore: minTrust,
-          includeProvisional,
-          includeDisputed,
-        });
-        writeJson(res, 200, { profile });
-        return;
-      }
-
-      // POST /v1/playbooks
-      if (path === '/v1/playbooks' && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const playbook = await requestManager.createPlaybook({
-          title: requireString(body.title, 'title'),
-          description: requireString(body.description, 'description'),
-          instructions: requireString(body.instructions, 'instructions'),
-          references: Array.isArray(body.references) ? body.references.map(String) : undefined,
-          templates: Array.isArray(body.templates) ? body.templates.map(String) : undefined,
-          scripts: Array.isArray(body.scripts) ? body.scripts.map(String) : undefined,
-          assets: Array.isArray(body.assets) ? body.assets.map(String) : undefined,
-          tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
-          status: body.status ? requireEnum(body.status, PLAYBOOK_STATUSES, 'status') : undefined,
-        });
-        writeJson(res, 201, { playbook });
-        return;
-      }
-
-      // GET /v1/playbooks
-      if (path === '/v1/playbooks' && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        if (query.q) {
-          const results = await requestManager.searchPlaybooks(
-            query.q,
-            query.limit ? { limit: parseLimit(query.limit) } : undefined,
-          );
-          writeJson(res, 200, {
-            playbooks: results.map((r) => ({ ...r.item, rank: r.rank })),
-          });
-        } else {
-          const playbooks = await requestManager.listPlaybooks();
-          writeJson(res, 200, { playbooks });
-        }
-        return;
-      }
-
-      // POST /v1/playbooks/from-task
-      if (path === '/v1/playbooks/from-task' && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const playbook = await requestManager.createPlaybookFromTask({
-          title: requireString(body.title, 'title'),
-          description: requireString(body.description, 'description'),
-          sessionId: requireString(body.sessionId, 'sessionId'),
-          tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
-          sourceWorkingMemoryId: parseOptionalFiniteInteger(
-            body.sourceWorkingMemoryId,
-            { name: 'sourceWorkingMemoryId', min: 1 },
-            failHttpValidation,
-          ),
-        });
-        writeJson(res, 201, { playbook });
-        return;
-      }
-
-      // GET /v1/playbooks/:id
-      const playbookGetMatch = path.match(/^\/v1\/playbooks\/(\d+)$/);
-      if (playbookGetMatch && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const playbook = await requestManager.getPlaybook(Number(playbookGetMatch[1]));
-        if (!playbook) {
-          writeError(res, 404, 'Playbook not found');
-          return;
-        }
-        writeJson(res, 200, { playbook });
-        return;
-      }
-
-      // PUT /v1/playbooks/:id
-      if (playbookGetMatch && req.method === 'PUT') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const patch: Record<string, unknown> = {};
-        if (body.title != null) patch.title = requireString(body.title, 'title');
-        if (body.description != null) patch.description = requireString(body.description, 'description');
-        if (body.instructions != null) patch.instructions = requireString(body.instructions, 'instructions');
-        if (Array.isArray(body.references)) patch.references = body.references.map(String);
-        if (Array.isArray(body.templates)) patch.templates = body.templates.map(String);
-        if (Array.isArray(body.scripts)) patch.scripts = body.scripts.map(String);
-        if (Array.isArray(body.assets)) patch.assets = body.assets.map(String);
-        if (Array.isArray(body.tags)) patch.tags = body.tags.map(String);
-        if (body.status != null) patch.status = requireEnum(body.status, PLAYBOOK_STATUSES, 'status');
-        const updated = await requestManager.updatePlaybook(Number(playbookGetMatch[1]), patch);
-        if (!updated) {
-          writeError(res, 404, 'Playbook not found');
-          return;
-        }
-        writeJson(res, 200, { playbook: updated });
-        return;
-      }
-
-      // POST /v1/playbooks/:id/revise
-      const playbookReviseMatch = path.match(/^\/v1\/playbooks\/(\d+)\/revise$/);
-      if (playbookReviseMatch && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const result = await requestManager.revisePlaybook(
-          Number(playbookReviseMatch[1]),
-          requireString(body.instructions, 'instructions'),
-          requireString(body.revisionReason, 'revisionReason'),
-          optionalString(body.sourceSessionId, 'sourceSessionId'),
-        );
-        writeJson(res, 200, result);
-        return;
-      }
-
-      // POST /v1/playbooks/:id/use
-      const playbookUseMatch = path.match(/^\/v1\/playbooks\/(\d+)\/use$/);
-      if (playbookUseMatch && req.method === 'POST') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const playbookId = Number(playbookUseMatch[1]);
-        await requestManager.recordPlaybookUse(playbookId);
-        const playbook = await requestManager.getPlaybook(playbookId);
-        writeJson(res, 200, { recorded: true, playbook });
-        return;
-      }
-
-      // POST /v1/associations
-      if (path === '/v1/associations' && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const sourceId = Number.isInteger(body.source_id) && (body.source_id as number) > 0
-          ? (body.source_id as number)
-          : (() => { throw new HttpRequestError(400, 'Missing or invalid field: source_id (must be positive integer)'); })();
-        const targetId = Number.isInteger(body.target_id) && (body.target_id as number) > 0
-          ? (body.target_id as number)
-          : (() => { throw new HttpRequestError(400, 'Missing or invalid field: target_id (must be positive integer)'); })();
-        let confidence: number | undefined;
-        if (body.confidence !== undefined && body.confidence !== null) {
-          if (typeof body.confidence !== 'number' || Number.isNaN(body.confidence) || body.confidence < 0 || body.confidence > 1) {
-            throw new HttpRequestError(400, 'Invalid field: confidence (must be a number in [0, 1])');
-          }
-          confidence = body.confidence;
-        }
-        const association = await requestManager.addAssociation({
-          source_kind: requireEnum(body.source_kind, ASSOCIATION_TARGET_KINDS, 'source_kind'),
-          source_id: sourceId,
-          target_kind: requireEnum(body.target_kind, ASSOCIATION_TARGET_KINDS, 'target_kind'),
-          target_id: targetId,
-          association_type: requireEnum(body.association_type, ASSOCIATION_TYPES, 'association_type'),
-          confidence,
-          auto_generated: typeof body.auto_generated === 'boolean' ? body.auto_generated : undefined,
-        });
-        writeJson(res, 201, { association });
-        return;
-      }
-
-      // GET /v1/associations/:kind/:id
-      const assocGetMatch = path.match(/^\/v1\/associations\/([a-z_]+)\/(\d+)$/);
-      if (assocGetMatch && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const kind = requireEnum(assocGetMatch[1], ASSOCIATION_TARGET_KINDS, 'kind');
-        const targetId = Number(assocGetMatch[2]);
-        const result = await requestManager.getAssociations(kind, targetId);
-        writeJson(res, 200, result);
-        return;
-      }
-
-      // POST /v1/associations/traverse
-      if (path === '/v1/associations/traverse' && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query, body));
-        const kind = requireEnum(body.kind, ASSOCIATION_TARGET_KINDS, 'kind');
-        const id = Number.isInteger(body.id) && (body.id as number) > 0
-          ? (body.id as number)
-          : (() => { throw new HttpRequestError(400, 'Missing or invalid field: id (must be positive integer)'); })();
-        const maxDepth = parseOptionalNonNegativeInteger(body.maxDepth, 'maxDepth');
-        const maxNodes = parseOptionalNonNegativeInteger(body.maxNodes, 'maxNodes');
-        const graph = await requestManager.traverseAssociations(kind, id, { maxDepth, maxNodes });
-        writeJson(res, 200, graph);
-        return;
-      }
-
-      // DELETE /v1/associations/:id
-      const assocDeleteMatch = path.match(/^\/v1\/associations\/(\d+)$/);
-      if (assocDeleteMatch && req.method === 'DELETE') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        await requestManager.removeAssociation(Number(assocDeleteMatch[1]));
-        writeJson(res, 200, { deleted: true });
-        return;
-      }
-
-      // POST /v1/sessions/:sessionId/snapshot — capture a frozen snapshot
-      // GET /v1/documents/:id — read a single ingested source document (4.5).
-      const documentGetMatch = path.match(/^\/v1\/documents\/(\d+)$/);
-      if (documentGetMatch && req.method === 'GET') {
-        const requestManager = await getManager(resolveRequestScope(config.scope, req, query));
-        const doc = await requestManager.getSourceDocument(Number(documentGetMatch[1]));
-        if (!doc) {
-          writeError(res, 404, 'Document not found');
-          return;
-        }
-        writeJson(res, 200, doc);
-        return;
-      }
-
-      const snapshotCaptureMatch = path.match(/^\/v1\/sessions\/([^/]+)\/snapshot$/);
-      if (snapshotCaptureMatch && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const sessionId = decodeURIComponent(snapshotCaptureMatch[1]);
-        const scopeInput = resolveRequestScope(config.scope, req, query, body);
-        // Use session-aware manager so getContext/getSessionBootstrap read
-        // the session named in the URL, not the scope's bound default.
-        const requestManager = await getSessionManager(scopeInput, sessionId);
-        const scopeKey = scopeKeyFor(scopeInput);
-        const relevanceQuery = typeof body.relevanceQuery === 'string' ? body.relevanceQuery : undefined;
-        const snapshotData = await requestManager.captureSnapshot(relevanceQuery, {
-          contract:
-            typeof body.contract === 'string'
-              ? body.contract
-              : typeof query.contract === 'string'
-                ? query.contract
-                : undefined,
-        });
-        const snapshot = {
-          scopeKey,
-          snapshotId: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-          bootstrap: snapshotData.bootstrap,
-          context: snapshotData.context,
-          frozenAt: snapshotData.frozenAt,
-          watermarkEventId: snapshotData.watermarkEventId,
-        };
-        touchSnapshot(`${scopeKey}:${sessionId}`, snapshot);
-        const { scopeKey: _scopeKey, ...publicSnapshot } = snapshot;
-        writeJson(res, 201, { snapshot: { ...publicSnapshot, sessionId } });
-        return;
-      }
-
-      // GET /v1/sessions/:sessionId/snapshot — fetch cached snapshot
-      if (snapshotCaptureMatch && req.method === 'GET') {
-        const sessionId = decodeURIComponent(snapshotCaptureMatch[1]);
-        const scopeInput = resolveRequestScope(config.scope, req, query);
-        const scopeKey = scopeKeyFor(scopeInput);
-        const snapshot = readSnapshot(`${scopeKey}:${sessionId}`);
-        if (!snapshot) {
-          writeError(res, 404, 'Snapshot not found');
-          return;
-        }
-        const { scopeKey: _scopeKey, ...publicSnapshot } = snapshot;
-        writeJson(res, 200, { snapshot: { ...publicSnapshot, sessionId } });
-        return;
-      }
-
-      // POST /v1/sessions/:sessionId/refresh — re-capture and replace
-      const snapshotRefreshMatch = path.match(/^\/v1\/sessions\/([^/]+)\/refresh$/);
-      if (snapshotRefreshMatch && req.method === 'POST') {
-        const body = await readBody(req, bodyLimitBytes);
-        const sessionId = decodeURIComponent(snapshotRefreshMatch[1]);
-        const scopeInput = resolveRequestScope(config.scope, req, query, body);
-        const requestManager = await getSessionManager(scopeInput, sessionId);
-        const scopeKey = scopeKeyFor(scopeInput);
-        const relevanceQuery = typeof body.relevanceQuery === 'string' ? body.relevanceQuery : undefined;
-        const snapshotData = await requestManager.captureSnapshot(relevanceQuery, {
-          contract:
-            typeof body.contract === 'string'
-              ? body.contract
-              : typeof query.contract === 'string'
-                ? query.contract
-                : undefined,
-        });
-        const snapshot = {
-          scopeKey,
-          snapshotId: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-          bootstrap: snapshotData.bootstrap,
-          context: snapshotData.context,
-          frozenAt: snapshotData.frozenAt,
-          watermarkEventId: snapshotData.watermarkEventId,
-        };
-        touchSnapshot(`${scopeKey}:${sessionId}`, snapshot);
-        const { scopeKey: _scopeKey, ...publicSnapshot } = snapshot;
-        writeJson(res, 200, { snapshot: { ...publicSnapshot, sessionId } });
-        return;
-      }
-
       // Do not echo the attacker-controlled method/path back into the body.
       writeError(res, 404, 'Not found');
     } catch (error) {

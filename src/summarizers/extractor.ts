@@ -1,3 +1,4 @@
+import { ProviderUnavailableError } from '../contracts/errors.js';
 import type { Extractor } from '../core/extractor.js';
 import { createClientExtractor, type StructuredGenerationClient } from './client.js';
 
@@ -19,9 +20,10 @@ export function createClaudeExtractor(options: ProviderExtractorOptions = {}): E
     let sdkModule: any;
     try {
       sdkModule = await import(moduleName);
-    } catch {
-      throw new Error(
+    } catch (error) {
+      throw new ProviderUnavailableError(
         "memory-layer: install '@anthropic-ai/sdk' to use createClaudeExtractor()",
+        { cause: error },
       );
     }
 
@@ -64,8 +66,11 @@ export function createOpenAIExtractor(options: ProviderExtractorOptions = {}): E
     let sdkModule: any;
     try {
       sdkModule = await import(moduleName);
-    } catch {
-      throw new Error("memory-layer: install 'openai' to use createOpenAIExtractor()");
+    } catch (error) {
+      throw new ProviderUnavailableError(
+        "memory-layer: install 'openai' to use createOpenAIExtractor()",
+        { cause: error },
+      );
     }
 
     const OpenAI = sdkModule.default ?? sdkModule.OpenAI ?? sdkModule;

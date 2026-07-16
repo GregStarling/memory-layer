@@ -1,4 +1,4 @@
-import type { MemoryScope } from '../contracts/identity.js';
+import type { MemoryScope, ScopeLevel } from '../contracts/identity.js';
 import type { EmbeddingAdapter, EmbeddingGenerator } from '../contracts/embedding.js';
 import type { EventHook, Logger } from '../contracts/observability.js';
 import type {
@@ -6,6 +6,12 @@ import type {
   ExtractionPolicy,
   MaintenancePolicy,
   MonitorPolicy,
+} from '../contracts/policy.js';
+import {
+  DEFAULT_CONTEXT_POLICY,
+  DEFAULT_EXTRACTION_POLICY,
+  DEFAULT_MAINTENANCE_POLICY,
+  DEFAULT_MONITOR_POLICY,
 } from '../contracts/policy.js';
 import type {
   ContextContract,
@@ -24,22 +30,22 @@ import {
   createHeuristicExtractor,
   createRegexExtractor,
   type Extractor,
-} from './extractor.js';
+} from '../core/extractor.js';
 import {
   createMemoryManager,
   type MemoryManager,
   type MemoryManagerConfig,
-} from './manager.js';
+} from '../core/manager.js';
 import { resolveMemoryManagerPreset, type MemoryManagerPreset } from './presets.js';
-import { createSessionId, type TokenEstimator } from './tokens.js';
-import { type StructuredGenerationClient } from '../summarizers/client.js';
+import { createSessionId, type TokenEstimator } from '../core/tokens.js';
+import { type StructuredGenerationClient } from '../contracts/generation-client.js';
 import { createClaudeSummarizer } from '../summarizers/claude.js';
 import { createExtractiveSummarizer } from '../summarizers/extractive.js';
 import { createOpenAISummarizer } from '../summarizers/openai.js';
 import { createClaudeExtractor, createOpenAIExtractor } from '../summarizers/extractor.js';
-import type { Summarizer } from './orchestrator.js';
-import { emitMemoryEvent } from './telemetry.js';
-import { detectWorkspace } from './workspace-detect.js';
+import type { Summarizer } from '../core/orchestrator.js';
+import { emitMemoryEvent } from '../core/telemetry.js';
+import { detectWorkspace } from '../core/workspace-detect.js';
 
 type QuickAdapterOption = 'sqlite' | 'memory' | StorageAdapter;
 type QuickSummarizerOption = 'claude' | 'openai' | 'extractive' | Summarizer;
@@ -66,7 +72,19 @@ export interface CreateMemoryOptions {
   sessionId?: string;
   preset?: MemoryManagerPreset;
   summarizer?: QuickSummarizerOption;
+  /**
+   * Named quality profile — the canonical way to select memory fidelity
+   * (Phase 6.5). One of `fast_adoption` | `balanced_memory` | `high_fidelity_memory`.
+   */
   qualityMode?: MemoryQualityMode;
+  /**
+   * @deprecated Use {@link CreateMemoryOptions.qualityMode} instead (Phase 6.5).
+   * The legacy `qualityTier` conflated fidelity with the storage/embedding
+   * capability tier. It is still accepted this major and mapped onto the
+   * equivalent `qualityMode` named profile (see {@link resolveQualityMode}),
+   * and still steers the local-embedding fallback; a one-time console warning
+   * is emitted on use. Removed in 6.0.0.
+   */
   qualityTier?: MemoryQualityTier;
   summarizerOptions?: QuickProviderOptions;
   extractor?: QuickExtractorOption;
@@ -178,17 +196,40 @@ const QUALITY_MODE_CONFIG: Record<MemoryQualityMode, QualityModeConfig> = {
   },
 };
 
+/** Map a legacy {@link MemoryQualityTier} onto its equivalent named profile. */
+const QUALITY_TIER_TO_MODE: Record<MemoryQualityTier, MemoryQualityMode> = {
+  offline_default: 'balanced_memory',
+  local_semantic: 'balanced_memory',
+  provider_backed: 'high_fidelity_memory',
+};
+
+let warnedQualityTierDeprecation = false;
+
+/**
+ * Emit a single process-lifetime warning when the deprecated `qualityTier`
+ * option is used (Phase 6.5). Matches the JSDoc `@deprecated` convention used
+ * for the flat manager shims; kept "once" so batch callers are not spammed.
+ */
+function warnQualityTierDeprecatedOnce(logger?: Logger): void {
+  if (warnedQualityTierDeprecation) return;
+  warnedQualityTierDeprecation = true;
+  const message =
+    "[ai-memory-layer] 'qualityTier' is deprecated (Phase 6.5) and will be removed in 6.0.0; " +
+    "use 'qualityMode' (fast_adoption | balanced_memory | high_fidelity_memory) instead.";
+  if (logger?.warn) {
+    logger.warn(message);
+  } else {
+    console.warn(message);
+  }
+}
+
 function resolveQualityMode(options: CreateMemoryOptions): MemoryQualityMode {
   if (options.qualityMode) return options.qualityMode;
-  switch (options.qualityTier) {
-    case 'offline_default':
-      return 'balanced_memory';
-    case 'provider_backed':
-      return 'high_fidelity_memory';
-    case 'local_semantic':
-    default:
-      return 'balanced_memory';
+  if (options.qualityTier) {
+    warnQualityTierDeprecatedOnce(options.logger);
+    return QUALITY_TIER_TO_MODE[options.qualityTier];
   }
+  return 'balanced_memory';
 }
 
 function resolveScope(scope?: string | MemoryScope): MemoryScope {
@@ -354,6 +395,107 @@ function resolveCapabilityProfile(input: {
       embeddingTier === 'provider',
     localFallbackActive: extractorTier !== 'provider' || embeddingTier !== 'provider',
     nativeAddonRequiredAtBootstrap: storageKind === 'sqlite',
+  };
+}
+
+/** Where a resolved config field's final value came from (Phase 6.5). */
+export type ConfigFieldSource = 'default' | 'preset' | 'qualityMode' | 'user';
+
+/** A single resolved config field: its effective value and where it came from. */
+export interface EffectiveConfigField<T = unknown> {
+  value: T;
+  source: ConfigFieldSource;
+}
+
+/**
+ * The fully-merged manager configuration with per-field provenance (Phase 6.5).
+ *
+ * Reflects the layering the created manager actually applies at runtime:
+ * built-in policy defaults (`default`) < preset (`preset`) < quality profile
+ * (`qualityMode`) < caller policy overrides (`user`). The four policy maps are
+ * keyed by policy field, each carrying the winning value and its `source`.
+ */
+export interface EffectiveManagerConfig {
+  preset: MemoryManagerPreset;
+  qualityMode: MemoryQualityMode;
+  /** The legacy quality tier if one was supplied, else `null` (see the deprecated `qualityTier`). */
+  qualityTier: MemoryQualityTier | null;
+  monitorPolicy: Record<string, EffectiveConfigField>;
+  extractionPolicy: Record<string, EffectiveConfigField>;
+  contextPolicy: Record<string, EffectiveConfigField>;
+  maintenancePolicy: Record<string, EffectiveConfigField>;
+  autoCompact: EffectiveConfigField<boolean>;
+  crossScopeLevel: EffectiveConfigField<ScopeLevel>;
+}
+
+function layerPolicy(
+  layers: Array<{ source: ConfigFieldSource; obj: Record<string, unknown> | undefined }>,
+): Record<string, EffectiveConfigField> {
+  const out: Record<string, EffectiveConfigField> = {};
+  for (const { source, obj } of layers) {
+    if (!obj) continue;
+    for (const [key, value] of Object.entries(obj)) {
+      if (value === undefined) continue;
+      out[key] = { value, source };
+    }
+  }
+  return out;
+}
+
+/**
+ * Resolve the effective manager configuration for a set of {@link CreateMemoryOptions},
+ * annotating every policy field with its provenance (Phase 6.5).
+ *
+ * Pure and side-effect free with respect to storage/providers — it only reads
+ * the same preset + quality-profile + user layers that {@link createMemory}
+ * feeds to the manager, so callers can inspect or diff what a config resolves
+ * to without instantiating adapters. (Passing a deprecated `qualityTier` still
+ * triggers the one-time deprecation warning, exactly as construction would.)
+ */
+export function resolveEffectiveConfig(
+  options: CreateMemoryOptions = {},
+): EffectiveManagerConfig {
+  const preset = options.preset ?? 'chat_agent';
+  const presetConfig = resolveMemoryManagerPreset(options.preset);
+  const qualityMode = resolveQualityMode(options);
+  const qualityConfig = QUALITY_MODE_CONFIG[qualityMode];
+
+  return {
+    preset,
+    qualityMode,
+    qualityTier: options.qualityTier ?? null,
+    monitorPolicy: layerPolicy([
+      { source: 'default', obj: DEFAULT_MONITOR_POLICY as unknown as Record<string, unknown> },
+      { source: 'preset', obj: presetConfig.monitorPolicy },
+      { source: 'qualityMode', obj: qualityConfig.monitorPolicy },
+      { source: 'user', obj: options.policies?.monitor },
+    ]),
+    extractionPolicy: layerPolicy([
+      { source: 'default', obj: DEFAULT_EXTRACTION_POLICY as unknown as Record<string, unknown> },
+      { source: 'preset', obj: presetConfig.extractionPolicy },
+      { source: 'qualityMode', obj: qualityConfig.extractionPolicy },
+      { source: 'user', obj: options.policies?.extraction },
+    ]),
+    contextPolicy: layerPolicy([
+      { source: 'default', obj: DEFAULT_CONTEXT_POLICY as unknown as Record<string, unknown> },
+      { source: 'preset', obj: presetConfig.contextPolicy },
+      { source: 'qualityMode', obj: qualityConfig.contextPolicy },
+      { source: 'user', obj: options.policies?.context },
+    ]),
+    maintenancePolicy: layerPolicy([
+      { source: 'default', obj: DEFAULT_MAINTENANCE_POLICY as unknown as Record<string, unknown> },
+      { source: 'preset', obj: presetConfig.maintenancePolicy },
+      { source: 'qualityMode', obj: qualityConfig.maintenancePolicy },
+      { source: 'user', obj: options.policies?.maintenance },
+    ]),
+    autoCompact: {
+      value: options.autoCompact ?? presetConfig.autoCompact,
+      source: options.autoCompact !== undefined ? 'user' : 'preset',
+    },
+    crossScopeLevel: {
+      value: options.crossScopeLevel ?? presetConfig.crossScopeLevel,
+      source: options.crossScopeLevel !== undefined ? 'user' : 'preset',
+    },
   };
 }
 

@@ -1,4 +1,5 @@
 import type { MemoryRuntime } from '../core/runtime.js';
+import { ValidationError } from '../contracts/errors.js';
 
 type JsonSchema = {
   type: 'object';
@@ -71,7 +72,7 @@ export function createMemoryMcpAdapter(runtime: MemoryRuntime) {
           assistantOutput: String(args.assistantOutput ?? ''),
         });
       }
-      throw new Error(`Unknown MCP memory tool '${name}'`);
+      throw new ValidationError(`Unknown MCP memory tool '${name}'`);
     },
   };
 }

@@ -9,6 +9,7 @@ import { createLangChainMemoryBridge } from '../integrations/langchain.js';
 import { createMemoryMcpAdapter } from '../integrations/mcp.js';
 import { createOpenAIMemoryTools } from '../integrations/openai-tools.js';
 import { prepareVercelAIInput, wrapVercelAIModel } from '../integrations/vercel-ai.js';
+import { ValidationError } from '../contracts/errors.js';
 import type { StorageAdapter } from '../contracts/storage.js';
 import { makeScope } from './test-helpers.js';
 
@@ -151,6 +152,29 @@ describe('protocol integrations', () => {
     expect(result.responseText).toContain('maintenance window');
     const context = await manager.getContext('maintenance window');
     expect(context.activeTurns.some((turn) => turn.content.includes('maintenance window'))).toBe(true);
+    await manager.close();
+  });
+
+  it('rejects unknown tool names with a typed ValidationError', async () => {
+    const manager = createMemoryManager({
+      adapter,
+      scope: makeScope(),
+      sessionId: 'session-1',
+      summarizer: async () => ({ summary: 'summary', key_entities: [], topic_tags: [] }),
+      autoCompact: false,
+    });
+    const runtime = createMemoryRuntime(manager);
+    const mcp = createMemoryMcpAdapter(runtime);
+    const openai = createOpenAIMemoryTools(runtime);
+    const claude = createClaudeMemoryTools(runtime);
+
+    await expect(mcp.callTool('memory_does_not_exist', {})).rejects.toBeInstanceOf(ValidationError);
+    await expect(openai.invokeTool('memory_does_not_exist', {})).rejects.toBeInstanceOf(
+      ValidationError,
+    );
+    await expect(claude.invokeTool('memory_does_not_exist', {})).rejects.toBeInstanceOf(
+      ValidationError,
+    );
     await manager.close();
   });
 });

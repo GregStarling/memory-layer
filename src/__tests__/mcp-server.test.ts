@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { rmSync } from 'node:fs';
-import { createMcpServerHandler, startMcpServer } from '../server/mcp-server.js';
+import { createMcpServerHandler, startMcpServer, MCP_TOOLS } from '../server/mcp-server.js';
+import { OPERATIONS, CORE_MCP_TOOL_NAMES, ALL_MCP_TOOL_NAMES } from '../server/operations/registry.js';
 import { createSQLiteAdapter } from '../adapters/sqlite/index.js';
 import { createInMemoryAdapter } from '../adapters/memory/index.js';
 import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
@@ -42,7 +43,8 @@ describe('MCP server handler', () => {
   }
 
   it('lists all expected tools', () => {
-    handler = createMcpServerHandler();
+    // The full/admin set (Phase 6.3): every registered tool is advertised.
+    handler = createMcpServerHandler({ adminTools: true });
     expect(handler.tools.length).toBe(62);
     const names = handler.tools.map((t) => t.name);
     expect(names).toContain('memory_store_turn');
@@ -104,6 +106,73 @@ describe('MCP server handler', () => {
     expect(names).toContain('memory_export_bundle');
     expect(names).toContain('memory_import_bundle');
     expect(names).toContain('memory_refresh_documents');
+  });
+
+  it('defaults to the curated core tool set (Phase 6.3, <=25 daily drivers)', () => {
+    handler = createMcpServerHandler();
+    const names = handler.tools.map((t) => t.name);
+    // The default set is small enough for LLM tool selection comfort.
+    expect(handler.tools.length).toBeLessThanOrEqual(25);
+    expect(handler.tools.length).toBe(CORE_MCP_TOOL_NAMES.length);
+    expect(new Set(names)).toEqual(new Set(CORE_MCP_TOOL_NAMES));
+    // Daily drivers are present.
+    for (const expected of [
+      'memory_store_turn',
+      'memory_get_context',
+      'memory_search',
+      'memory_learn_fact',
+      'memory_track_work',
+      'memory_handoff_work_item',
+      'memory_get_profile',
+    ]) {
+      expect(names).toContain(expected);
+    }
+    // Admin / advanced tools are hidden by default.
+    for (const hidden of [
+      'memory_get_context_config',
+      'memory_set_default_context_contract',
+      'memory_run_maintenance',
+      'memory_force_compact',
+      'memory_export_bundle',
+      'memory_set_ontology',
+    ]) {
+      expect(names).not.toContain(hidden);
+    }
+  });
+
+  it('advertises the full set when adminTools is enabled (config flag)', () => {
+    handler = createMcpServerHandler({ adminTools: true });
+    expect(handler.tools.length).toBe(62);
+    const names = handler.tools.map((t) => t.name);
+    expect(names).toContain('memory_get_context_config');
+    expect(names).toContain('memory_run_maintenance');
+  });
+
+  it('advertises the full set when MEMORY_MCP_ADMIN_TOOLS=1 (env gate)', () => {
+    vi.stubEnv('MEMORY_MCP_ADMIN_TOOLS', '1');
+    try {
+      handler = createMcpServerHandler();
+      expect(handler.tools.length).toBe(62);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('registry MCP tool names are in 1:1 parity with the authored tool schemas', () => {
+    // Structural MCP parity (Phase 6.3): the registry owns tool membership;
+    // the authored TOOLS array owns each tool's schema. Neither may drift.
+    const authored = new Set(MCP_TOOLS.map((t) => t.name));
+    const registry = new Set(ALL_MCP_TOOL_NAMES);
+    expect([...registry].filter((n) => !authored.has(n)).sort()).toEqual([]);
+    expect([...authored].filter((n) => !registry.has(n)).sort()).toEqual([]);
+    // Core is a strict subset of the full set and stays <=25.
+    expect(CORE_MCP_TOOL_NAMES.length).toBeLessThanOrEqual(25);
+    for (const core of CORE_MCP_TOOL_NAMES) {
+      expect(ALL_MCP_TOOL_NAMES).toContain(core);
+    }
+    // Every MCP-exposed operation maps to a distinct authored tool.
+    const mcpOps = OPERATIONS.filter((op) => op.mcp);
+    expect(mcpOps.length).toBe(MCP_TOOLS.length);
   });
 
   it('stores and retrieves turns via tool calls', async () => {

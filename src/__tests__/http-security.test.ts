@@ -7,15 +7,10 @@
  *   1.3 — sanitized 500s (no internal text/stack leaks; logged server-side)
  *   1.4 — per-key token-bucket rate limiting
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { startHttpServer, parseApiKeyRegistryEnv, TokenBucketLimiter } from '../server/http-server.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const HTTP_SERVER_SOURCE = resolve(__dirname, '../server/http-server.ts');
+import { OPERATIONS } from '../server/operations/registry.js';
 
 let cleanup: (() => Promise<void>) | null = null;
 afterEach(async () => {
@@ -44,72 +39,27 @@ interface DiscoveredRoute {
 }
 
 /**
- * Discovers every route the server dispatches, by scanning the server source.
- * This is deliberately source-derived rather than hand-listed so that any new
- * route a maintainer adds is automatically swept by the tenant-binding test.
- *
- * Handles both dispatch forms in http-server.ts:
- *   - registered-map / if-chain static routes: `path === '/v1/x' && req.method === 'POST'`
- *   - regex routes: `path.match(/^\/v1\/x\/(\d+)$/)` paired with a `req.method` check
+ * Discovers every route the server dispatches, from the operation registry
+ * (Phase 6.3). The registry is the single structural source of truth for the
+ * transport surface, so any operation a maintainer adds is automatically swept
+ * by the tenant-binding test. Health probes are answered before routing and
+ * are not registry operations, so the sweep never sees them (they are
+ * separately handled by TENANT_EXEMPT).
  */
-function discoverRoutes(): DiscoveredRoute[] {
-  const source = readFileSync(HTTP_SERVER_SOURCE, 'utf-8');
-  const routes = new Map<string, DiscoveredRoute>();
-  const add = (method: string, path: string) => {
-    routes.set(`${method} ${path}`, { method, path });
-  };
-
-  // Form A: registeredRoutes Map entries — ['POST /v1/x', async (...) => {...}]
-  for (const match of source.matchAll(/\['(GET|POST|PUT|DELETE)\s+(\/[^']+)'/g)) {
-    add(match[1], match[2]);
-  }
-
-  // Form B: static if-chain — path === '/v1/x' && req.method === 'POST'
-  for (const match of source.matchAll(
-    /path === '(\/[^']+)' && req\.method === '(GET|POST|PUT|DELETE)'/g,
-  )) {
-    add(match[2], match[1]);
-  }
-
-  // Form C: regex routes. Capture the regex literal and the method(s) checked
-  // against its match variable within the following ~40 lines.
-  const regexRoutePattern =
-    /const (\w+) = path\.match\((\/\^.*?\$\/)\);([\s\S]{0,600}?)(?=const \w+ = path\.match|writeError\(res, 404)/g;
-  for (const match of source.matchAll(regexRoutePattern)) {
-    const varName = match[1];
-    const regexLiteral = match[2];
-    const following = match[3];
-    const concretePath = concretizeRegexPath(regexLiteral);
-    if (!concretePath) continue;
-    for (const methodMatch of following.matchAll(
-      new RegExp(`${varName} && req\\.method === '(GET|POST|PUT|DELETE)'`, 'g'),
-    )) {
-      add(methodMatch[1], concretePath);
-    }
-  }
-
-  return [...routes.values()];
+function concretizeTemplate(path: string): string {
+  return path.replace(/\{([^}]+)\}/g, (_full, inner: string) => {
+    const [, hint] = inner.split(':');
+    if (hint === 'int') return '1';
+    if (hint === 'slug') return 'knowledge';
+    return 'sess';
+  });
 }
 
-/**
- * Turns a route regex literal into a concrete path by replacing each capture
- * group with a literal that satisfies it. Returns null if it can't.
- */
-function concretizeRegexPath(regexLiteral: string): string | null {
-  // Strip the leading `/^` and trailing `$/`.
-  let body = regexLiteral.replace(/^\/\^/, '').replace(/\$\/$/, '');
-  // Unescape `\/` → `/`.
-  body = body.replace(/\\\//g, '/');
-  // Replace known capture groups with concrete values. Patterns are built from
-  // strings to avoid regex-literal escaping pitfalls with char classes.
-  body = body
-    .replace(new RegExp('\\(\\\\d\\+\\)', 'g'), '1') // (\d+) numeric id
-    .replace(new RegExp('\\(\\[a-z_\\]\\+\\)', 'g'), 'knowledge') // ([a-z_]+) kind
-    .replace(new RegExp('\\(accept\\|reject\\|cancel\\)', 'g'), 'accept') // action
-    .replace(new RegExp('\\(\\[\\^/\\]\\+\\)', 'g'), 'sess'); // ([^/]+) session/name
-  // If any regex metacharacters remain, we failed to concretize.
-  if (new RegExp('[()\\[\\]\\\\^$|+*?]').test(body)) return null;
-  return body;
+function discoverRoutes(): DiscoveredRoute[] {
+  return OPERATIONS.map((op) => ({
+    method: op.http.method,
+    path: concretizeTemplate(op.http.path),
+  }));
 }
 
 const TENANT_A = {
@@ -500,12 +450,16 @@ describe('1.x SSE error path is sanitized', () => {
       cleanup = instance.close;
       const base = 'http://localhost:13980';
       // Force streamChanges to throw after the stream has already opened (200).
+      // The registry-driven handler dispatches through the temporal namespace
+      // (Phase 6.3), so patch the namespace methods, not the deprecated shims.
       const mgr = instance.manager as unknown as {
-        streamChanges: (...a: unknown[]) => AsyncIterable<unknown>;
-        resolveChangeStreamCursor: (...a: unknown[]) => Promise<unknown>;
+        temporal: {
+          streamChanges: (...a: unknown[]) => AsyncIterable<unknown>;
+          resolveChangeStreamCursor: (...a: unknown[]) => Promise<unknown>;
+        };
       };
-      mgr.resolveChangeStreamCursor = async () => null;
-      mgr.streamChanges = () =>
+      mgr.temporal.resolveChangeStreamCursor = async () => null;
+      mgr.temporal.streamChanges = () =>
         (async function* () {
           throw new Error(`${secret} at /internal/driver.js:99:1`);
           // eslint-disable-next-line no-unreachable

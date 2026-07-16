@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { createMemory } from '../core/quick.js';
+import { createMemory } from '../composition/quick.js';
 import { wrapWithMemory } from '../integrations/middleware.js';
 
 describe('memory middleware', () => {

@@ -1,5 +1,6 @@
 import type { MemoryManager } from '../core/manager.js';
 import type { MemoryRuntime } from '../core/runtime.js';
+import { ValidationError } from '../contracts/errors.js';
 import type { EpisodeDetailLevel, TimeRange } from '../contracts/types.js';
 import type { CognitiveMemoryType } from '../contracts/cognitive.js';
 
@@ -260,7 +261,7 @@ export function createOpenAIMemoryTools(runtime: MemoryRuntime, manager?: Memory
         }
       }
 
-      throw new Error(`Unknown OpenAI memory tool '${name}'`);
+      throw new ValidationError(`Unknown OpenAI memory tool '${name}'`);
     },
   };
 }

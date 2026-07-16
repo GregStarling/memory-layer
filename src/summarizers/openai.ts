@@ -1,3 +1,4 @@
+import { ProviderUnavailableError } from '../contracts/errors.js';
 import type { Summarizer } from '../core/orchestrator.js';
 import { createClientSummarizer, type StructuredGenerationClient } from './client.js';
 
@@ -21,8 +22,11 @@ export function createOpenAISummarizer(
     let sdkModule: any;
     try {
       sdkModule = await import(moduleName);
-    } catch {
-      throw new Error("memory-layer: install 'openai' to use createOpenAISummarizer()");
+    } catch (error) {
+      throw new ProviderUnavailableError(
+        "memory-layer: install 'openai' to use createOpenAISummarizer()",
+        { cause: error },
+      );
     }
 
     const OpenAI = sdkModule.default ?? sdkModule.OpenAI ?? sdkModule;

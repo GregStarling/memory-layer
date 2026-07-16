@@ -110,7 +110,8 @@ describe('stable snapshots', () => {
   });
 
   it('keeps MCP tool names stable', async () => {
-    const handler = createMcpServerHandler();
+    // Full/admin set (Phase 6.3) so the snapshot pins the complete tool surface.
+    const handler = createMcpServerHandler({ adminTools: true });
     expect(handler.tools.map((tool) => tool.name)).toMatchInlineSnapshot(`
       [
         "memory_store_turn",

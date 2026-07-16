@@ -12,7 +12,7 @@ import type {
   Turn,
   WorkingMemory,
 } from '../contracts/types.js';
-import type { StructuredGenerationClient } from '../summarizers/client.js';
+import type { StructuredGenerationClient } from '../contracts/generation-client.js';
 import {
   EPISODIC_RECAP_SYSTEM_PROMPT,
   REFLECT_SYNTHESIS_SYSTEM_PROMPT,

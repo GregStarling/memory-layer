@@ -1,7 +1,7 @@
 import {
   createMemoryWithAsyncAdapter,
   type CreateMemoryOptions,
-} from '../core/quick.js';
+} from '../composition/quick.js';
 import type { MemoryManager } from '../core/manager.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
 import type { EmbeddingAdapter } from '../contracts/embedding.js';

@@ -1,6 +1,6 @@
 import { normalizeScope, type MemoryScope } from '../contracts/identity.js';
 import type { AsyncStorageAdapter } from '../contracts/async-storage.js';
-import { getNativeSyncAdapter } from '../adapters/sync-to-async.js';
+import { getNativeSyncAdapter } from '../contracts/native-sync.js';
 import {
   ConflictError,
   ResourceNotFoundError,
@@ -14,7 +14,7 @@ import type {
   Turn,
   WorkingMemory,
 } from '../contracts/types.js';
-import type { StructuredGenerationClient } from '../summarizers/client.js';
+import type { StructuredGenerationClient } from '../contracts/generation-client.js';
 import { formatTurnsForSummarization } from '../summarizers/prompts.js';
 
 export interface PlaybookDeps {

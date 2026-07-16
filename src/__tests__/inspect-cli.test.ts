@@ -4,7 +4,7 @@ import path from 'path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { createMemory } from '../core/quick.js';
+import { createMemory } from '../composition/quick.js';
 import { runInspectCommand } from '../cli/inspect.js';
 
 describe('inspect CLI helpers', () => {

@@ -8,6 +8,7 @@ import {
   SUMMARIZATION_PROMPT_VERSION,
   SUMMARIZATION_SYSTEM_PROMPT,
 } from '../summarizers/prompts.js';
+import { ProviderUnavailableError } from '../contracts/errors.js';
 import type { Turn } from '../contracts/types.js';
 
 function makeTurn(content: string): Turn {
@@ -81,13 +82,29 @@ describe('summarizer helpers', () => {
     });
   });
 
-  it('throws a clear error when anthropic sdk is missing', async () => {
+  it('throws a typed ProviderUnavailableError when anthropic sdk is missing', async () => {
+    await expect(createClaudeSummarizer()([makeTurn('hello')])).rejects.toBeInstanceOf(
+      ProviderUnavailableError,
+    );
     await expect(createClaudeSummarizer()([makeTurn('hello')])).rejects.toThrow(
-      "@anthropic-ai/sdk",
+      '@anthropic-ai/sdk',
     );
   });
 
-  it('throws a clear error when openai sdk is missing', async () => {
+  it('throws a typed ProviderUnavailableError when openai sdk is missing', async () => {
+    await expect(createOpenAISummarizer()([makeTurn('hello')])).rejects.toBeInstanceOf(
+      ProviderUnavailableError,
+    );
     await expect(createOpenAISummarizer()([makeTurn('hello')])).rejects.toThrow('openai');
+  });
+
+  it('surfaces malformed provider responses as ProviderUnavailableError', () => {
+    expect(() => parseSummarizerResponse('not json at all')).toThrow(ProviderUnavailableError);
+    expect(() => parseSummarizerResponse('{"key_entities":[],"topic_tags":[]}')).toThrow(
+      ProviderUnavailableError,
+    );
+    expect(() =>
+      parseSummarizerResponse('{"summary":"ok","key_entities":"bad","topic_tags":[]}'),
+    ).toThrow(ProviderUnavailableError);
   });
 });

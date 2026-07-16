@@ -15,6 +15,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { startHttpServer } from '../server/http-server.js';
 import { createInMemoryAdapter } from '../adapters/memory/index.js';
 import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
+import { OPERATIONS } from '../server/operations/registry.js';
+import { normalizeOperationPath } from '../server/operations/types.js';
 import {
   assertMatchesOpenApi,
   loadOpenApi,
@@ -22,59 +24,47 @@ import {
 } from './helpers/openapi-validator.js';
 
 /**
- * Collapse a path template's parameters (`{id}`, `{playbookId}`, a route
- * regex's `(\d+)`) to a single `{}` placeholder so a spec path and its
- * implementing route compare equal regardless of the param's name.
+ * Collapse a path template's parameters (`{id}`, `{playbookId}`, `{id:int}`)
+ * to a single `{}` placeholder so a spec path and its implementing registry
+ * operation compare equal regardless of the param's name or matcher hint.
  */
 function normalizePathParams(p: string): string {
   return p.replace(/\{[^}]+\}/g, '{}');
 }
 
 /**
- * Enumerate every HTTP route the server actually serves by parsing
- * `http-server.ts`. The server uses two dispatch styles — a `registeredRoutes`
- * Map keyed by `'METHOD /path'`, and an if/regex chain — so we scan for all
- * three forms and normalize path params to `{}`. Returns the set of concrete
- * path templates (method-agnostic; the parity test is about path coverage).
+ * Enumerate every HTTP route the server serves — now derived structurally from
+ * the operation registry (Phase 6.3), which drives HTTP dispatch by
+ * construction. Returns the set of normalized path templates (method-agnostic;
+ * this parity test is about path coverage — a per-method parity test lives
+ * below). `/healthz` and `/readyz` are answered before routing and are not
+ * registry operations, so they are absent here by design and allow-listed in
+ * the parity assertions.
  */
 function discoverRoutePaths(): Set<string> {
-  const source = readFileSync(
-    fileURLToPath(new URL('../server/http-server.ts', import.meta.url)),
-    'utf8',
+  return new Set(OPERATIONS.map((op) => normalizeOperationPath(op.http.path)));
+}
+
+/** Registry operations as normalized `METHOD /path` keys (per-method parity). */
+function registryMethodPaths(): Set<string> {
+  return new Set(
+    OPERATIONS.map((op) => `${op.http.method} ${normalizeOperationPath(op.http.path)}`),
   );
-  const paths = new Set<string>();
+}
 
-  // Form A: registeredRoutes Map entries — ['GET /v1/x', async (...) => {...}]
-  for (const m of source.matchAll(/\[\s*'(?:GET|POST|PUT|DELETE|PATCH) (\/[^']+)'/g)) {
-    paths.add(normalizePathParams(m[1]));
+/** Spec operations as normalized `METHOD /path` keys, read from openapi.yaml. */
+function specMethodPaths(): Set<string> {
+  const doc = loadOpenApi() as { paths?: Record<string, Record<string, unknown>> };
+  const httpMethods = new Set(['get', 'post', 'put', 'delete', 'patch']);
+  const out = new Set<string>();
+  for (const [key, item] of Object.entries(doc.paths ?? {})) {
+    for (const method of Object.keys(item ?? {})) {
+      if (httpMethods.has(method.toLowerCase())) {
+        out.add(`${method.toUpperCase()} ${normalizePathParams(key)}`);
+      }
+    }
   }
-  // Form B: static if-chain — path === '/v1/x'
-  for (const m of source.matchAll(/path === '(\/[^']+)'/g)) {
-    paths.add(normalizePathParams(m[1]));
-  }
-  // Form C: regex routes — path.match(/^\/v1\/...$/). Convert each regex to one
-  // or more path templates: literal alternations like (accept|reject|cancel)
-  // expand into a branch per alternative (they are distinct spec paths); any
-  // other capture group (\d+, [^/]+, [a-z_]+) becomes a `{}` param.
-  for (const m of source.matchAll(/path\.match\(\/\^(.+?)\$\//g)) {
-    let body = m[1];
-    const alternations: string[][] = [];
-    body = body.replace(/\(([a-z_]+(?:\|[a-z_]+)+)\)/g, (_full, group: string) => {
-      alternations.push(group.split('|'));
-      return ` A${alternations.length - 1} `;
-    });
-    body = body.replace(/\([^)]*\)/g, '{}');
-    body = body.replace(/\\\//g, '/');
-    let combos = [body];
-    alternations.forEach((branches, i) => {
-      const next: string[] = [];
-      for (const c of combos) for (const b of branches) next.push(c.replace(` A${i} `, b));
-      combos = next;
-    });
-    for (const c of combos) paths.add(normalizePathParams(c.startsWith('/') ? c : `/${c}`));
-  }
-
-  return paths;
+  return out;
 }
 
 function specPaths(): Set<string> {
@@ -552,6 +542,22 @@ describe('OpenAPI path-set parity (spec ⇆ routes)', () => {
 
   it('the route scanner finds a substantial surface (guards against matching nothing)', () => {
     expect(discoverRoutePaths().size).toBeGreaterThan(60);
+  });
+
+  it('every registry operation (method + path) is documented in the spec', () => {
+    const spec = specMethodPaths();
+    const missing = [...registryMethodPaths()].filter((mp) => !spec.has(mp)).sort();
+    expect(missing).toEqual([]);
+  });
+
+  it('every documented spec operation (method + path) has a registry op', () => {
+    // /healthz and /readyz are answered before routing (no registry op).
+    const specOnlyAllowlist = new Set(['GET /healthz', 'GET /readyz']);
+    const registry = registryMethodPaths();
+    const missing = [...specMethodPaths()]
+      .filter((mp) => !registry.has(mp) && !specOnlyAllowlist.has(mp))
+      .sort();
+    expect(missing).toEqual([]);
   });
 
   it('the YAML parser sees every raw path key (guards against silent parser drops)', () => {

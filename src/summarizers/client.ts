@@ -8,17 +8,14 @@ import {
   SUMMARIZATION_SYSTEM_PROMPT,
 } from './prompts.js';
 
-export interface StructuredGenerationRequest {
-  systemPrompt: string;
-  userPrompt: string;
-  model?: string;
-  maxTokens?: number;
-  expectedFormat: 'object' | 'array';
-}
-
-export interface StructuredGenerationClient {
-  generate(request: StructuredGenerationRequest): Promise<string>;
-}
+// The provider-client contracts now live in `contracts/`; re-exported here so
+// existing `summarizers/client.js` importers (incl. the root barrel) are
+// unaffected.
+export type {
+  StructuredGenerationRequest,
+  StructuredGenerationClient,
+} from '../contracts/generation-client.js';
+import type { StructuredGenerationClient } from '../contracts/generation-client.js';
 
 export function createClientSummarizer(
   client: StructuredGenerationClient,

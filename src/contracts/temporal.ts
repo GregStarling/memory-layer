@@ -78,7 +78,8 @@ import type { SessionState } from './session-state.js';
  * newly-added event types replay under code that predates them. Never remove or
  * repurpose an existing `MemoryEventType` string.
  */
-export type TemporalId = string;
+export type { TemporalId } from './temporal-id.js';
+import type { TemporalId } from './temporal-id.js';
 export type TemporalIdInput = string | number | bigint;
 
 export function normalizeTemporalId(value: TemporalIdInput): TemporalId {

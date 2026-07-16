@@ -51,7 +51,7 @@ import {
 } from './extractor.js';
 import { emitMemoryEvent } from './telemetry.js';
 import { assessCandidateTrust, buildKnowledgeConflict } from './trust.js';
-import { getNativeSyncAdapter } from '../adapters/sync-to-async.js';
+import { getNativeSyncAdapter } from '../contracts/native-sync.js';
 import { autoDetectAssociations } from './associations.js';
 import type { AliasMap } from '../contracts/aliases.js';
 import { resolveAliases } from './aliases.js';

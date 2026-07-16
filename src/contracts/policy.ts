@@ -86,7 +86,7 @@ export interface ExtractionPolicy {
  * Explicit "no token budget" sentinel. Callers opt into unbounded context by
  * setting `tokenBudget: UNLIMITED_TOKEN_BUDGET` (equivalently `Number.MAX_SAFE_INTEGER`).
  * This value is the *explicit* unlimited representation only — it is never the
- * silent product default. The workload presets (see src/core/presets.ts) each
+ * silent product default. The workload presets (see src/composition/presets.ts) each
  * carry a real finite default budget, so getContext() trims by default and only
  * runs unbounded when a caller asks for it.
  */

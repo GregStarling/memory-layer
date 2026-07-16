@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { createStreamCollector, processStreamingTurn } from '../core/streaming.js';
-import { createMemory } from '../core/quick.js';
+import { createMemory } from '../composition/quick.js';
 import type { MemoryManager } from '../core/manager.js';
 
 describe('streaming support', () => {

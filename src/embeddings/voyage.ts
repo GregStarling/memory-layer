@@ -1,4 +1,5 @@
 import type { EmbeddingGenerator, EmbeddingVector } from '../contracts/embedding.js';
+import { ProviderUnavailableError } from '../contracts/errors.js';
 import {
   batchedGenerate,
   createCachedEmbeddingGenerator,
@@ -42,7 +43,7 @@ export function createVoyageEmbeddingGenerator(
   function getApiKey(): string {
     const key = options?.apiKey ?? process.env.VOYAGE_API_KEY;
     if (!key) {
-      throw new Error(
+      throw new ProviderUnavailableError(
         'memory-layer: Voyage embedding generator requires an API key. ' +
           'Set VOYAGE_API_KEY env var or pass apiKey option.',
       );
@@ -68,8 +69,9 @@ export function createVoyageEmbeddingGenerator(
 
     if (!response.ok) {
       const body = await response.text().catch(() => '');
-      throw new Error(
+      throw new ProviderUnavailableError(
         `memory-layer: Voyage API error ${response.status}: ${body}`,
+        { details: { status: response.status } },
       );
     }
 

@@ -2,6 +2,25 @@
 
 All notable changes to `memory-layer` are documented here.
 
+## 5.0.0 - 2026-07-15
+
+Architecture consolidation. The public behavior of every existing API is preserved this major — all flat `MemoryManager` methods remain as deprecated delegating shims — but the default MCP surface and two error/status details change (below).
+
+### Breaking
+
+- MCP servers now advertise a curated core set of 24 tools by default (previously 62). Every tool remains callable and the full set is restored with the `--admin-tools` CLI flag or `MEMORY_MCP_ADMIN_TOOLS=1`.
+- The redundant `estimateTokensLocal` root export is removed; use `estimateTokens`.
+- Provider failures (summarizer/embedding SDK errors, missing keys) now surface as typed `ProviderUnavailableError` (HTTP 503 where previously a bare 500), and unknown tool names in the integration dispatchers raise `ValidationError` (400). Error messages are unchanged.
+
+### Changed
+
+- `MemoryManager` is organized into capability namespaces — `coordination`, `governance`, `temporal`, `playbooks`, `curation`, `graph` — with 15 daily-driver methods at the top level. All 93 flat methods remain as `@deprecated` delegating shims scheduled for removal in 6.0.0.
+- HTTP dispatch and MCP tool membership are driven by a single operation registry (87 operations): adding an operation is one registry entry, and registry ⇆ OpenAPI parity is enforced structurally in tests.
+- `AsyncStorageAdapter` is now derived from `StorageAdapter` via a mapped type, and the sync-to-async wrapper is a mechanical loop — adding a storage method in one place is a compile error until every adapter implements it (~460 lines of hand-maintained duplication removed).
+- Composition wiring (`createMemory`, provider managers, presets) moved to `src/composition/`; core imports contracts only, enforced by a dependency-cruiser boundary check in CI. Root import paths are unchanged.
+- The Python client's request methods are generated from the operation registry (sync + async from one template, replacing ~1,400 duplicated lines); CI fails if the checked-in client drifts from the registry. Python client version now tracks the npm package (5.0.0).
+- Root exports are organized into documented tiers (see `docs/API_TIERS.md`); `qualityTier` is deprecated in favor of `qualityMode`; new `resolveEffectiveConfig()` reports the merged config with per-field provenance.
+
 ## 4.5.0 - 2026-07-15
 
 ### Added

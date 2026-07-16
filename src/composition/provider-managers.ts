@@ -12,17 +12,17 @@ import type {
   ContextInvariant,
   ContextEscalationPolicy,
 } from '../contracts/context-contract.js';
-import type { MemoryEventEmitter } from './events.js';
+import type { MemoryEventEmitter } from '../core/events.js';
 import {
   createSQLiteAdapter,
   createSQLiteAdapterWithEmbeddings,
 } from '../adapters/sqlite/index.js';
-import { createSessionId } from './tokens.js';
+import { createSessionId } from '../core/tokens.js';
 import {
   createMemoryManager,
   type MemoryManager,
   type MemoryManagerConfig,
-} from './manager.js';
+} from '../core/manager.js';
 import {
   resolveMemoryManagerPreset,
   type MemoryManagerPreset,

@@ -1,3 +1,4 @@
+import { ProviderUnavailableError } from '../contracts/errors.js';
 import type { Turn } from '../contracts/types.js';
 import type { ExtractedFact } from '../core/extractor.js';
 import type { SummarizerOutput } from '../core/orchestrator.js';
@@ -110,27 +111,30 @@ function extractJsonPayload(text: string): string {
   if (arrayStart !== -1 && arrayEnd > arrayStart) {
     return text.slice(arrayStart, arrayEnd + 1);
   }
-  throw new Error('Memory summarizer: response did not contain JSON');
+  throw new ProviderUnavailableError('Memory summarizer: response did not contain JSON');
 }
 
 function parseJson<T>(text: string): T {
   try {
     return JSON.parse(extractJsonPayload(text)) as T;
   } catch (error) {
-    throw new Error(`Memory summarizer: failed to parse JSON response (${String(error)})`);
+    throw new ProviderUnavailableError(
+      `Memory summarizer: failed to parse JSON response (${String(error)})`,
+      { cause: error },
+    );
   }
 }
 
 export function parseSummarizerResponse(text: string): SummarizerOutput {
   const payload = parseJson<Partial<SummarizerOutput>>(text);
   if (typeof payload.summary !== 'string') {
-    throw new Error('Memory summarizer: missing summary');
+    throw new ProviderUnavailableError('Memory summarizer: missing summary');
   }
   if (!Array.isArray(payload.key_entities) || !payload.key_entities.every((item) => typeof item === 'string')) {
-    throw new Error('Memory summarizer: invalid key_entities');
+    throw new ProviderUnavailableError('Memory summarizer: invalid key_entities');
   }
   if (!Array.isArray(payload.topic_tags) || !payload.topic_tags.every((item) => typeof item === 'string')) {
-    throw new Error('Memory summarizer: invalid topic_tags');
+    throw new ProviderUnavailableError('Memory summarizer: invalid topic_tags');
   }
   return {
     summary: payload.summary,
@@ -143,19 +147,19 @@ export function parseExtractionResponse(text: string): ExtractedFact[] {
   const parsed = parseJson<Array<Partial<ExtractedFact>> | { items?: Array<Partial<ExtractedFact>>; facts?: Array<Partial<ExtractedFact>> }>(text);
   const payload = Array.isArray(parsed) ? parsed : parsed.items ?? parsed.facts ?? [];
   if (!Array.isArray(payload)) {
-    throw new Error('Memory extractor: response must be a JSON array');
+    throw new ProviderUnavailableError('Memory extractor: response must be a JSON array');
   }
   return payload
     .filter((item): item is Partial<ExtractedFact> => Boolean(item))
     .map((item) => {
       if (typeof item.fact !== 'string' || typeof item.factType !== 'string') {
-        throw new Error('Memory extractor: invalid extracted fact');
+        throw new ProviderUnavailableError('Memory extractor: invalid extracted fact');
       }
       if (!['preference', 'entity', 'decision', 'constraint', 'reference'].includes(item.factType)) {
-        throw new Error(`Memory extractor: invalid factType '${item.factType}'`);
+        throw new ProviderUnavailableError(`Memory extractor: invalid factType '${item.factType}'`);
       }
       if (item.confidence && !['high', 'medium'].includes(item.confidence)) {
-        throw new Error(`Memory extractor: invalid confidence '${item.confidence}'`);
+        throw new ProviderUnavailableError(`Memory extractor: invalid confidence '${item.confidence}'`);
       }
       return {
         fact: item.fact,

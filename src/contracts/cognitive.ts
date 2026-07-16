@@ -52,6 +52,23 @@ const knowledgeClassToCognitive: Record<KnowledgeClass, CognitiveMemoryType> = {
   procedure: 'procedural',
 };
 
+/**
+ * Reverse view: which knowledge classes back each cognitive type.
+ *
+ * Only `semantic` and `procedural` are backed by the canonical
+ * {@link KnowledgeClass} model, so only those two carry class lists.
+ * `episodic` and `working` are deliberately empty — they are NOT sourced
+ * from knowledge classes at all:
+ *   - `episodic` is backed by raw conversational turns (see
+ *     `searchCognitive` in `core/cognitive.ts`, which queries `searchTurns`).
+ *   - `working` is backed by working-memory summaries (`getActiveWorkingMemory`).
+ * The empty arrays are load-bearing, not dead: `mapCognitiveToKnowledgeClasses`
+ * is total over `CognitiveMemoryType` and must return `[]` for these two to
+ * signal "no knowledge class maps here; resolve from the non-knowledge source."
+ * Note the intentional asymmetry with `knowledgeClassToCognitive`, where the
+ * `episodic_fact` knowledge class maps to `semantic` (it is a durable fact
+ * about an episode, distinct from the raw-turn `episodic` cognitive view).
+ */
 const cognitiveToKnowledgeClasses: Record<CognitiveMemoryType, KnowledgeClass[]> = {
   episodic: [],
   semantic: ['identity', 'preference', 'constraint', 'project_fact', 'episodic_fact', 'strategy', 'anti_pattern'],

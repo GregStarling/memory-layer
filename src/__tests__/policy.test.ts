@@ -4,7 +4,7 @@ import { createSQLiteAdapter } from '../adapters/sqlite/index.js';
 import { wrapSyncAdapter } from '../adapters/sync-to-async.js';
 import { buildMemoryContext } from '../core/context.js';
 import { assessContext } from '../core/monitor.js';
-import { MEMORY_MANAGER_PRESETS, resolveMemoryManagerPreset } from '../core/presets.js';
+import { MEMORY_MANAGER_PRESETS, resolveMemoryManagerPreset } from '../composition/presets.js';
 import { rankKnowledge } from '../core/retrieval.js';
 import {
   DEFAULT_CONTEXT_POLICY,

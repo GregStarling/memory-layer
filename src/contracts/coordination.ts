@@ -1,9 +1,17 @@
 import type { NormalizedMemoryScope } from './identity.js';
-import type { TemporalId } from './temporal.js';
+import type { TemporalId } from './temporal-id.js';
 import type { WorkItem } from './types.js';
+import {
+  MEMORY_VISIBILITY_CLASSES,
+  type MemoryVisibilityClass,
+} from './visibility-class.js';
+
+// Re-exported from the leaf `visibility-class` module so existing
+// `coordination.js` importers keep working; the definition moved there to break
+// the `types` ⇄ `coordination` type-only cycle.
+export { MEMORY_VISIBILITY_CLASSES, type MemoryVisibilityClass };
 
 export type ActorKind = 'agent' | 'human' | 'system' | 'service';
-export type MemoryVisibilityClass = 'private' | 'shared_collaboration' | 'workspace' | 'tenant';
 export type ContextViewPolicy =
   | 'local_only'
   | 'local_plus_shared_collaboration'
@@ -13,12 +21,6 @@ export type WorkClaimStatus = 'active' | 'released' | 'expired';
 export type HandoffStatus = 'pending' | 'accepted' | 'rejected' | 'canceled' | 'expired';
 
 export const ACTOR_KINDS: readonly ActorKind[] = ['agent', 'human', 'system', 'service'];
-export const MEMORY_VISIBILITY_CLASSES: readonly MemoryVisibilityClass[] = [
-  'private',
-  'shared_collaboration',
-  'workspace',
-  'tenant',
-];
 export const CONTEXT_VIEW_POLICIES: readonly ContextViewPolicy[] = [
   'local_only',
   'local_plus_shared_collaboration',

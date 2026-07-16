@@ -31,6 +31,7 @@ Options:
   --host <host>        HTTP host (default: 127.0.0.1)
   --api-key <key>      Bearer auth key for HTTP requests
   --admin-key <key>    Admin key for compaction and maintenance endpoints
+  --admin-tools        Advertise the full MCP tool set (default: core set only)
   --body-limit <n>     Maximum HTTP request body bytes (default: 1048576)
   --help               Show this help message
   --tenant <id>        Explicit tenant for inspect mode
@@ -57,6 +58,7 @@ Environment variables:
   MEMORY_CROSS_SCOPE_LEVEL Default hosted cross-scope level
   MEMORY_API_KEY       API key for HTTP bearer auth
   MEMORY_ADMIN_API_KEY Admin key for privileged endpoints
+  MEMORY_MCP_ADMIN_TOOLS  Set to 1 to advertise the full MCP tool set
   MEMORY_TRANSPORT     Transport type (mcp|http|both)
   MEMORY_HOST          HTTP host
   MEMORY_PORT          HTTP port (default: 3100)
@@ -92,6 +94,9 @@ const config = {
   adminApiKey: getArg('admin-key') ?? process.env.MEMORY_ADMIN_API_KEY ?? undefined,
   host: getArg('host') ?? process.env.MEMORY_HOST ?? '127.0.0.1',
   bodyLimitBytes: Number(getArg('body-limit') ?? process.env.MEMORY_BODY_LIMIT ?? 1048576),
+  // Phase 6.3: advertise the full/admin MCP tool set. Default is the curated
+  // core set (<=25 daily drivers) to stay inside LLM tool-selection comfort.
+  adminTools: args.includes('--admin-tools') || process.env.MEMORY_MCP_ADMIN_TOOLS === '1',
 };
 
 if (config.extractor === 'none') {

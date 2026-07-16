@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { createMemory } from '../core/quick.js';
+import { createMemory } from '../composition/quick.js';
 
 async function buildExtractedMemory(options: {
   qualityMode?: 'fast_adoption' | 'balanced_memory' | 'high_fidelity_memory';

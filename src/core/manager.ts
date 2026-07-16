@@ -134,7 +134,7 @@ import type {
   TimelineResult,
 } from '../contracts/temporal.js';
 import { compareTemporalIds, normalizeTemporalId } from '../contracts/temporal.js';
-import type { StructuredGenerationClient } from '../summarizers/client.js';
+import type { StructuredGenerationClient } from '../contracts/generation-client.js';
 import { searchEpisodes, summarizeEpisode, reflect } from './episodic.js';
 import { searchCognitive } from './cognitive.js';
 import { traverseAssociations, type AssociationGraph } from './associations.js';
@@ -178,7 +178,7 @@ import type { CoreMemoryOptions, CoreMemoryBundle } from '../contracts/core-memo
 import type { AliasCandidate } from '../contracts/aliases.js';
 import type { BundleExportOptions, BundleImportOptions, MemoryBundle } from '../contracts/bundles.js';
 import type { DiscoverAliasCandidatesOptions } from './aliases.js';
-import { getNativeSyncAdapter } from '../adapters/sync-to-async.js';
+import { getNativeSyncAdapter } from '../contracts/native-sync.js';
 import {
   parseAliases,
   parseOntology,
@@ -186,80 +186,67 @@ import {
   serializeAliases,
   serializeOntology,
 } from './scope-config.js';
+import type { MemoryManagerConfig } from './manager-config.js';
+import {
+  resolveAdapter,
+  mergeContextInvariants,
+  manualKnowledgeClassForFactType,
+} from './manager-support.js';
+import type {
+  ContextQueryOptions,
+  ContextExpansionOptions,
+  KnowledgeChangeRecord,
+  KnowledgeChangeResult,
+} from './manager-types.js';
+import type { CapabilityContext } from './capabilities/context.js';
+import {
+  createCoordinationCapability,
+  type CoordinationCapability,
+} from './capabilities/coordination.js';
+import {
+  createGovernanceCapability,
+  type GovernanceCapability,
+} from './capabilities/governance.js';
+import { createTemporalCapability, type TemporalCapability } from './capabilities/temporal.js';
+import { createPlaybooksCapability, type PlaybooksCapability } from './capabilities/playbooks.js';
+import { createCurationCapability, type CurationCapability } from './capabilities/curation.js';
+import { createGraphCapability, type GraphCapability } from './capabilities/graph.js';
 
-export interface MemoryManagerConfig {
-  /** Synchronous storage adapter (SQLite, in-memory). Mutually exclusive with asyncAdapter. */
-  adapter?: StorageAdapter;
-  /** Async storage adapter (PostgreSQL, remote). Mutually exclusive with adapter. */
-  asyncAdapter?: AsyncStorageAdapter;
-  scope: MemoryScope;
-  sessionId: string;
-  summarizer: Summarizer;
-  extractor?: Extractor;
-  embeddingAdapter?: EmbeddingAdapter;
-  embeddingGenerator?: EmbeddingGenerator;
-  /**
-   * Identifier of the active embedding model (Phase 2.4). Stored alongside each
-   * vector so mismatched vectors are excluded from similarity search in the
-   * storage layer before any distance comparison. Defaults to `'unknown'`.
-   */
-  embeddingModel?: string;
-  logger?: Logger;
-  onEvent?: EventHook;
-  eventEmitter?: MemoryEventEmitter;
-  monitorPolicy?: MonitorPolicy;
-  extractionPolicy?: ExtractionPolicy;
-  contextPolicy?: ContextPolicy;
-  maintenancePolicy?: MaintenancePolicy;
-  crossScopeLevel?: ScopeLevel;
-  contextContract?: ContextContract;
-  contextContracts?: Record<string, ContextContract>;
-  invariants?: ContextInvariant[];
-  escalationPolicy?: ContextEscalationPolicy;
-  tokenEstimator?: TokenEstimator;
-  autoCompact?: boolean;
-  autoExtract?: boolean;
-  failurePolicy?: {
-    summarizer?: 'throw' | 'retry_once' | 'log_and_continue';
-    extractor?: 'throw' | 'retry_once' | 'log_and_continue' | 'disable_auto_extract';
-  };
-  circuitBreaker?: {
-    summarizer?: CircuitBreakerOptions;
-    extractor?: CircuitBreakerOptions;
-    embeddings?: CircuitBreakerOptions;
-  };
-  redactText?: (input: { kind: 'turn' | 'fact' | 'work_item'; text: string }) => string;
-  structuredClient?: StructuredGenerationClient;
-  closeAdapter?: boolean;
-  aliasMap?: AliasMap;
-  ontology?: OntologyConfig;
+// Re-exported for barrel stability: these types moved to neutral leaf modules
+// (Phase 6.2) so the capability namespaces can import them without a cycle.
+export type { MemoryManagerConfig } from './manager-config.js';
+export type {
+  ContextQueryOptions,
+  ContextExpansionOptions,
+  KnowledgeChangeRecord,
+  KnowledgeChangeResult,
+} from './manager-types.js';
+export type {
+  CoordinationCapability,
+  GovernanceCapability,
+  TemporalCapability,
+  PlaybooksCapability,
+  CurationCapability,
+  GraphCapability,
+};
+
+export interface MemoryManagerNamespaces {
+  /** Multi-agent coordination: work items, leases/claims, and handoffs. */
+  coordination: CoordinationCapability;
+  /** Context governance: contracts, invariants, and the escalation policy. */
+  governance: GovernanceCapability;
+  /** Temporal reads: point-in-time state, timeline, diffs, change feeds, snapshots. */
+  temporal: TemporalCapability;
+  /** Reusable procedure playbooks. */
+  playbooks: PlaybooksCapability;
+  /** Knowledge curation: reverification, reflection, documents, bundles, aliases/ontology. */
+  curation: CurationCapability;
+  /** Associations, graph traversal, graph reports, and discovery. */
+  graph: GraphCapability;
 }
 
-export interface ContextQueryOptions {
-  view?: ContextViewPolicy;
-  viewer?: ActorRef;
-  includeCoordinationState?: boolean;
-  contract?: ContextContractReference;
-  invariants?: ContextInvariant[];
-}
-
-export interface ContextExpansionOptions {
-  currentContract?: ContextContractReference;
-}
-
-export interface KnowledgeChangeRecord {
-  event_id: TemporalId;
-  event_type: MemoryEventRecord['event_type'];
-  created_at: number;
-  knowledge: KnowledgeMemory;
-}
-
-export interface KnowledgeChangeResult {
-  changes: KnowledgeChangeRecord[];
-  nextCursor: TemporalId;
-}
-
-export interface MemoryManager {
+export interface MemoryManager extends MemoryManagerNamespaces {
+  // ---- Top-level daily drivers (the blessed flat API; NOT deprecated) ----
   processTurn(role: TurnRole, content: string, actor?: string): Promise<Turn>;
   processExchange(
     userContent: string,
@@ -270,83 +257,10 @@ export interface MemoryManager {
     relevanceQuery?: string,
     options?: ContextQueryOptions,
   ): Promise<MemoryContext>;
-  getContextAt(
-    asOf: number,
-    relevanceQuery?: string,
-    options?: ContextQueryOptions,
-  ): Promise<MemoryContext>;
-  requestContextExpansion(
-    request: ContextRequest,
-    options?: ContextExpansionOptions,
-  ): Promise<ContextRequestResolution>;
-  getContextGovernance(): Promise<ContextGovernanceSnapshot>;
-  setDefaultContextContract(contract: ContextContract | null): Promise<ContextContract | null>;
-  putContextContract(name: string, contract: ContextContract): Promise<ContextContract>;
-  deleteContextContract(name: string): Promise<boolean>;
-  putContextInvariant(invariant: ContextInvariant): Promise<ContextInvariant>;
-  deleteContextInvariant(id: string): Promise<boolean>;
-  getContextEscalationPolicy(): Promise<ContextGovernanceSnapshot['escalationPolicy']>;
-  setContextEscalationPolicy(
-    policy: ContextEscalationPolicy,
-  ): Promise<ContextGovernanceSnapshot['escalationPolicy']>;
-  getStateAt(
-    asOf: number,
-    options?: {
-      relevanceQuery?: string;
-      view?: ContextViewPolicy;
-      viewer?: ActorRef;
-      includeCoordinationState?: boolean;
-      contract?: ContextContractReference;
-      invariants?: ContextInvariant[];
-    },
-  ): Promise<TemporalStateSnapshot<MemoryContext>>;
-  getTimeline(options?: {
-    sessionId?: string;
-    entityKind?: MemoryEventEntityKind;
-    entityId?: string;
-    startAt?: number;
-    endAt?: number;
-    limit?: number;
-    cursor?: TemporalIdInput;
-  }): Promise<TimelineResult>;
-  diffState(
-    from: number,
-    to: number,
-    options?: {
-      sessionId?: string;
-      entityKind?: MemoryEventEntityKind;
-      entityId?: string;
-      maxEvents?: number;
-    },
-  ): Promise<TemporalStateDiff>;
-  listMemoryEvents(options?: {
-    sessionId?: string;
-    entityKind?: MemoryEventEntityKind;
-    entityId?: string;
-    startAt?: number;
-    endAt?: number;
-    limit?: number;
-    cursor?: TemporalIdInput;
-  }): Promise<TimelineResult>;
   getSessionBootstrap(
     relevanceQuery?: string,
     options?: ContextQueryOptions,
   ): Promise<SessionBootstrap>;
-  getSessionBootstrapAt(
-    asOf: number,
-    relevanceQuery?: string,
-    options?: ContextQueryOptions,
-  ): Promise<SessionBootstrap>;
-  captureSnapshot(
-    relevanceQuery?: string,
-    options?: ContextQueryOptions,
-  ): Promise<{
-    bootstrap: SessionBootstrap;
-    context: MemoryContext;
-    frozenAt: number;
-    watermarkEventId: string | null;
-    profile: Profile | null;
-  }>;
   getRuntimeDiagnostics(): Promise<{
     circuitBreakers: {
       summarizer: CircuitBreakerSnapshot;
@@ -369,13 +283,6 @@ export interface MemoryManager {
     level: ScopeLevel,
     options?: SearchOptions,
   ): Promise<{ knowledge: SearchResult<KnowledgeMemory>[] }>;
-  listKnowledgeChanges(options?: {
-    cursor?: TemporalIdInput;
-    since?: Date;
-    scopeLevel?: ScopeLevel;
-    limit?: number;
-  }): Promise<KnowledgeChangeResult>;
-  pollForChanges(since: Date, options?: { scopeLevel?: ScopeLevel }): Promise<KnowledgeMemory[]>;
   forceCompact(): Promise<CompactionResult | null>;
   learnFact(
     fact: string,
@@ -391,30 +298,140 @@ export interface MemoryManager {
     detail?: string,
     options?: { visibilityClass?: WorkItem['visibility_class'] },
   ): Promise<WorkItem>;
+  reflect(options: ReflectOptions): Promise<ReflectResult>;
+  getProfile(options?: ProfileOptions): Promise<Profile>;
+  runMaintenance(policy?: MaintenancePolicy): Promise<MaintenanceReport>;
+  close(): Promise<void>;
+
+  // ---- @deprecated flat shims (delegate to their namespace twin; Phase 6.2, D-BREAK) ----
+  /** @deprecated Use `manager.temporal.getContextAt()` (Phase 6.2). */
+  getContextAt(
+    asOf: number,
+    relevanceQuery?: string,
+    options?: ContextQueryOptions,
+  ): Promise<MemoryContext>;
+  /** @deprecated Use `manager.governance.requestContextExpansion()` (Phase 6.2). */
+  requestContextExpansion(
+    request: ContextRequest,
+    options?: ContextExpansionOptions,
+  ): Promise<ContextRequestResolution>;
+  /** @deprecated Use `manager.governance.getContextGovernance()` (Phase 6.2). */
+  getContextGovernance(): Promise<ContextGovernanceSnapshot>;
+  /** @deprecated Use `manager.governance.setDefaultContextContract()` (Phase 6.2). */
+  setDefaultContextContract(contract: ContextContract | null): Promise<ContextContract | null>;
+  /** @deprecated Use `manager.governance.putContextContract()` (Phase 6.2). */
+  putContextContract(name: string, contract: ContextContract): Promise<ContextContract>;
+  /** @deprecated Use `manager.governance.deleteContextContract()` (Phase 6.2). */
+  deleteContextContract(name: string): Promise<boolean>;
+  /** @deprecated Use `manager.governance.putContextInvariant()` (Phase 6.2). */
+  putContextInvariant(invariant: ContextInvariant): Promise<ContextInvariant>;
+  /** @deprecated Use `manager.governance.deleteContextInvariant()` (Phase 6.2). */
+  deleteContextInvariant(id: string): Promise<boolean>;
+  /** @deprecated Use `manager.governance.getContextEscalationPolicy()` (Phase 6.2). */
+  getContextEscalationPolicy(): Promise<ContextGovernanceSnapshot['escalationPolicy']>;
+  /** @deprecated Use `manager.governance.setContextEscalationPolicy()` (Phase 6.2). */
+  setContextEscalationPolicy(
+    policy: ContextEscalationPolicy,
+  ): Promise<ContextGovernanceSnapshot['escalationPolicy']>;
+  /** @deprecated Use `manager.temporal.getStateAt()` (Phase 6.2). */
+  getStateAt(
+    asOf: number,
+    options?: {
+      relevanceQuery?: string;
+      view?: ContextViewPolicy;
+      viewer?: ActorRef;
+      includeCoordinationState?: boolean;
+      contract?: ContextContractReference;
+      invariants?: ContextInvariant[];
+    },
+  ): Promise<TemporalStateSnapshot<MemoryContext>>;
+  /** @deprecated Use `manager.temporal.getTimeline()` (Phase 6.2). */
+  getTimeline(options?: {
+    sessionId?: string;
+    entityKind?: MemoryEventEntityKind;
+    entityId?: string;
+    startAt?: number;
+    endAt?: number;
+    limit?: number;
+    cursor?: TemporalIdInput;
+  }): Promise<TimelineResult>;
+  /** @deprecated Use `manager.temporal.diffState()` (Phase 6.2). */
+  diffState(
+    from: number,
+    to: number,
+    options?: {
+      sessionId?: string;
+      entityKind?: MemoryEventEntityKind;
+      entityId?: string;
+      maxEvents?: number;
+    },
+  ): Promise<TemporalStateDiff>;
+  /** @deprecated Use `manager.temporal.listMemoryEvents()` (Phase 6.2). */
+  listMemoryEvents(options?: {
+    sessionId?: string;
+    entityKind?: MemoryEventEntityKind;
+    entityId?: string;
+    startAt?: number;
+    endAt?: number;
+    limit?: number;
+    cursor?: TemporalIdInput;
+  }): Promise<TimelineResult>;
+  /** @deprecated Use `manager.temporal.getSessionBootstrapAt()` (Phase 6.2). */
+  getSessionBootstrapAt(
+    asOf: number,
+    relevanceQuery?: string,
+    options?: ContextQueryOptions,
+  ): Promise<SessionBootstrap>;
+  /** @deprecated Use `manager.temporal.captureSnapshot()` (Phase 6.2). */
+  captureSnapshot(
+    relevanceQuery?: string,
+    options?: ContextQueryOptions,
+  ): Promise<{
+    bootstrap: SessionBootstrap;
+    context: MemoryContext;
+    frozenAt: number;
+    watermarkEventId: string | null;
+    profile: Profile | null;
+  }>;
+  /** @deprecated Use `manager.temporal.listKnowledgeChanges()` (Phase 6.2). */
+  listKnowledgeChanges(options?: {
+    cursor?: TemporalIdInput;
+    since?: Date;
+    scopeLevel?: ScopeLevel;
+    limit?: number;
+  }): Promise<KnowledgeChangeResult>;
+  /** @deprecated Use `manager.temporal.pollForChanges()` (Phase 6.2). */
+  pollForChanges(since: Date, options?: { scopeLevel?: ScopeLevel }): Promise<KnowledgeMemory[]>;
+  /** @deprecated Use `manager.coordination.updateWorkItem()` (Phase 6.2). */
   updateWorkItem(
     id: number,
     patch: WorkItemPatch,
     options?: { expectedVersion?: number },
   ): Promise<WorkItem | null>;
+  /** @deprecated Use `manager.coordination.claimWorkItem()` (Phase 6.2). */
   claimWorkItem(input: {
     workItemId: number;
     actor: ActorRef;
     leaseSeconds?: number;
   }): Promise<WorkClaim>;
+  /** @deprecated Use `manager.coordination.renewWorkClaim()` (Phase 6.2). */
   renewWorkClaim(
     claimId: number,
     actor: ActorRef,
     leaseSeconds?: number,
   ): Promise<WorkClaim | null>;
+  /** @deprecated Use `manager.coordination.releaseWorkClaim()` (Phase 6.2). */
   releaseWorkClaim(
     claimId: number,
     actor: ActorRef,
     reason?: string,
   ): Promise<WorkClaim | null>;
+  /** @deprecated Use `manager.coordination.listWorkClaims()` (Phase 6.2). */
   listWorkClaims(options?: {
     actor?: Pick<ActorRef, 'actor_kind' | 'actor_id'>;
     sessionId?: string;
   }): Promise<WorkClaim[]>;
+  /** @deprecated Use `manager.coordination.handoffWorkItem()` (Phase 6.2). */
   handoffWorkItem(input: {
     workItemId: number;
     fromActor: ActorRef;
@@ -423,13 +440,18 @@ export interface MemoryManager {
     contextBundleRef?: string | null;
     expiresAt?: number | null;
   }): Promise<HandoffRecord>;
+  /** @deprecated Use `manager.coordination.acceptHandoff()` (Phase 6.2). */
   acceptHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null>;
+  /** @deprecated Use `manager.coordination.rejectHandoff()` (Phase 6.2). */
   rejectHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null>;
+  /** @deprecated Use `manager.coordination.cancelHandoff()` (Phase 6.2). */
   cancelHandoff(handoffId: number, actor: ActorRef, reason?: string): Promise<HandoffRecord | null>;
+  /** @deprecated Use `manager.coordination.listPendingHandoffs()` (Phase 6.2). */
   listPendingHandoffs(options?: {
     actor?: Pick<ActorRef, 'actor_kind' | 'actor_id'>;
     direction?: 'inbound' | 'outbound' | 'all';
   }): Promise<HandoffRecord[]>;
+  /** @deprecated Use `manager.temporal.streamChanges()` (Phase 6.2). */
   streamChanges(options?: {
     cursor?: TemporalIdInput;
     sessionId?: string;
@@ -438,50 +460,62 @@ export interface MemoryManager {
     pollIntervalMs?: number;
     signal?: AbortSignal;
   }): AsyncIterable<MemoryEventRecord>;
+  /** @deprecated Use `manager.temporal.resolveChangeStreamCursor()` (Phase 6.2). */
   resolveChangeStreamCursor(cursor?: TemporalIdInput): Promise<TemporalId>;
+  /** @deprecated Use `manager.curation.inspectKnowledge()` (Phase 6.2). */
   inspectKnowledge(id: number): Promise<{
     knowledge: KnowledgeMemory | null;
     evidence: KnowledgeEvidence[];
     audits: KnowledgeMemoryAudit[];
   }>;
+  /** @deprecated Use `manager.curation.listKnowledge()` (Phase 6.2). */
   listKnowledge(options?: PaginationOptions): Promise<PaginatedResult<KnowledgeMemory>>;
+  /** @deprecated Use `manager.curation.getKnowledgeAudits()` (Phase 6.2). */
   getKnowledgeAudits(options?: { knowledgeId?: number; limit?: number }): Promise<KnowledgeMemoryAudit[]>;
+  /** @deprecated Use `manager.temporal.getContextMonitor()` (Phase 6.2). */
   getContextMonitor(): Promise<ContextMonitor | null>;
+  /** @deprecated Use `manager.temporal.getRecentCompactionLogs()` (Phase 6.2). */
   getRecentCompactionLogs(limit?: number): Promise<CompactionLog[]>;
+  /** @deprecated Use `manager.curation.getDueReverification()` (Phase 6.2). */
   getDueReverification(options?: { limit?: number }): Promise<KnowledgeMemory[]>;
+  /** @deprecated Use `manager.curation.reverifyKnowledge()` (Phase 6.2). */
   reverifyKnowledge(id: number): Promise<KnowledgeTrustAssessment>;
+  /** @deprecated Use `manager.curation.runReverification()` (Phase 6.2). */
   runReverification(options?: { limit?: number }): Promise<{
     reverifiedKnowledgeIds: number[];
     demotedKnowledgeIds: number[];
   }>;
-  runMaintenance(policy?: MaintenancePolicy): Promise<MaintenanceReport>;
   /**
    * Re-embed active knowledge whose stored embedding's (model, dimensions) do
-   * not match the active provider (Phase 2.4). Batches through the active
-   * knowledge set, re-embeds mismatched/missing rows with the active provider,
-   * and overwrites their stored vectors + metadata. No-op without an embedding
+   * not match the active provider (Phase 2.4). No-op without an embedding
    * adapter + generator. Returns the ids that were re-embedded.
-   *
-   * TODO(plan 6.3): expose via HTTP/MCP once the operation registry lands
-   * (transport churn deferred).
+   * @deprecated Use `manager.curation.reembedKnowledge()` (Phase 6.2).
    */
   reembedKnowledge(options?: { batchSize?: number }): Promise<{ reembeddedIds: number[] }>;
+  /** @deprecated Use `manager.curation.searchEpisodes()` (Phase 6.2). */
   searchEpisodes(options: EpisodeSearchOptions): Promise<EpisodeSummary[]>;
+  /** @deprecated Use `manager.curation.summarizeEpisode()` (Phase 6.2). */
   summarizeEpisode(sessionId: string, options?: { detailLevel?: EpisodeSummary['detailLevel'] }): Promise<EpisodeSummary>;
-  reflect(options: ReflectOptions): Promise<ReflectResult>;
+  /** @deprecated Use `manager.curation.searchCognitive()` (Phase 6.2). */
   searchCognitive(options: CognitiveSearchOptions): Promise<CognitiveSearchResult>;
-  getProfile(options?: ProfileOptions): Promise<Profile>;
+  /** @deprecated Use `manager.playbooks.createPlaybook()` (Phase 6.2). */
   createPlaybook(input: Omit<NewPlaybook, 'tenant_id' | 'system_id' | 'scope_id' | 'workspace_id' | 'collaboration_id'>): Promise<Playbook>;
+  /** @deprecated Use `manager.playbooks.createPlaybookFromTask()` (Phase 6.2). */
   createPlaybookFromTask(input: CreatePlaybookFromTaskInput): Promise<Playbook>;
+  /** @deprecated Use `manager.playbooks.revisePlaybook()` (Phase 6.2). */
   revisePlaybook(
     playbookId: number,
     newInstructions: string,
     revisionReason: string,
     sourceSessionId?: string | null,
   ): Promise<{ playbook: Playbook; revision: PlaybookRevision }>;
+  /** @deprecated Use `manager.playbooks.getPlaybook()` (Phase 6.2). */
   getPlaybook(id: number): Promise<Playbook | null>;
+  /** @deprecated Use `manager.playbooks.listPlaybooks()` (Phase 6.2). */
   listPlaybooks(): Promise<Playbook[]>;
+  /** @deprecated Use `manager.playbooks.searchPlaybooks()` (Phase 6.2). */
   searchPlaybooks(query: string, options?: SearchOptions): Promise<SearchResult<Playbook>[]>;
+  /** @deprecated Use `manager.playbooks.updatePlaybook()` (Phase 6.2). */
   updatePlaybook(
     id: number,
     patch: {
@@ -496,298 +530,67 @@ export interface MemoryManager {
       status?: Playbook['status'];
     },
   ): Promise<Playbook | null>;
+  /** @deprecated Use `manager.playbooks.recordPlaybookUse()` (Phase 6.2). */
   recordPlaybookUse(id: number): Promise<void>;
+  /** @deprecated Use `manager.graph.addAssociation()` (Phase 6.2). */
   addAssociation(input: Omit<NewAssociation, 'tenant_id' | 'system_id' | 'scope_id' | 'workspace_id' | 'collaboration_id'>): Promise<Association>;
+  /** @deprecated Use `manager.graph.getAssociations()` (Phase 6.2). */
   getAssociations(kind: AssociationTargetKind, id: number): Promise<{ from: Association[]; to: Association[] }>;
+  /** @deprecated Use `manager.graph.traverseAssociations()` (Phase 6.2). */
   traverseAssociations(kind: AssociationTargetKind, id: number, options?: { maxDepth?: number; maxNodes?: number }): Promise<AssociationGraph>;
+  /** @deprecated Use `manager.graph.removeAssociation()` (Phase 6.2). */
   removeAssociation(id: number): Promise<void>;
+  /** @deprecated Use `manager.curation.ingestDocument()` (Phase 6.2). */
   ingestDocument(
     content: string,
     options: { title: string; url?: string; mimeType?: string; metadata?: Record<string, string> },
   ): Promise<{ document: import('../contracts/types.js').SourceDocument; knowledge: KnowledgeMemory[] }>;
+  /** @deprecated Use `manager.curation.getSourceDocument()` (Phase 6.2). */
   getSourceDocument(id: number): Promise<import('../contracts/types.js').SourceDocument | null>;
+  /** @deprecated Use `manager.curation.listSourceDocuments()` (Phase 6.2). */
   listSourceDocuments(options?: PaginationOptions): Promise<PaginatedResult<import('../contracts/types.js').SourceDocument>>;
+  /** @deprecated Use `manager.curation.exportAsMarkdown()` (Phase 6.2). */
   exportAsMarkdown(options?: import('../contracts/export.js').MarkdownExportOptions): Promise<import('../contracts/export.js').MarkdownExportResult>;
+  /** @deprecated Use `manager.curation.promoteResponse()` (Phase 6.2). */
   promoteResponse(turnId: number, options?: { factTypes?: FactType[]; minConfidence?: FactConfidence }): Promise<KnowledgeMemory[]>;
-
-  // Phase 5 methods
+  /** @deprecated Use `manager.graph.discover()` (Phase 6.2). */
   discover(options?: DiscoverOptions): Promise<DiscoveryReport>;
+  /** @deprecated Use `manager.graph.getGraphReport()` (Phase 6.2). */
   getGraphReport(options?: GraphReportOptions): Promise<GraphReport>;
+  /** @deprecated Use `manager.temporal.getFactsAt()` (Phase 6.2). */
   getFactsAt(timestamp: number, options?: Partial<Omit<TemporalQueryOptions, 'timestamp' | 'scope'>>): Promise<FactsAtResult>;
+  /** @deprecated Use `manager.curation.reflectOnKnowledge()` (Phase 6.2). */
   reflectOnKnowledge(options?: ReflectOnKnowledgeOptions): Promise<KnowledgeReflectionResult>;
+  /** @deprecated Use `manager.curation.derive()` (Phase 6.2). */
   derive(options?: DeriveOptions): Promise<DerivedOutput[]>;
+  /** @deprecated Use `manager.curation.getCurationSummary()` (Phase 6.2). */
   getCurationSummary(input?: Partial<CurationInput>, options?: CurationOptions): Promise<CurationSummary>;
+  /** @deprecated Use `manager.curation.getCoreMemory()` (Phase 6.2). */
   getCoreMemory(options?: CoreMemoryOptions): Promise<CoreMemoryBundle>;
+  /** @deprecated Use `manager.curation.setAliases()` (Phase 6.2). */
   setAliases(aliasMap: AliasMap): void;
+  /** @deprecated Use `manager.curation.getAliases()` (Phase 6.2). */
   getAliases(): AliasMap | undefined;
+  /** @deprecated Use `manager.curation.saveAliases()` (Phase 6.2). */
   saveAliases(aliasMap: AliasMap): Promise<void>;
+  /** @deprecated Use `manager.curation.loadAliases()` (Phase 6.2). */
   loadAliases(): Promise<AliasMap | undefined>;
+  /** @deprecated Use `manager.curation.getAliasCandidates()` (Phase 6.2). */
   getAliasCandidates(options?: DiscoverAliasCandidatesOptions): Promise<AliasCandidate[]>;
+  /** @deprecated Use `manager.curation.setOntology()` (Phase 6.2). */
   setOntology(ontology: OntologyConfig): void;
+  /** @deprecated Use `manager.curation.getOntology()` (Phase 6.2). */
   getOntology(): OntologyConfig | undefined;
+  /** @deprecated Use `manager.curation.saveOntology()` (Phase 6.2). */
   saveOntology(ontology: OntologyConfig): Promise<void>;
+  /** @deprecated Use `manager.curation.loadOntology()` (Phase 6.2). */
   loadOntology(): Promise<OntologyConfig | undefined>;
+  /** @deprecated Use `manager.curation.exportBundle()` (Phase 6.2). */
   exportBundle(name: string, options?: Partial<BundleExportOptions>): ExportBundleResult;
+  /** @deprecated Use `manager.curation.importBundle()` (Phase 6.2). */
   importBundle(bundle: MemoryBundle, options: BundleImportOptions): ImportBundleResult;
+  /** @deprecated Use `manager.curation.refreshDocuments()` (Phase 6.2). */
   refreshDocuments(documents: DocumentDescriptor[]): RefreshResult;
-
-  close(): Promise<void>;
-}
-
-function resolveAdapter(config: MemoryManagerConfig): AsyncStorageAdapter {
-  if (config.asyncAdapter) {
-    return config.asyncAdapter;
-  }
-  if (config.adapter) {
-    return wrapSyncAdapter(config.adapter);
-  }
-  throw new ValidationError("MemoryManagerConfig requires either 'adapter' or 'asyncAdapter'");
-}
-
-function resolveSyncAdapter(
-  config: MemoryManagerConfig,
-  asyncAdapter: AsyncStorageAdapter,
-  operation: string,
-): StorageAdapter {
-  const syncAdapter = config.adapter ?? getNativeSyncAdapter(asyncAdapter);
-  if (!syncAdapter) {
-    throw new NotImplementedError(
-      `${operation} is not available on this deployment (requires sync adapter access)`,
-    );
-  }
-  return syncAdapter;
-}
-
-function manualKnowledgeClassForFactType(factType: FactType): KnowledgeMemory['knowledge_class'] {
-  switch (factType) {
-    case 'preference':
-      return 'preference';
-    case 'constraint':
-      return 'constraint';
-    case 'decision':
-      return 'procedure';
-    case 'entity':
-      return 'identity';
-    default:
-      return 'project_fact';
-  }
-}
-
-function mergeContextContract(
-  base: ContextContract | undefined,
-  override: ContextContract | undefined,
-): ContextContract | undefined {
-  if (!base && !override) return undefined;
-  return {
-    ...base,
-    ...override,
-    knowledgeClasses: override?.knowledgeClasses ?? base?.knowledgeClasses,
-  };
-}
-
-function mergeContextInvariants(
-  base: ContextInvariant[] | undefined,
-  override: ContextInvariant[] | undefined,
-): ContextInvariant[] {
-  const merged = [...(base ?? []), ...(override ?? [])];
-  if (merged.length === 0) return [];
-  const deduped = new Map<string, ContextInvariant>();
-  for (const invariant of merged) {
-    deduped.set(invariant.id, invariant);
-  }
-  return [...deduped.values()];
-}
-
-function normalizeContextEscalationPolicy(
-  policy: ContextEscalationPolicy | undefined,
-): ContextGovernanceSnapshot['escalationPolicy'] {
-  return {
-    defaultDecision: policy?.defaultDecision ?? 'review',
-    byChange: { ...(policy?.byChange ?? {}) },
-    maxView: policy?.maxView,
-    maxScopeLevel: policy?.maxScopeLevel,
-    maxTokenBudget: policy?.maxTokenBudget,
-    minimumAllowedTrustScore: policy?.minimumAllowedTrustScore,
-  };
-}
-
-function cloneContextContract(contract: ContextContract | null | undefined): ContextContract | null {
-  if (!contract) return null;
-  return {
-    ...contract,
-    knowledgeClasses: contract.knowledgeClasses ? [...contract.knowledgeClasses] : undefined,
-  };
-}
-
-function cloneContextInvariant(invariant: ContextInvariant): ContextInvariant {
-  return { ...invariant };
-}
-
-function cloneContextEscalationPolicy(
-  policy: ContextGovernanceSnapshot['escalationPolicy'],
-): ContextGovernanceSnapshot['escalationPolicy'] {
-  return {
-    ...policy,
-    byChange: { ...(policy.byChange ?? {}) },
-  };
-}
-
-function viewRank(view: ContextViewPolicy | undefined): number {
-  switch (view) {
-    case 'operator_supervisor':
-      return 4;
-    case 'workspace_shared':
-      return 3;
-    case 'local_plus_shared_collaboration':
-      return 2;
-    case 'local_only':
-    default:
-      return 1;
-  }
-}
-
-function scopeLevelRank(level: ScopeLevel | undefined): number {
-  switch (level) {
-    case 'tenant':
-      return 4;
-    case 'system':
-      return 3;
-    case 'workspace':
-      return 2;
-    case 'scope':
-    default:
-      return 1;
-  }
-}
-
-/**
- * Resolve an association endpoint (source or target) and verify it exists
- * and belongs to the caller's normalized scope. Throws a descriptive error
- * if the node is missing or cross-scope. This is the sole authority on
- * association ID validity; HTTP/MCP layers should NOT rely on their own
- * type checks for scope safety.
- */
-async function assertAssociationEndpointInScope(
-  adapter: AsyncStorageAdapter,
-  norm: ReturnType<typeof normalizeScope>,
-  kind: AssociationTargetKind,
-  id: number,
-  role: 'source' | 'target',
-): Promise<void> {
-  const scopedMatch = (record: {
-    tenant_id: string;
-    system_id: string;
-    workspace_id: string;
-    collaboration_id: string;
-    scope_id: string;
-  }) =>
-    record.tenant_id === norm.tenant_id &&
-    record.system_id === norm.system_id &&
-    record.workspace_id === norm.workspace_id &&
-    record.collaboration_id === norm.collaboration_id &&
-    record.scope_id === norm.scope_id;
-
-  if (kind === 'knowledge') {
-    const km = await adapter.getKnowledgeMemoryById(id);
-    if (!km) {
-      throw new ResourceNotFoundError(`addAssociation: ${role} knowledge ${id} does not exist`);
-    }
-    if (!scopedMatch(km)) {
-      throw new ScopeMismatchError(
-        `addAssociation: ${role} knowledge ${id} is not in the current scope`,
-      );
-    }
-    return;
-  }
-  if (kind === 'playbook') {
-    const pb = await adapter.getPlaybookById(id);
-    if (!pb) {
-      throw new ResourceNotFoundError(`addAssociation: ${role} playbook ${id} does not exist`);
-    }
-    if (!scopedMatch(pb)) {
-      throw new ScopeMismatchError(
-        `addAssociation: ${role} playbook ${id} is not in the current scope`,
-      );
-    }
-    return;
-  }
-  if (kind === 'working_memory') {
-    const wm = await adapter.getWorkingMemoryById(id);
-    if (!wm) {
-      throw new ResourceNotFoundError(
-        `addAssociation: ${role} working_memory ${id} does not exist`,
-      );
-    }
-    if (!scopedMatch(wm)) {
-      throw new ScopeMismatchError(
-        `addAssociation: ${role} working_memory ${id} is not in the current scope`,
-      );
-    }
-    return;
-  }
-  if (kind === 'work_item') {
-    const match = await adapter.getWorkItemById(id);
-    if (!match) {
-      throw new ResourceNotFoundError(
-        `addAssociation: ${role} work_item ${id} does not exist in the current scope`,
-      );
-    }
-    if (
-      match.tenant_id !== norm.tenant_id ||
-      match.system_id !== norm.system_id ||
-      match.workspace_id !== norm.workspace_id ||
-      match.collaboration_id !== norm.collaboration_id ||
-      match.scope_id !== norm.scope_id
-    ) {
-      throw new ScopeMismatchError(
-        `addAssociation: ${role} work_item ${id} does not exist in the current scope`,
-      );
-    }
-    return;
-  }
-  // Exhaustiveness: AssociationTargetKind has no other members.
-  throw new ValidationError(`addAssociation: unknown ${role} kind '${kind as string}'`);
-}
-
-/**
- * Merge archived and active turns by id, preserving order by turn id.
- * Partially compacted sessions have both sets; summarizing from only one
- * drops context, so callers should always pass the union through this.
- */
-function mergeTurnsById(archived: Turn[], active: Turn[]): Turn[] {
-  const byId = new Map<number, Turn>();
-  for (const t of archived) byId.set(t.id, t);
-  for (const t of active) byId.set(t.id, t);
-  return Array.from(byId.values()).sort((a, b) => a.id - b.id);
-}
-
-function knowledgeMatchesScope(knowledge: KnowledgeMemory, scope: MemoryScope): boolean {
-  const normalized = normalizeScope(scope);
-  return (
-    knowledge.tenant_id === normalized.tenant_id &&
-    knowledge.system_id === normalized.system_id &&
-    knowledge.workspace_id === normalized.workspace_id &&
-    knowledge.collaboration_id === normalized.collaboration_id &&
-    knowledge.scope_id === normalized.scope_id
-  );
-}
-
-function entityMatchesScope(
-  entity: { tenant_id: string; system_id: string; workspace_id: string; collaboration_id: string; scope_id: string },
-  scope: MemoryScope,
-): boolean {
-  const normalized = normalizeScope(scope);
-  return (
-    entity.tenant_id === normalized.tenant_id &&
-    entity.system_id === normalized.system_id &&
-    entity.workspace_id === normalized.workspace_id &&
-    entity.collaboration_id === normalized.collaboration_id &&
-    entity.scope_id === normalized.scope_id
-  );
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export function createMemoryManager(config: MemoryManagerConfig): MemoryManager {
@@ -802,61 +605,6 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     embeddings: createCircuitBreaker(config.circuitBreaker?.embeddings),
   };
 
-  // Cache last maintenance/reflection results for curation summary auto-population
-  let lastMaintenanceReport: import('./maintenance.js').MaintenanceReport | undefined;
-  let lastMaintenanceTimestamp: number | undefined;
-  let lastReflectionResult: import('../contracts/reflection.js').KnowledgeReflectionResult | undefined;
-  let lastReflectionTimestamp: number | undefined;
-  let lastDerivedOutputs: import('../contracts/derived.js').DerivedOutput[] | undefined;
-  let lastDerivedTimestamp: number | undefined;
-  let defaultContextContract = cloneContextContract(config.contextContract);
-  const namedContextContracts = new Map<string, ContextContract>(
-    Object.entries(config.contextContracts ?? {}).map(([name, contract]) => [
-      name,
-      cloneContextContract({ name: contract.name ?? name, ...contract })!,
-    ]),
-  );
-  const configuredInvariants = mergeContextInvariants(config.invariants, undefined);
-  const contextInvariants = new Map<string, ContextInvariant>(
-    configuredInvariants.map((invariant) => [invariant.id, cloneContextInvariant(invariant)]),
-  );
-  let escalationPolicy = normalizeContextEscalationPolicy(config.escalationPolicy);
-
-  let governanceLoaded = false;
-  let governanceLoadPromise: Promise<void> | null = null;
-
-  async function ensureGovernanceLoaded(): Promise<void> {
-    if (governanceLoaded) return;
-    if (governanceLoadPromise) return governanceLoadPromise;
-    governanceLoadPromise = (async () => {
-      const persisted = await asyncAdapter.getGovernanceState?.(config.scope);
-      if (persisted) {
-        if (persisted.defaultContract?.state === 'set') {
-          defaultContextContract = cloneContextContract(persisted.defaultContract.contract);
-        } else if (persisted.defaultContract?.state === 'cleared') {
-          defaultContextContract = null;
-        }
-        for (const [name, contract] of Object.entries(persisted.namedContracts)) {
-          namedContextContracts.set(name, cloneContextContract({ name: contract.name ?? name, ...contract })!);
-        }
-        for (const name of persisted.deletedContractNames) {
-          namedContextContracts.delete(name);
-        }
-        for (const inv of persisted.invariants) {
-          contextInvariants.set(inv.id, cloneContextInvariant(inv));
-        }
-        for (const invariantId of persisted.deletedInvariantIds) {
-          contextInvariants.delete(invariantId);
-        }
-        if (persisted.escalationPolicy) {
-          escalationPolicy = normalizeContextEscalationPolicy(persisted.escalationPolicy);
-        }
-      }
-      governanceLoaded = true;
-    })();
-    return governanceLoadPromise;
-  }
-
   const onEvent: EventHook = (event) => {
     config.onEvent?.(event);
     config.eventEmitter?.emit({
@@ -868,43 +616,14 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     });
   };
 
-  function resolveContextContractReference(
-    reference?: ContextContractReference,
-  ): ContextContract | undefined {
-    if (reference == null) {
-      return defaultContextContract ?? undefined;
-    }
-    if (typeof reference === 'string') {
-      const named = namedContextContracts.get(reference);
-      if (!named) {
-        throw new ValidationError(`Unknown context contract: ${reference}`);
-      }
-      return mergeContextContract(defaultContextContract ?? undefined, {
-        name: named.name ?? reference,
-        ...named,
-      });
-    }
-    return mergeContextContract(defaultContextContract ?? undefined, reference);
-  }
-
-  function getManagedInvariants(): ContextInvariant[] {
-    return [...contextInvariants.values()].map(cloneContextInvariant);
-  }
-
-  function getGovernanceSnapshot(): ContextGovernanceSnapshot {
-    const contracts = Object.fromEntries(
-      [...namedContextContracts.entries()].map(([name, contract]) => [
-        name,
-        cloneContextContract(contract)!,
-      ]),
-    );
-    return {
-      defaultContract: cloneContextContract(defaultContextContract),
-      contracts,
-      invariants: getManagedInvariants(),
-      escalationPolicy: cloneContextEscalationPolicy(escalationPolicy),
-    };
-  }
+  // Governance capability owns the mutable governance cache (Phase 6.2, item 3:
+  // default/named contracts, invariants, escalation policy, lazy-load latch).
+  // Its internal accessors feed the manager's context-assembly helpers below;
+  // the namespace is re-exposed as `manager.governance`.
+  const governance = createGovernanceCapability({ asyncAdapter, config });
+  const governanceNamespace = governance.namespace;
+  const { ensureGovernanceLoaded, resolveContextContractReference, getManagedInvariants } =
+    governance.internal;
 
   function resolveContextQueryOptions(options?: ContextQueryOptions): {
     contract?: ContextContract;
@@ -919,189 +638,6 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       view: options?.view,
       viewer: options?.viewer,
       includeCoordinationState: options?.includeCoordinationState,
-    };
-  }
-
-  function materializeAppliedContextContract(contract?: ContextContract): AppliedContextContract {
-    const view = contract?.view;
-    const crossScopeLevel = resolveContextScopeLevel(
-      contract?.crossScopeLevel ?? config.crossScopeLevel,
-      view,
-    );
-    return {
-      name: contract?.name,
-      view,
-      crossScopeLevel,
-      tokenBudget:
-        contract?.tokenBudget ??
-        config.contextPolicy?.tokenBudget ??
-        DEFAULT_CONTEXT_POLICY.tokenBudget,
-      maxKnowledgeItems:
-        contract?.maxKnowledgeItems ??
-        config.contextPolicy?.maxKnowledgeItems ??
-        DEFAULT_CONTEXT_POLICY.maxKnowledgeItems,
-      maxRecentSummaries:
-        contract?.maxRecentSummaries ??
-        config.contextPolicy?.maxRecentSummaries ??
-        DEFAULT_CONTEXT_POLICY.maxRecentSummaries,
-      knowledgeClasses: contract?.knowledgeClasses ? [...contract.knowledgeClasses] : null,
-      minimumTrustScore: contract?.minimumTrustScore ?? null,
-      includeCoordinationState: contract?.includeCoordinationState ?? false,
-    };
-  }
-
-  function knowledgeClassesAreBroader(
-    current: AppliedContextContract['knowledgeClasses'],
-    proposed: AppliedContextContract['knowledgeClasses'],
-  ): boolean {
-    if (current == null) return false;
-    if (proposed == null) return true;
-    const currentSet = new Set(current);
-    return proposed.some((item) => !currentSet.has(item));
-  }
-
-  function buildContextExpansionResolution(
-    request: ContextRequest,
-    currentContract: ContextContract | undefined,
-  ): ContextRequestResolution {
-    const mergedContract = mergeContextContract(currentContract, request.contract);
-    const currentApplied = currentContract ? materializeAppliedContextContract(currentContract) : null;
-    const proposedApplied = materializeAppliedContextContract(mergedContract);
-    const rationale: string[] = [];
-    const changeKinds: ContextEscalationChange[] = [];
-
-    if ((currentApplied?.view ? viewRank(proposedApplied.view) : 0) > viewRank(currentApplied?.view)) {
-      changeKinds.push('broaden_view');
-      rationale.push('Requested a broader visibility view.');
-    }
-    if (
-      (currentApplied?.crossScopeLevel
-        ? scopeLevelRank(proposedApplied.crossScopeLevel)
-        : 0) > scopeLevelRank(currentApplied?.crossScopeLevel)
-    ) {
-      changeKinds.push('widen_scope');
-      rationale.push('Requested a wider cross-scope retrieval level.');
-    }
-    if (
-      currentApplied?.minimumTrustScore != null &&
-      proposedApplied.minimumTrustScore != null &&
-      proposedApplied.minimumTrustScore < currentApplied.minimumTrustScore
-    ) {
-      changeKinds.push('lower_minimum_trust');
-      rationale.push('Requested a lower minimum trust threshold.');
-    }
-    if (knowledgeClassesAreBroader(currentApplied?.knowledgeClasses ?? null, proposedApplied.knowledgeClasses)) {
-      changeKinds.push('broaden_knowledge_classes');
-      rationale.push('Requested additional knowledge classes.');
-    }
-    if (
-      currentApplied &&
-      !currentApplied.includeCoordinationState &&
-      proposedApplied.includeCoordinationState
-    ) {
-      changeKinds.push('include_coordination_state');
-      rationale.push('Requested coordination state that is not currently exposed.');
-    }
-    if (
-      currentApplied &&
-      proposedApplied.tokenBudget > currentApplied.tokenBudget
-    ) {
-      changeKinds.push('increase_token_budget');
-      rationale.push('Requested a larger token budget.');
-    }
-    if (rationale.length === 0) {
-      rationale.push('Request can be satisfied within the current context boundary.');
-    }
-    let decision: ContextEscalationDecision = 'approved';
-
-    if (
-      escalationPolicy.maxView &&
-      viewRank(proposedApplied.view) > viewRank(escalationPolicy.maxView)
-    ) {
-      decision = 'denied';
-      rationale.push(`Policy caps visibility at ${escalationPolicy.maxView}.`);
-    }
-    if (
-      escalationPolicy.maxScopeLevel &&
-      scopeLevelRank(proposedApplied.crossScopeLevel) > scopeLevelRank(escalationPolicy.maxScopeLevel)
-    ) {
-      decision = 'denied';
-      rationale.push(`Policy caps cross-scope retrieval at ${escalationPolicy.maxScopeLevel}.`);
-    }
-    if (
-      escalationPolicy.maxTokenBudget != null &&
-      proposedApplied.tokenBudget > escalationPolicy.maxTokenBudget
-    ) {
-      decision = 'denied';
-      rationale.push(`Policy caps token budget at ${escalationPolicy.maxTokenBudget}.`);
-    }
-    if (
-      escalationPolicy.minimumAllowedTrustScore != null &&
-      proposedApplied.minimumTrustScore != null &&
-      proposedApplied.minimumTrustScore < escalationPolicy.minimumAllowedTrustScore
-    ) {
-      decision = 'denied';
-      rationale.push(
-        `Policy does not allow trust thresholds below ${escalationPolicy.minimumAllowedTrustScore.toFixed(2)}.`,
-      );
-    }
-
-    if (decision !== 'denied' && changeKinds.length > 0) {
-      let strongestDecision: ContextEscalationRuleDecision = 'allow';
-      for (const changeKind of changeKinds) {
-        const ruleDecision = escalationPolicy.byChange?.[changeKind] ?? escalationPolicy.defaultDecision;
-        if (ruleDecision === 'deny') {
-          strongestDecision = 'deny';
-          rationale.push(`Policy denies ${changeKind}.`);
-          break;
-        }
-        if (ruleDecision === 'review') {
-          strongestDecision = 'review';
-        }
-      }
-      decision =
-        strongestDecision === 'deny'
-          ? 'denied'
-          : strongestDecision === 'review'
-            ? 'requires_approval'
-            : 'approved';
-    }
-
-    const requiresEscalation = decision === 'requires_approval';
-    const warnings: ContextWarning[] =
-      decision === 'approved'
-        ? []
-        : [
-            {
-              code: 'contract_filtered',
-              severity: 'warning',
-              message:
-                decision === 'denied'
-                  ? 'This request exceeds the configured escalation policy and was denied.'
-                  : 'This request broadens the current contract and requires approval by the orchestrator.',
-              metadata: {
-                decision,
-                changeKinds,
-              },
-            },
-          ];
-
-    return {
-      requestId: createHash('sha1')
-        .update(JSON.stringify({ request, mergedContract, scope: config.scope, sessionId: config.sessionId }))
-        .digest('hex')
-        .slice(0, 16),
-      requestedAt: Math.floor(Date.now() / 1000),
-      reason: request.reason,
-      note: request.note ?? null,
-      currentContract: currentApplied,
-      proposedContract: proposedApplied,
-      proposedContractInput: mergedContract ?? {},
-      changeKinds,
-      decision,
-      requiresEscalation,
-      rationale,
-      warnings,
     };
   }
 
@@ -2176,7 +1712,50 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
     return turn;
   }
 
+  // ---- Capability wiring (Phase 6.2) ----
+  // The shared internal services the manager built above are bundled into an
+  // explicit context object. Each capability namespace factory destructures the
+  // members it needs; capabilities never reach back into this closure directly.
+  const internals: CapabilityContext = {
+    asyncAdapter,
+    config,
+    onEvent,
+    tokenEstimator,
+    circuitBreakers,
+    activeEmbeddingModel,
+    emitKnowledgeChange,
+    emitDegradation,
+    maybeEmbedKnowledge,
+    refreshSessionStateProjection,
+    getContextInternal,
+    buildReplayedContext,
+    collectKnowledgeForProfile,
+    buildSessionBootstrapPayload,
+    filterTemporalStateForContext,
+    collectBestEffortTemporalState,
+    getTemporalCutoverAt,
+    resolveChangeStreamCursorInternal,
+    listKnowledgeChangesInternal,
+  };
+
+  const coordination = createCoordinationCapability(internals);
+  const temporal = createTemporalCapability(internals);
+  const playbooks = createPlaybooksCapability(internals);
+  const graph = createGraphCapability(internals);
+  const curationModule = createCurationCapability(internals);
+  const curationNamespace = curationModule.namespace;
+  const { recordMaintenance } = curationModule;
+
   return {
+    // ---- Namespaces (Phase 6.2) ----
+    coordination,
+    governance: governanceNamespace,
+    temporal,
+    playbooks,
+    curation: curationNamespace,
+    graph,
+
+    // ---- Top-level daily drivers (NOT deprecated) ----
     async processTurn(role, content, actor = role === 'assistant' ? 'assistant' : 'user') {
       const turn = await insertManagedTurn(role, content, actor);
 
@@ -2229,241 +1808,12 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       return getContextInternal(relevanceQuery, undefined, options);
     },
 
-    async getContextAt(asOf, relevanceQuery, options) {
-      return (await buildReplayedContext(asOf, relevanceQuery, options)).context;
-    },
-
-    async requestContextExpansion(request, options) {
-      await ensureGovernanceLoaded();
-      const currentContract = resolveContextContractReference(options?.currentContract);
-      return buildContextExpansionResolution(request, currentContract);
-    },
-
-    async getContextGovernance() {
-      await ensureGovernanceLoaded();
-      return getGovernanceSnapshot();
-    },
-
-    async setDefaultContextContract(contract) {
-      await ensureGovernanceLoaded();
-      defaultContextContract = cloneContextContract(contract);
-      await asyncAdapter.upsertDefaultContextContract?.(config.scope, contract);
-      return cloneContextContract(defaultContextContract);
-    },
-
-    async putContextContract(name, contract) {
-      await ensureGovernanceLoaded();
-      if (!name.trim()) {
-        throw new ValidationError('Context contract name is required');
-      }
-      const stored = cloneContextContract({
-        ...contract,
-        name: contract.name ?? name,
-      })!;
-      namedContextContracts.set(name, stored);
-      await asyncAdapter.upsertNamedContextContract?.(config.scope, name, stored);
-      return cloneContextContract(stored)!;
-    },
-
-    async deleteContextContract(name) {
-      await ensureGovernanceLoaded();
-      const deleted = namedContextContracts.delete(name);
-      if (deleted) {
-        await asyncAdapter.deleteNamedContextContract?.(config.scope, name);
-      }
-      return deleted;
-    },
-
-    async putContextInvariant(invariant) {
-      await ensureGovernanceLoaded();
-      if (!invariant.id.trim()) {
-        throw new ValidationError('Context invariant id is required');
-      }
-      contextInvariants.set(invariant.id, cloneContextInvariant(invariant));
-      await asyncAdapter.upsertContextInvariant?.(config.scope, invariant);
-      return cloneContextInvariant(contextInvariants.get(invariant.id)!);
-    },
-
-    async deleteContextInvariant(id) {
-      await ensureGovernanceLoaded();
-      const deleted = contextInvariants.delete(id);
-      if (deleted) {
-        await asyncAdapter.deleteContextInvariant?.(config.scope, id);
-      }
-      return deleted;
-    },
-
-    async getContextEscalationPolicy() {
-      await ensureGovernanceLoaded();
-      return cloneContextEscalationPolicy(escalationPolicy);
-    },
-
-    async setContextEscalationPolicy(policy) {
-      await ensureGovernanceLoaded();
-      escalationPolicy = normalizeContextEscalationPolicy(policy);
-      await asyncAdapter.upsertContextEscalationPolicy?.(config.scope, policy);
-      return cloneContextEscalationPolicy(escalationPolicy);
-    },
-
-    async getStateAt(asOf, options) {
-      const replay = await buildReplayedContext(asOf, options?.relevanceQuery, options);
-      const replayed = replay.exact
-        ? filterTemporalStateForContext(replay.state!, options)
-        : await collectBestEffortTemporalState(asOf, options);
-      return {
-        asOf,
-        exact: replay.exact,
-        cutoverAt: replay.cutoverAt,
-        watermarkEventId: replay.watermarkEventId,
-        context: replay.context,
-        sessionState: replay.context.sessionState,
-        turns: replayed.turns,
-        workingMemory: replayed.workingMemory,
-        knowledge: replayed.knowledge,
-        workItems: replayed.workItems,
-        workClaims: replayed.workClaims,
-        handoffs: replayed.handoffs,
-        coordinationState: replay.context.coordinationState,
-        associations: replayed.associations,
-        playbooks: replayed.playbooks,
-      };
-    },
-
-    async getTimeline(options) {
-      return asyncAdapter.listMemoryEvents(config.scope, {
-        sessionId: options?.sessionId,
-        entityKind: options?.entityKind,
-        entityId: options?.entityId,
-        startAt: options?.startAt,
-        endAt: options?.endAt,
-        limit: options?.limit,
-        cursor: options?.cursor,
-      });
-    },
-
-    async diffState(from, to, options) {
-      const cutoverAt = await getTemporalCutoverAt();
-      const eventQuery = {
-        sessionId: options?.sessionId,
-        entityKind: options?.entityKind,
-        entityId: options?.entityId,
-        startAt: from + 1,
-        endAt: to,
-        limit: 500,
-      };
-      const events =
-        options?.maxEvents != null
-          ? await listAllMemoryEventsBounded(asyncAdapter, config.scope, options.maxEvents, eventQuery)
-          : await listAllMemoryEvents(asyncAdapter, config.scope, eventQuery);
-      const byEntityKind: Partial<Record<MemoryEventEntityKind, number>> = {};
-      const byEventType: Partial<Record<MemoryEventRecord['event_type'], number>> = {};
-      for (const event of events) {
-        byEntityKind[event.entity_kind] = (byEntityKind[event.entity_kind] ?? 0) + 1;
-        byEventType[event.event_type] = (byEventType[event.event_type] ?? 0) + 1;
-      }
-      return {
-        from,
-        to,
-        exact: cutoverAt != null && from >= cutoverAt && to >= cutoverAt,
-        cutoverAt,
-        watermarkRange: {
-          fromEventId: events[0]?.event_id ?? null,
-          toEventId: events[events.length - 1]?.event_id ?? null,
-        },
-        events,
-        summary: {
-          totalEvents: events.length,
-          byEntityKind,
-          byEventType,
-        },
-      };
-    },
-
-    async listMemoryEvents(options) {
-      const timeline = await asyncAdapter.listMemoryEvents(config.scope, {
-        sessionId: options?.sessionId,
-        entityKind: options?.entityKind,
-        entityId: options?.entityId,
-        startAt: options?.startAt,
-        endAt: options?.endAt,
-        limit: options?.limit,
-        cursor: options?.cursor,
-      });
-      return {
-        events: [...timeline.events].reverse(),
-        nextCursor: timeline.nextCursor,
-      };
-    },
-
     async getSessionBootstrap(relevanceQuery, options) {
       const context = await getContextInternal(relevanceQuery, undefined, options);
       const profile = buildProfileFromKnowledge(
         await collectKnowledgeForProfile(asyncAdapter, options),
       );
       return buildSessionBootstrapPayload(context, profile);
-    },
-
-    async getSessionBootstrapAt(asOf, relevanceQuery, options) {
-      const replay = await buildReplayedContext(asOf, relevanceQuery, options);
-      const profile =
-        replay.exact && replay.state
-          ? buildProfileFromKnowledge(
-              await collectKnowledgeForProfile(
-                createTemporalReplayAdapter(replay.state, asOf),
-                options,
-                asOf,
-              ),
-            )
-          : buildProfileFromKnowledge(await collectKnowledgeForProfile(asyncAdapter, options, asOf));
-      return buildSessionBootstrapPayload(replay.context, profile);
-    },
-
-    async captureSnapshot(relevanceQuery, options) {
-      const frozenAt = Math.floor(Date.now() / 1000);
-      const watermark = await asyncAdapter.getTemporalWatermark('temporal');
-      if (!watermark || watermark.last_event_id === '0') {
-        const [context, profile] = await Promise.all([
-          getContextInternal(relevanceQuery, undefined, options),
-          collectKnowledgeForProfile(asyncAdapter, options).then((knowledge) =>
-            buildProfileFromKnowledge(knowledge),
-          ),
-        ]);
-        return {
-          bootstrap: buildSessionBootstrapPayload(context, profile),
-          context,
-          frozenAt,
-          watermarkEventId: null,
-          profile,
-        };
-      }
-
-      const replay = await buildReplayedContext(
-        watermark.updated_at,
-        relevanceQuery,
-        options,
-        {
-          throughEventId: watermark.last_event_id,
-        },
-      );
-      const profile =
-        replay.exact && replay.state
-          ? buildProfileFromKnowledge(
-              await collectKnowledgeForProfile(
-                createTemporalReplayAdapter(replay.state, watermark.updated_at),
-                options,
-                watermark.updated_at,
-              ),
-            )
-          : buildProfileFromKnowledge(
-              await collectKnowledgeForProfile(asyncAdapter, options, watermark.updated_at),
-            );
-      return {
-        bootstrap: buildSessionBootstrapPayload(replay.context, profile),
-        context: replay.context,
-        frozenAt,
-        watermarkEventId: replay.exact ? watermark.last_event_id : null,
-        profile,
-      };
     },
 
     async getRuntimeDiagnostics() {
@@ -2503,24 +1853,6 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       return {
         knowledge: await getHybridKnowledgeResults(query, options, level),
       };
-    },
-
-    async listKnowledgeChanges(options) {
-      return listKnowledgeChangesInternal(options);
-    },
-
-    async pollForChanges(since, options) {
-      const result = await listKnowledgeChangesInternal({
-        since,
-        scopeLevel: options?.scopeLevel,
-        limit: 500,
-      });
-      const latestByKnowledgeId = new Map<number, KnowledgeMemory>();
-      for (const change of result.changes) {
-        latestByKnowledgeId.delete(change.knowledge.id);
-        latestByKnowledgeId.set(change.knowledge.id, change.knowledge);
-      }
-      return [...latestByKnowledgeId.values()];
     },
 
     async forceCompact() {
@@ -2573,292 +1905,27 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       return knowledge;
     },
 
-    async trackWorkItem(title, kind = 'objective', status = 'open', detail, options) {
-      const workItem = await asyncAdapter.insertWorkItem({
-        ...config.scope,
-        session_id: config.sessionId,
-        visibility_class: options?.visibilityClass ?? 'private',
-        title: config.redactText ? config.redactText({ kind: 'work_item', text: title }) : title,
-        kind,
-        status,
-        detail:
-          detail && config.redactText
-            ? config.redactText({ kind: 'work_item', text: detail })
-            : detail,
-      });
-      await refreshSessionStateProjection();
-      return workItem;
+    trackWorkItem(title, kind, status, detail, options) {
+      return coordination.trackWorkItem(title, kind, status, detail, options);
     },
 
-    async updateWorkItem(id, patch, options) {
-      const existing = await asyncAdapter.getWorkItemById(id);
-      if (!existing) {
-        return null;
+    async reflect(options) {
+      if (!config.structuredClient) {
+        throw new ProviderUnavailableError('reflect requires a structuredClient in MemoryManagerConfig');
       }
-      if (!entityMatchesScope(existing, config.scope)) {
-        throw new ScopeMismatchError(`Work item ${id} does not belong to the current scope`);
-      }
-      const workItem = await asyncAdapter.updateWorkItem(id, patch, options);
-      await refreshSessionStateProjection();
-      return workItem;
-    },
-
-    async claimWorkItem(input) {
-      const workItem = await asyncAdapter.getWorkItemById(input.workItemId);
-      if (workItem && !entityMatchesScope(workItem, config.scope)) {
-        throw new ScopeMismatchError(`Work item ${input.workItemId} does not belong to the current scope`);
-      }
-      return asyncAdapter.claimWorkItem({
-        ...normalizeScope(config.scope),
-        work_item_id: input.workItemId,
-        actor: input.actor,
-        session_id: config.sessionId,
-        lease_seconds: input.leaseSeconds,
-        visibility_class: workItem?.visibility_class ?? 'private',
-      });
-    },
-
-    async renewWorkClaim(claimId, actor, leaseSeconds) {
-      const claim = await asyncAdapter.getWorkClaimById(claimId);
-      if (claim && !entityMatchesScope(claim, config.scope)) {
-        throw new ScopeMismatchError(`Work claim ${claimId} does not belong to the current scope`);
-      }
-      return asyncAdapter.renewWorkClaim(claimId, actor, leaseSeconds);
-    },
-
-    async releaseWorkClaim(claimId, actor, reason) {
-      const claim = await asyncAdapter.getWorkClaimById(claimId);
-      if (claim && !entityMatchesScope(claim, config.scope)) {
-        throw new ScopeMismatchError(`Work claim ${claimId} does not belong to the current scope`);
-      }
-      return asyncAdapter.releaseWorkClaim(claimId, actor, reason);
-    },
-
-    async listWorkClaims(options) {
-      return asyncAdapter.listWorkClaims(config.scope, {
-        actor: options?.actor,
-        sessionId: options?.sessionId,
-      });
-    },
-
-    async handoffWorkItem(input) {
-      const workItem = await asyncAdapter.getWorkItemById(input.workItemId);
-      if (workItem && !entityMatchesScope(workItem, config.scope)) {
-        throw new ScopeMismatchError(`Work item ${input.workItemId} does not belong to the current scope`);
-      }
-      return asyncAdapter.createHandoff({
-        ...normalizeScope(config.scope),
-        work_item_id: input.workItemId,
-        from_actor: input.fromActor,
-        to_actor: input.toActor,
-        session_id: config.sessionId,
-        summary: input.summary,
-        context_bundle_ref: input.contextBundleRef ?? null,
-        expires_at: input.expiresAt ?? null,
-        visibility_class: workItem?.visibility_class ?? 'private',
-      });
-    },
-
-    async acceptHandoff(handoffId, actor, reason) {
-      const handoff = await asyncAdapter.getHandoffById(handoffId);
-      if (handoff && !entityMatchesScope(handoff, config.scope)) {
-        throw new ScopeMismatchError(`Handoff ${handoffId} does not belong to the current scope`);
-      }
-      return asyncAdapter.acceptHandoff(handoffId, actor, reason);
-    },
-
-    async rejectHandoff(handoffId, actor, reason) {
-      const handoff = await asyncAdapter.getHandoffById(handoffId);
-      if (handoff && !entityMatchesScope(handoff, config.scope)) {
-        throw new ScopeMismatchError(`Handoff ${handoffId} does not belong to the current scope`);
-      }
-      return asyncAdapter.rejectHandoff(handoffId, actor, reason);
-    },
-
-    async cancelHandoff(handoffId, actor, reason) {
-      const handoff = await asyncAdapter.getHandoffById(handoffId);
-      if (handoff && !entityMatchesScope(handoff, config.scope)) {
-        throw new ScopeMismatchError(`Handoff ${handoffId} does not belong to the current scope`);
-      }
-      return asyncAdapter.cancelHandoff(handoffId, actor, reason);
-    },
-
-    async listPendingHandoffs(options) {
-      return asyncAdapter.listHandoffs(config.scope, {
-        actor: options?.actor,
-        direction: options?.direction,
-        statuses: ['pending'],
-      });
-    },
-
-    async resolveChangeStreamCursor(cursor) {
-      return resolveChangeStreamCursorInternal(cursor);
-    },
-
-    async *streamChanges(options) {
-      let cursor = await resolveChangeStreamCursorInternal(options?.cursor);
-      while (!options?.signal?.aborted) {
-        const page = await asyncAdapter.listMemoryEvents(config.scope, {
-          cursor,
-          sessionId: options?.sessionId,
-          entityKind: options?.entityKind,
-          entityId: options?.entityId,
-          limit: 100,
-        });
-        for (const event of page.events) {
-          cursor = event.event_id;
-          yield event;
-        }
-        if (options?.signal?.aborted) break;
-        await delay(options?.pollIntervalMs ?? 250);
-      }
-    },
-
-    async inspectKnowledge(id) {
-      const knowledge = await asyncAdapter.getKnowledgeMemoryById(id);
-      if (!knowledge || !knowledgeMatchesScope(knowledge, config.scope)) {
-        return { knowledge: null, evidence: [], audits: [] };
-      }
-      const evidence = await asyncAdapter.listKnowledgeEvidenceForKnowledge(id);
-      const audits = await asyncAdapter.getKnowledgeMemoryAuditsForKnowledge(
-        config.scope,
-        id,
-        50,
-      );
-      return { knowledge, evidence, audits };
-    },
-
-    async listKnowledge(options) {
-      return asyncAdapter.getActiveKnowledgeMemoryPaginated(config.scope, options);
-    },
-
-    async getKnowledgeAudits(options) {
-      if (options?.knowledgeId != null) {
-        return asyncAdapter.getKnowledgeMemoryAuditsForKnowledge(
-          config.scope,
-          options.knowledgeId,
-          options.limit ?? 20,
-        );
-      }
-      return asyncAdapter.getRecentKnowledgeMemoryAudits(config.scope, options?.limit ?? 20);
-    },
-
-    async getContextMonitor() {
-      return asyncAdapter.getContextMonitor(config.scope);
-    },
-
-    async getRecentCompactionLogs(limit) {
-      return asyncAdapter.getRecentCompactionLogs(config.scope, limit ?? 10);
-    },
-
-    async getDueReverification(options) {
-      const now = Math.floor(Date.now() / 1000);
-      const maintenancePolicy = resolveMaintenancePolicy(config.maintenancePolicy);
-      const activeKnowledge = await asyncAdapter.getActiveKnowledgeMemory(config.scope);
-      return getDueReverificationKnowledge(activeKnowledge, maintenancePolicy, now).slice(
-        0,
-        options?.limit ?? activeKnowledge.length,
-      );
-    },
-
-    async reverifyKnowledge(id) {
-      const knowledge = await asyncAdapter.getKnowledgeMemoryById(id);
-      if (!knowledge) {
-        throw new ResourceNotFoundError(`Memory validation: knowledge memory ${id} was not found`);
-      }
-      if (!knowledgeMatchesScope(knowledge, config.scope)) {
-        throw new ScopeMismatchError(
-          `Memory validation: knowledge memory ${id} does not belong to the requested scope`,
-        );
-      }
-      const evidence = await asyncAdapter.listKnowledgeEvidenceForKnowledge(id);
-      const policy = {
-        ...DEFAULT_EXTRACTION_POLICY,
-        ...config.extractionPolicy,
-      };
-      const assessment = assessKnowledgeReverification({
-        knowledge,
-        evidence,
-        policy,
-      });
-      const supportEvidence = evidence.filter((item) => item.support_polarity === 'supports');
-      const successCount = supportEvidence.filter((item) => item.outcome === 'success').length;
-      const failureCount = supportEvidence.filter((item) => item.outcome === 'failure').length;
-      const now = Math.floor(Date.now() / 1000);
-      const maintenancePolicy = resolveMaintenancePolicy(config.maintenancePolicy);
-      const nextReverificationAt = computeNextReverificationAt(
+      return reflect(
         {
-          ...knowledge,
-          knowledge_state: assessment.state,
-          last_verified_at: now,
-          last_confirmed_at:
-            assessment.state === 'trusted' ? now : knowledge.last_confirmed_at,
-          confirmation_count:
-            assessment.state === 'trusted'
-              ? knowledge.confirmation_count + 1
-              : knowledge.confirmation_count,
+          adapter: asyncAdapter,
+          scope: config.scope,
+          client: config.structuredClient,
+          telemetry: { logger: config.logger, onEvent },
         },
-        maintenancePolicy,
+        options,
       );
-      const updated = await asyncAdapter.updateKnowledgeMemory(id, {
-        knowledge_state: assessment.state,
-        knowledge_class:
-          failureCount > successCount &&
-          ['strategy', 'procedure'].includes(knowledge.knowledge_class)
-            ? 'anti_pattern'
-            : successCount > 0 &&
-                assessment.state === 'trusted' &&
-                knowledge.knowledge_class === 'procedure'
-              ? 'strategy'
-              : knowledge.knowledge_class,
-        trust_score: assessment.trust_score,
-        verification_status:
-          assessment.state === 'trusted'
-            ? 'verified'
-            : assessment.state === 'provisional'
-              ? 'corroborated'
-              : 'unverified',
-        verification_notes: assessment.reasons.join(', ') || null,
-        last_verified_at: now,
-        next_reverification_at: nextReverificationAt,
-        last_confirmed_at: assessment.state === 'trusted' ? now : knowledge.last_confirmed_at,
-        confirmation_count:
-          assessment.state === 'trusted'
-            ? knowledge.confirmation_count + 1
-            : knowledge.confirmation_count,
-        disputed_at: assessment.state === 'disputed' ? now : knowledge.disputed_at,
-        dispute_reason: assessment.state === 'disputed' ? assessment.reasons.join(', ') : knowledge.dispute_reason,
-        contradiction_score:
-          assessment.state === 'disputed'
-            ? Math.max(knowledge.contradiction_score, 1)
-            : knowledge.contradiction_score,
-        successful_use_count: knowledge.successful_use_count + successCount,
-        failed_use_count: knowledge.failed_use_count + failureCount,
-      });
-      if (updated) {
-        emitKnowledgeChange(assessment.state === 'trusted' ? 'reverified' : 'demoted', updated);
-      }
-      return assessment;
     },
 
-    async runReverification(options) {
-      const now = Math.floor(Date.now() / 1000);
-      const maintenancePolicy = resolveMaintenancePolicy(config.maintenancePolicy);
-      const activeKnowledge = await asyncAdapter.getActiveKnowledgeMemory(config.scope);
-      const due = getDueReverificationKnowledge(activeKnowledge, maintenancePolicy, now).slice(
-        0,
-        options?.limit ?? activeKnowledge.length,
-      );
-      const reverifiedKnowledgeIds: number[] = [];
-      const demotedKnowledgeIds: number[] = [];
-      for (const item of due) {
-        const assessment = await this.reverifyKnowledge(item.id);
-        reverifiedKnowledgeIds.push(item.id);
-        if (assessment.state !== 'trusted') {
-          demotedKnowledgeIds.push(item.id);
-        }
-      }
-      return { reverifiedKnowledgeIds, demotedKnowledgeIds };
+    async getProfile(options) {
+      return getProfile(asyncAdapter, config.scope, options);
     },
 
     async runMaintenance(policy) {
@@ -2880,7 +1947,7 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
       );
       const reverification = { reverifiedKnowledgeIds: [] as number[], demotedKnowledgeIds: [] as number[] };
       for (const item of due) {
-        const assessment = await this.reverifyKnowledge(item.id);
+        const assessment = await curationNamespace.reverifyKnowledge(item.id);
         reverification.reverifiedKnowledgeIds.push(item.id);
         if (assessment.state !== 'trusted') {
           reverification.demotedKnowledgeIds.push(item.id);
@@ -2910,575 +1977,8 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         expiredHandoffCount: report.expiredHandoffIds.length,
       });
       await refreshSessionStateProjection();
-      lastMaintenanceReport = report;
-      lastMaintenanceTimestamp = Math.floor(Date.now() / 1000);
+      recordMaintenance(report, Math.floor(Date.now() / 1000));
       return report;
-    },
-
-    async reembedKnowledge(options) {
-      // Phase 2.4: batch re-embed active knowledge whose stored (model,
-      // dimensions) mismatch the active provider (or has no stored vector).
-      // No-op without a provider; TODO(plan 6.3) transport routes deferred.
-      const reembeddedIds: number[] = [];
-      if (!config.embeddingAdapter || !config.embeddingGenerator) {
-        return { reembeddedIds };
-      }
-      const batchSize = Math.max(1, options?.batchSize ?? 50);
-      const activeKnowledge = await asyncAdapter.getActiveKnowledgeMemory(config.scope);
-
-      // Probe the active provider's dimensionality once.
-      let activeDims: number | undefined;
-      try {
-        const [probe] = await circuitBreakers.embeddings.execute(() =>
-          config.embeddingGenerator!(['__reembed_probe__']),
-        );
-        activeDims = probe?.length;
-      } catch {
-        activeDims = undefined;
-      }
-
-      // D3: staleness is metadata-aware. A stored embedding is stale when
-      // dimensions differ from the active provider OR (the active model is known
-      // AND the stored model differs) — the same-dimension model swap that a
-      // length-only check misses. getEmbeddingMetadata exposes the stored model;
-      // adapters that predate it fall back to a length-only check.
-      const readMetadata = config.embeddingAdapter.getEmbeddingMetadata?.bind(
-        config.embeddingAdapter,
-      );
-      const stale: KnowledgeMemory[] = [];
-      for (const item of activeKnowledge) {
-        if (readMetadata) {
-          const meta = await readMetadata(item.id);
-          if (
-            !meta ||
-            (activeDims != null && meta.dimensions !== activeDims) ||
-            (activeEmbeddingModel !== 'unknown' && meta.model !== activeEmbeddingModel)
-          ) {
-            stale.push(item);
-          }
-        } else {
-          const stored = await config.embeddingAdapter.getEmbedding(item.id);
-          if (!stored || (activeDims != null && stored.length !== activeDims)) {
-            stale.push(item);
-          }
-        }
-      }
-
-      for (let i = 0; i < stale.length; i += batchSize) {
-        const batch = stale.slice(i, i + batchSize);
-        try {
-          const vectors = await circuitBreakers.embeddings.execute(() =>
-            config.embeddingGenerator!(batch.map((item) => item.fact)),
-          );
-          for (const [index, item] of batch.entries()) {
-            const vector = vectors[index];
-            if (!vector) continue;
-            await config.embeddingAdapter!.storeEmbedding(item.id, vector, {
-              model: activeEmbeddingModel,
-              dimensions: vector.length,
-            });
-            reembeddedIds.push(item.id);
-          }
-        } catch (error) {
-          config.logger?.warn('memory.embeddings.reembed_failed', {
-            error: String(error),
-            batchStart: i,
-            batchSize: batch.length,
-          });
-          emitDegradation('embeddings', {
-            stage: 'reembed',
-            error: String(error),
-            batchStart: i,
-          });
-        }
-      }
-
-      emitMemoryEvent('manager', config.scope, { logger: config.logger, onEvent }, 0, {
-        action: 'reembed_knowledge',
-        activeModel: activeEmbeddingModel,
-        activeDimensions: activeDims ?? null,
-        candidateCount: stale.length,
-        reembeddedCount: reembeddedIds.length,
-      });
-
-      return { reembeddedIds };
-    },
-
-    async searchEpisodes(options) {
-      if (!config.structuredClient) {
-        throw new ProviderUnavailableError(
-          'searchEpisodes requires a structuredClient in MemoryManagerConfig',
-        );
-      }
-      return searchEpisodes(
-        {
-          adapter: asyncAdapter,
-          scope: config.scope,
-          client: config.structuredClient,
-          telemetry: { logger: config.logger, onEvent },
-        },
-        options,
-      );
-    },
-
-    async summarizeEpisode(sessionId, options) {
-      if (!config.structuredClient) {
-        throw new ProviderUnavailableError(
-          'summarizeEpisode requires a structuredClient in MemoryManagerConfig',
-        );
-      }
-      const detailLevel = options?.detailLevel ?? 'overview';
-      // Fetch both active and all session working memories. Partially
-      // compacted sessions have BOTH archived history (covered by working
-      // memory turn ranges) and active turns; a recap built from only the
-      // active fragment silently drops earlier context, so we always merge
-      // archived + active and dedupe by turn id.
-      const activeTurns = await asyncAdapter.getActiveTurns(config.scope, sessionId);
-      const allSessionWm = await asyncAdapter.getWorkingMemoryBySession(sessionId, config.scope);
-      let archivedTurns: Turn[] = [];
-      if (allSessionWm.length > 0) {
-        const minStart = Math.min(...allSessionWm.map((wm) => wm.turn_id_start));
-        const maxEnd = Math.max(...allSessionWm.map((wm) => wm.turn_id_end));
-        archivedTurns = await asyncAdapter.getArchivedTurnRange(sessionId, minStart, maxEnd, config.scope);
-      }
-      const turns = mergeTurnsById(archivedTurns, activeTurns);
-      return summarizeEpisode(
-        {
-          adapter: asyncAdapter,
-          scope: config.scope,
-          client: config.structuredClient,
-          telemetry: { logger: config.logger, onEvent },
-        },
-        { turns, workingMemories: allSessionWm, sessionId, detailLevel, client: config.structuredClient },
-      );
-    },
-
-    async reflect(options) {
-      if (!config.structuredClient) {
-        throw new ProviderUnavailableError('reflect requires a structuredClient in MemoryManagerConfig');
-      }
-      return reflect(
-        {
-          adapter: asyncAdapter,
-          scope: config.scope,
-          client: config.structuredClient,
-          telemetry: { logger: config.logger, onEvent },
-        },
-        options,
-      );
-    },
-
-    async searchCognitive(options) {
-      return searchCognitive(asyncAdapter, config.scope, options);
-    },
-
-    async getProfile(options) {
-      return getProfile(asyncAdapter, config.scope, options);
-    },
-
-    async createPlaybook(input) {
-      return asyncAdapter.insertPlaybook({ ...input, ...config.scope });
-    },
-
-    async createPlaybookFromTask(input) {
-      if (!config.structuredClient) {
-        throw new ProviderUnavailableError(
-          'createPlaybookFromTask requires a structuredClient in MemoryManagerConfig',
-        );
-      }
-      return createPlaybookFromTask(
-        { adapter: asyncAdapter, scope: config.scope, client: config.structuredClient },
-        input,
-      );
-    },
-
-    async revisePlaybook(playbookId, newInstructions, revisionReason, sourceSessionId) {
-      return revisePlaybook(asyncAdapter, config.scope, playbookId, newInstructions, revisionReason, sourceSessionId);
-    },
-
-    async getPlaybook(id) {
-      const playbook = await asyncAdapter.getPlaybookById(id);
-      if (!playbook) return null;
-      const norm = normalizeScope(config.scope);
-      if (
-        playbook.tenant_id !== norm.tenant_id ||
-        playbook.system_id !== norm.system_id ||
-        playbook.workspace_id !== norm.workspace_id ||
-        playbook.collaboration_id !== norm.collaboration_id ||
-        playbook.scope_id !== norm.scope_id
-      ) {
-        return null;
-      }
-      return playbook;
-    },
-
-    async listPlaybooks() {
-      return asyncAdapter.getActivePlaybooks(config.scope);
-    },
-
-    async searchPlaybooks(query, options) {
-      return findRelevantPlaybooks(asyncAdapter, config.scope, query, options);
-    },
-
-    async updatePlaybook(id, patch) {
-      const playbook = await asyncAdapter.getPlaybookById(id);
-      if (!playbook) return null;
-      const norm = normalizeScope(config.scope);
-      if (
-        playbook.tenant_id !== norm.tenant_id ||
-        playbook.system_id !== norm.system_id ||
-        playbook.workspace_id !== norm.workspace_id ||
-        playbook.collaboration_id !== norm.collaboration_id ||
-        playbook.scope_id !== norm.scope_id
-      ) {
-        return null;
-      }
-      return asyncAdapter.updatePlaybook(id, patch);
-    },
-
-    async recordPlaybookUse(id) {
-      const playbook = await asyncAdapter.getPlaybookById(id);
-      if (!playbook) {
-        throw new ResourceNotFoundError(`Playbook ${id} not found`);
-      }
-      const norm = normalizeScope(config.scope);
-      if (
-        playbook.tenant_id !== norm.tenant_id ||
-        playbook.system_id !== norm.system_id ||
-        playbook.workspace_id !== norm.workspace_id ||
-        playbook.collaboration_id !== norm.collaboration_id ||
-        playbook.scope_id !== norm.scope_id
-      ) {
-        throw new ScopeMismatchError(`Playbook ${id} does not belong to the requested scope`);
-      }
-      return asyncAdapter.recordPlaybookUse(id);
-    },
-
-    async addAssociation(input) {
-      // Validate source/target IDs are positive integers. Callers (HTTP/MCP)
-      // only check typeof number, so this is the authoritative guard.
-      if (!Number.isInteger(input.source_id) || input.source_id <= 0) {
-        throw new ValidationError(
-          `addAssociation: source_id must be a positive integer, got ${input.source_id}`,
-        );
-      }
-      if (!Number.isInteger(input.target_id) || input.target_id <= 0) {
-        throw new ValidationError(
-          `addAssociation: target_id must be a positive integer, got ${input.target_id}`,
-        );
-      }
-      if (input.source_kind === input.target_kind && input.source_id === input.target_id) {
-        throw new ValidationError('addAssociation: self-referential associations are not allowed');
-      }
-      // Validate confidence is in [0, 1] when provided.
-      if (input.confidence !== undefined) {
-        if (
-          typeof input.confidence !== 'number' ||
-          Number.isNaN(input.confidence) ||
-          input.confidence < 0 ||
-          input.confidence > 1
-        ) {
-          throw new ValidationError(
-            `addAssociation: confidence must be a number in [0, 1], got ${input.confidence}`,
-          );
-        }
-      }
-      // Resolve source and target: both must exist and belong to the caller's
-      // scope. Without this, callers can create orphaned or cross-scope edges,
-      // polluting the graph and weakening isolation guarantees.
-      const norm = normalizeScope(config.scope);
-      await assertAssociationEndpointInScope(
-        asyncAdapter, norm, input.source_kind, input.source_id, 'source',
-      );
-      await assertAssociationEndpointInScope(
-        asyncAdapter, norm, input.target_kind, input.target_id, 'target',
-      );
-      // When the caller does not specify provenance, infer from auto_generated:
-      // user-created (non-auto) edges are 'extracted' with full confidence.
-      const provenance = input.provenance ?? (input.auto_generated ? 'inferred' : 'extracted');
-      const confidence = input.confidence ?? (input.auto_generated ? 0.8 : 1.0);
-      return asyncAdapter.insertAssociation({
-        ...input,
-        ...norm,
-        provenance,
-        confidence,
-      });
-    },
-
-    async getAssociations(kind, id) {
-      const [from, to] = await Promise.all([
-        asyncAdapter.getAssociationsFrom(kind, id, config.scope),
-        asyncAdapter.getAssociationsTo(kind, id, config.scope),
-      ]);
-      return { from, to };
-    },
-
-    async traverseAssociations(kind, id, options) {
-      return traverseAssociations(asyncAdapter, config.scope, kind, id, options);
-    },
-
-    async removeAssociation(id) {
-      // Scope safety: verify the association belongs to the current scope by
-      // checking the association row's own scope columns. Scanning through
-      // active knowledge/playbooks/WM/work items would incorrectly reject
-      // associations attached to archived/expired/orphaned nodes, leaving
-      // stale edges permanently in the graph.
-      if (!Number.isInteger(id) || id <= 0) {
-        throw new ValidationError(`removeAssociation: id must be a positive integer, got ${id}`);
-      }
-      const association = await asyncAdapter.getAssociationById(id);
-      if (!association) {
-        throw new ResourceNotFoundError(`Association ${id} not found`);
-      }
-      const norm = normalizeScope(config.scope);
-      if (
-        association.tenant_id !== norm.tenant_id ||
-        association.system_id !== norm.system_id ||
-        association.workspace_id !== norm.workspace_id ||
-        association.collaboration_id !== norm.collaboration_id ||
-        association.scope_id !== norm.scope_id
-      ) {
-        throw new ScopeMismatchError(`Association ${id} not found in the current scope`);
-      }
-      await asyncAdapter.deleteAssociation(id);
-    },
-
-    async ingestDocument(content, options) {
-      if (!config.extractor) {
-        throw new ValidationError('An extractor is required for document ingestion');
-      }
-      const contentHash = createHash('sha256').update(content).digest('hex');
-      const existing = await asyncAdapter.getSourceDocumentByHash(contentHash, config.scope);
-      if (existing) {
-        return { document: existing, knowledge: [] };
-      }
-      const doc = await asyncAdapter.insertSourceDocument({
-        ...config.scope,
-        title: options.title,
-        content_hash: contentHash,
-        mime_type: options.mimeType ?? 'text/plain',
-        url: options.url ?? null,
-        metadata: options.metadata ?? {},
-        token_estimate: estimateTokens(content),
-      });
-      const facts = await config.extractor(content, [], []);
-      const created: KnowledgeMemory[] = [];
-      for (const fact of facts) {
-        const km = await asyncAdapter.insertKnowledgeMemory({
-          ...config.scope,
-          fact: config.redactText ? config.redactText({ kind: 'fact', text: fact.fact }) : fact.fact,
-          fact_type: fact.factType,
-          knowledge_class: manualKnowledgeClassForFactType(fact.factType),
-          source: 'manual',
-          confidence: fact.confidence,
-        });
-        created.push(km);
-      }
-      await maybeEmbedKnowledge(created);
-      await asyncAdapter.updateSourceDocument(doc.id, {
-        status: 'processed',
-        fact_count: created.length,
-        processed_at: Math.floor(Date.now() / 1000),
-      });
-      const updated = await asyncAdapter.getSourceDocumentById(doc.id);
-      return { document: updated ?? { ...doc, status: 'processed' as const, fact_count: created.length, processed_at: Math.floor(Date.now() / 1000) }, knowledge: created };
-    },
-
-    async getSourceDocument(id) {
-      const doc = await asyncAdapter.getSourceDocumentById(id);
-      if (!doc) return null;
-      if (!entityMatchesScope(doc, config.scope)) return null;
-      return doc;
-    },
-
-    async listSourceDocuments(options) {
-      return asyncAdapter.listSourceDocuments(config.scope, options);
-    },
-
-    async exportAsMarkdown(options) {
-      return exportAsMarkdown(asyncAdapter, config.scope, options);
-    },
-
-    async promoteResponse(turnId, options) {
-      if (!config.extractor) {
-        throw new ValidationError('An extractor is required for response promotion');
-      }
-      const turn = await asyncAdapter.getTurnById(turnId);
-      if (!turn) {
-        throw new ResourceNotFoundError(`Turn ${turnId} not found`);
-      }
-      if (!entityMatchesScope(turn, config.scope)) {
-        throw new ScopeMismatchError(`Turn ${turnId} does not belong to the current scope`);
-      }
-      if (turn.role !== 'assistant') {
-        throw new ValidationError('promoteResponse supports only assistant turns');
-      }
-      const facts = await config.extractor(turn.content, [], []);
-      const created: KnowledgeMemory[] = [];
-      for (const fact of facts) {
-        if (options?.factTypes && !options.factTypes.includes(fact.factType)) continue;
-        if (options?.minConfidence) {
-          const levels: Record<string, number> = { low: 0, medium: 1, high: 2 };
-          if ((levels[fact.confidence] ?? 0) < (levels[options.minConfidence] ?? 0)) continue;
-        }
-        const km = await asyncAdapter.insertKnowledgeMemory({
-          ...config.scope,
-          fact: config.redactText ? config.redactText({ kind: 'fact', text: fact.fact }) : fact.fact,
-          fact_type: fact.factType,
-          knowledge_class: manualKnowledgeClassForFactType(fact.factType),
-          source: 'manual',
-          confidence: fact.confidence,
-        });
-        created.push(km);
-      }
-      await maybeEmbedKnowledge(created);
-      return created;
-    },
-
-    // --- Phase 5 methods ---
-
-    async discover(options) {
-      return discover(resolveSyncAdapter(config, asyncAdapter, 'discover()'), config.scope, options);
-    },
-
-    async getGraphReport(options) {
-      return getGraphReport(
-        resolveSyncAdapter(config, asyncAdapter, 'getGraphReport()'),
-        config.scope,
-        options,
-      );
-    },
-
-    async getFactsAt(timestamp, options) {
-      const queryOptions: TemporalQueryOptions = {
-        timestamp,
-        scope: config.scope,
-        knowledgeClass: options?.knowledgeClass,
-        fallbackToReplay: options?.fallbackToReplay ?? true,
-      };
-      const getContextAtFn = async (asOf: number) =>
-        (await buildReplayedContext(asOf)).context;
-      return getFactsAt(asyncAdapter, getContextAtFn, queryOptions);
-    },
-
-    async reflectOnKnowledge(options) {
-      const result = await reflectOnKnowledge(asyncAdapter, config.scope, {
-        ...options,
-        scope: options?.scope ?? normalizeScope(config.scope),
-        existingAliases: options?.existingAliases ?? config.aliasMap,
-      }, config.extractor);
-      lastReflectionResult = result;
-      lastReflectionTimestamp = Math.floor(Date.now() / 1000);
-      return result;
-    },
-
-    async derive(options) {
-      const deriveScope = options?.scope ?? config.scope;
-      const reflection = await reflectOnKnowledge(asyncAdapter, deriveScope, {
-        existingAliases: config.aliasMap,
-      }, config.extractor);
-      const activeKnowledge = await asyncAdapter.getActiveKnowledgeMemory(deriveScope);
-      const outputs = derive(reflection, activeKnowledge, options);
-      lastDerivedOutputs = outputs;
-      lastDerivedTimestamp = Math.floor(Date.now() / 1000);
-      return outputs;
-    },
-
-    async getCurationSummary(input, options) {
-      // Auto-populate from cached manager state when caller provides no input
-      const merged: import('./curation.js').CurationInput = {
-        maintenance: input?.maintenance ?? lastMaintenanceReport,
-        maintenanceTimestamp: input?.maintenanceTimestamp ?? lastMaintenanceTimestamp,
-        reflection: input?.reflection ?? lastReflectionResult,
-        reflectionTimestamp: input?.reflectionTimestamp ?? lastReflectionTimestamp,
-        derived: input?.derived ?? lastDerivedOutputs,
-        derivedTimestamp: input?.derivedTimestamp ?? lastDerivedTimestamp,
-        ontologyActions: input?.ontologyActions,
-      };
-      return getCurationSummary(merged, options);
-    },
-
-    async getCoreMemory(options) {
-      return getCoreMemory(asyncAdapter, config.scope, options);
-    },
-
-    setAliases(aliasMap) {
-      config.aliasMap = aliasMap;
-    },
-
-    getAliases() {
-      return config.aliasMap;
-    },
-
-    async saveAliases(aliasMap) {
-      config.aliasMap = aliasMap;
-      await asyncAdapter.setScopeConfig(
-        config.scope,
-        SCOPE_CONFIG_KEYS.aliases,
-        serializeAliases(aliasMap),
-      );
-    },
-
-    async loadAliases() {
-      const stored = await asyncAdapter.getScopeConfig(config.scope, SCOPE_CONFIG_KEYS.aliases);
-      const aliasMap = parseAliases(stored);
-      if (aliasMap) {
-        config.aliasMap = aliasMap;
-      }
-      return aliasMap;
-    },
-
-    async getAliasCandidates(options) {
-      const knowledge = await asyncAdapter.getActiveKnowledgeMemory(config.scope);
-      return discoverAliasCandidates(knowledge, {
-        ...options,
-        existingAliases: options?.existingAliases ?? config.aliasMap,
-      });
-    },
-
-    setOntology(ontology) {
-      config.ontology = ontology;
-    },
-
-    getOntology() {
-      return config.ontology;
-    },
-
-    async saveOntology(ontology) {
-      config.ontology = ontology;
-      await asyncAdapter.setScopeConfig(
-        config.scope,
-        SCOPE_CONFIG_KEYS.ontology,
-        serializeOntology(ontology),
-      );
-    },
-
-    async loadOntology() {
-      const stored = await asyncAdapter.getScopeConfig(config.scope, SCOPE_CONFIG_KEYS.ontology);
-      const ontology = parseOntology(stored);
-      if (ontology) {
-        config.ontology = ontology;
-      }
-      return ontology;
-    },
-
-    exportBundle(name, options) {
-      return exportBundle(resolveSyncAdapter(config, asyncAdapter, 'exportBundle()'), name, {
-        ...options,
-        scope: config.scope, // Always enforce manager's scope
-      });
-    },
-
-    importBundle(bundle, options) {
-      return importBundle(resolveSyncAdapter(config, asyncAdapter, 'importBundle()'), bundle, options);
-    },
-
-    refreshDocuments(documents) {
-      return refreshDocuments(
-        resolveSyncAdapter(config, asyncAdapter, 'refreshDocuments()'),
-        config.scope,
-        documents,
-      );
     },
 
     async close() {
@@ -3486,5 +1986,97 @@ export function createMemoryManager(config: MemoryManagerConfig): MemoryManager 
         await asyncAdapter.close();
       }
     },
+
+    // ---- @deprecated flat shims → namespace twins (Phase 6.2, D-BREAK) ----
+    // Governance
+    getContextGovernance: (...args) => governanceNamespace.getContextGovernance(...args),
+    setDefaultContextContract: (...args) => governanceNamespace.setDefaultContextContract(...args),
+    putContextContract: (...args) => governanceNamespace.putContextContract(...args),
+    deleteContextContract: (...args) => governanceNamespace.deleteContextContract(...args),
+    putContextInvariant: (...args) => governanceNamespace.putContextInvariant(...args),
+    deleteContextInvariant: (...args) => governanceNamespace.deleteContextInvariant(...args),
+    getContextEscalationPolicy: (...args) => governanceNamespace.getContextEscalationPolicy(...args),
+    setContextEscalationPolicy: (...args) => governanceNamespace.setContextEscalationPolicy(...args),
+    requestContextExpansion: (...args) => governanceNamespace.requestContextExpansion(...args),
+
+    // Temporal
+    getContextAt: (...args) => temporal.getContextAt(...args),
+    getStateAt: (...args) => temporal.getStateAt(...args),
+    getTimeline: (...args) => temporal.getTimeline(...args),
+    diffState: (...args) => temporal.diffState(...args),
+    listMemoryEvents: (...args) => temporal.listMemoryEvents(...args),
+    getSessionBootstrapAt: (...args) => temporal.getSessionBootstrapAt(...args),
+    captureSnapshot: (...args) => temporal.captureSnapshot(...args),
+    streamChanges: (...args) => temporal.streamChanges(...args),
+    resolveChangeStreamCursor: (...args) => temporal.resolveChangeStreamCursor(...args),
+    listKnowledgeChanges: (...args) => temporal.listKnowledgeChanges(...args),
+    pollForChanges: (...args) => temporal.pollForChanges(...args),
+    getFactsAt: (...args) => temporal.getFactsAt(...args),
+    getContextMonitor: (...args) => temporal.getContextMonitor(...args),
+    getRecentCompactionLogs: (...args) => temporal.getRecentCompactionLogs(...args),
+
+    // Coordination
+    updateWorkItem: (...args) => coordination.updateWorkItem(...args),
+    claimWorkItem: (...args) => coordination.claimWorkItem(...args),
+    renewWorkClaim: (...args) => coordination.renewWorkClaim(...args),
+    releaseWorkClaim: (...args) => coordination.releaseWorkClaim(...args),
+    listWorkClaims: (...args) => coordination.listWorkClaims(...args),
+    handoffWorkItem: (...args) => coordination.handoffWorkItem(...args),
+    acceptHandoff: (...args) => coordination.acceptHandoff(...args),
+    rejectHandoff: (...args) => coordination.rejectHandoff(...args),
+    cancelHandoff: (...args) => coordination.cancelHandoff(...args),
+    listPendingHandoffs: (...args) => coordination.listPendingHandoffs(...args),
+
+    // Playbooks
+    createPlaybook: (...args) => playbooks.createPlaybook(...args),
+    createPlaybookFromTask: (...args) => playbooks.createPlaybookFromTask(...args),
+    revisePlaybook: (...args) => playbooks.revisePlaybook(...args),
+    getPlaybook: (...args) => playbooks.getPlaybook(...args),
+    listPlaybooks: (...args) => playbooks.listPlaybooks(...args),
+    searchPlaybooks: (...args) => playbooks.searchPlaybooks(...args),
+    updatePlaybook: (...args) => playbooks.updatePlaybook(...args),
+    recordPlaybookUse: (...args) => playbooks.recordPlaybookUse(...args),
+
+    // Graph
+    addAssociation: (...args) => graph.addAssociation(...args),
+    getAssociations: (...args) => graph.getAssociations(...args),
+    traverseAssociations: (...args) => graph.traverseAssociations(...args),
+    removeAssociation: (...args) => graph.removeAssociation(...args),
+    getGraphReport: (...args) => graph.getGraphReport(...args),
+    discover: (...args) => graph.discover(...args),
+
+    // Curation
+    inspectKnowledge: (...args) => curationNamespace.inspectKnowledge(...args),
+    listKnowledge: (...args) => curationNamespace.listKnowledge(...args),
+    getKnowledgeAudits: (...args) => curationNamespace.getKnowledgeAudits(...args),
+    getDueReverification: (...args) => curationNamespace.getDueReverification(...args),
+    reverifyKnowledge: (...args) => curationNamespace.reverifyKnowledge(...args),
+    runReverification: (...args) => curationNamespace.runReverification(...args),
+    reembedKnowledge: (...args) => curationNamespace.reembedKnowledge(...args),
+    searchEpisodes: (...args) => curationNamespace.searchEpisodes(...args),
+    summarizeEpisode: (...args) => curationNamespace.summarizeEpisode(...args),
+    searchCognitive: (...args) => curationNamespace.searchCognitive(...args),
+    reflectOnKnowledge: (...args) => curationNamespace.reflectOnKnowledge(...args),
+    derive: (...args) => curationNamespace.derive(...args),
+    getCurationSummary: (...args) => curationNamespace.getCurationSummary(...args),
+    getCoreMemory: (...args) => curationNamespace.getCoreMemory(...args),
+    ingestDocument: (...args) => curationNamespace.ingestDocument(...args),
+    getSourceDocument: (...args) => curationNamespace.getSourceDocument(...args),
+    listSourceDocuments: (...args) => curationNamespace.listSourceDocuments(...args),
+    exportAsMarkdown: (...args) => curationNamespace.exportAsMarkdown(...args),
+    promoteResponse: (...args) => curationNamespace.promoteResponse(...args),
+    setAliases: (...args) => curationNamespace.setAliases(...args),
+    getAliases: (...args) => curationNamespace.getAliases(...args),
+    saveAliases: (...args) => curationNamespace.saveAliases(...args),
+    loadAliases: (...args) => curationNamespace.loadAliases(...args),
+    getAliasCandidates: (...args) => curationNamespace.getAliasCandidates(...args),
+    setOntology: (...args) => curationNamespace.setOntology(...args),
+    getOntology: (...args) => curationNamespace.getOntology(...args),
+    saveOntology: (...args) => curationNamespace.saveOntology(...args),
+    loadOntology: (...args) => curationNamespace.loadOntology(...args),
+    exportBundle: (...args) => curationNamespace.exportBundle(...args),
+    importBundle: (...args) => curationNamespace.importBundle(...args),
+    refreshDocuments: (...args) => curationNamespace.refreshDocuments(...args),
   };
 }
+

@@ -1,3 +1,4 @@
+import { ProviderUnavailableError } from '../contracts/errors.js';
 import type { Summarizer } from '../core/orchestrator.js';
 import { createClientSummarizer, type StructuredGenerationClient } from './client.js';
 
@@ -21,9 +22,10 @@ export function createClaudeSummarizer(
     let sdkModule: any;
     try {
       sdkModule = await import(moduleName);
-    } catch {
-      throw new Error(
+    } catch (error) {
+      throw new ProviderUnavailableError(
         "memory-layer: install '@anthropic-ai/sdk' to use createClaudeSummarizer()",
+        { cause: error },
       );
     }
 

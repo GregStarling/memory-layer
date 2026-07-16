@@ -1,4 +1,5 @@
 import type { EmbeddingGenerator, EmbeddingVector } from '../contracts/embedding.js';
+import { ProviderUnavailableError } from '../contracts/errors.js';
 import {
   batchedGenerate,
   createCachedEmbeddingGenerator,
@@ -45,10 +46,11 @@ export function createOpenAIEmbeddingGenerator(
           const mod = await import(moduleName);
           const OpenAI = mod.default ?? mod;
           return new OpenAI({ apiKey: options?.apiKey });
-        } catch {
-          throw new Error(
+        } catch (error) {
+          throw new ProviderUnavailableError(
             'memory-layer: OpenAI embedding generator requires the "openai" package. ' +
               'Install it with: npm install openai',
+            { cause: error },
           );
         }
       })();
